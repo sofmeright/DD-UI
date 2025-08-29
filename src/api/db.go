@@ -15,7 +15,7 @@ import (
 )
 
 // Exported pool for handlers.
-var db *pgxpool.Pool
+var DB *pgxpool.Pool
 
 // ---- ENV helpers ----
 

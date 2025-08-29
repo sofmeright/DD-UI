@@ -30,27 +30,49 @@ func makeRouter() http.Handler {
 		MaxAge:           300,
 	}))
 
-	// -------- Public API
+	// -------- API
 	r.Route("/api", func(api chi.Router) {
 		api.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-			respondJSON(w, Health{
-				Status:    "ok",
-				StartedAt: startedAt,
-				Edition:   "Community",
+			respondJSON(w, Health{Status: "ok", StartedAt: startedAt, Edition: "Community"})
+		})
+	
+		// session probe MUST be public
+		api.Get("/session", SessionHandler)
+	
+		// everything below requires auth
+		api.Group(func(priv chi.Router) {
+			priv.Use(RequireAuth)
+	
+			priv.Get("/hosts", func(w http.ResponseWriter, r *http.Request) {
+				writeJSON(w, http.StatusOK, map[string]any{"items": GetHosts()})
+			})
+	
+			// POST /api/inventory/reload  (optional body: {"path":"/new/path"})
+			priv.Post("/inventory/reload", func(w http.ResponseWriter, r *http.Request) {
+				var body struct{ Path string `json:"path"` }
+				_ = json.NewDecoder(r.Body).Decode(&body)
+	
+				var err error
+				if strings.TrimSpace(body.Path) != "" {
+					err = ReloadInventoryWithPath(body.Path)
+				} else {
+					err = ReloadInventory()
+				}
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
 			})
 		})
-
-		// IMPORTANT: do NOT wrap this with RequireAuth.
-		// The UI probes it to learn whether a session exists.
-		api.Get("/session", SessionHandler)
 	})
+
 	// legacy alias
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		respondJSON(w, Health{Status: "ok", StartedAt: startedAt, Edition: "Community"})
 	})
 
 	// -------- Auth endpoints (must come BEFORE SPA fallback)
-	// expose both forms for compatibility with the UI
 	r.Get("/login", LoginHandler)
 	r.Get("/auth/login", LoginHandler) // alias
 	r.Get("/auth/callback", CallbackHandler)

@@ -1,4 +1,3 @@
-// src/api/web.go
 package main
 
 import (
@@ -13,37 +12,41 @@ import (
 	"github.com/go-chi/cors"
 )
 
-var startedAt = time.Now().UTC()
-
 type Health struct {
 	Status    string    `json:"status"`
 	StartedAt time.Time `json:"startedAt"`
 	Edition   string    `json:"edition"`
 }
 
+var startedAt = time.Now()
+
 func makeRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Use(cors.AllowAll().Handler)
 
-	// health (both paths for compatibility)
-	h := func(w http.ResponseWriter, _ *http.Request) {
-		respondJSON(w, Health{Status: "ok", StartedAt: startedAt, Edition: "Community"})
-	}
-	r.Get("/healthz", h)
-	r.Get("/api/healthz", h)
+	// --- Public API
+	r.Route("/api", func(api chi.Router) {
+		api.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			respondJSON(w, Health{Status: "ok", StartedAt: startedAt, Edition: "Community"})
+		})
+		api.Get("/session", SessionHandler) // no auth; returns 200 with user or empty user
+	})
 
-	// auth endpoints
+	// --- Auth endpoints (server-handled, not SPA)
 	r.Get("/login", LoginHandler)
-	r.Get("/auth/callback", CallbackHandler) // OIDC_REDIRECT_URL must point to this path
+	r.Get("/auth/callback", CallbackHandler)
 	r.Post("/logout", LogoutHandler)
 
-	// session: 401 if not signed in, user JSON if signed in
-	r.With(RequireAuth).Get("/api/session", SessionHandler)
-
-	// SPA
+	// --- Static SPA (Vite build)
 	uiRoot := "/home/ddui/ui/dist"
 	fs := http.FileServer(http.Dir(uiRoot))
 
+	// serve built assets directly
+	r.Get("/assets/*", func(w http.ResponseWriter, req *http.Request) {
+		fs.ServeHTTP(w, req)
+	})
+
+	// SPA fallback
 	r.Get("/*", func(w http.ResponseWriter, req *http.Request) {
 		path := filepath.Join(uiRoot, strings.TrimPrefix(req.URL.Path, "/"))
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {

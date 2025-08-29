@@ -44,7 +44,12 @@ func makeRouter() http.Handler {
 			priv.Use(RequireAuth)
 	
 			priv.Get("/hosts", func(w http.ResponseWriter, r *http.Request) {
-				writeJSON(w, http.StatusOK, map[string]any{"items": GetHosts()})
+				items, err := ListHosts(r.Context())
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"items": items})
 			})
 	
 			// POST /api/inventory/reload  (optional body: {"path":"/new/path"})

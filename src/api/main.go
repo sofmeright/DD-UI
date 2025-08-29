@@ -14,6 +14,9 @@ func main() {
 	if err := InitAuthFromEnv(); err != nil {
 		log.Fatalf("OIDC setup failed: %v", err)
 	}
+	if err := InitDBFromEnv(ctx); err != nil {
+		log.Fatalf("DB init failed: %v", err)
+	}
 	if err := InitInventory(); err != nil {
 		log.Fatalf("inventory init failed: %v", err)
 	}

@@ -17,6 +17,7 @@ type Host struct {
 	Name string            `json:"name"`
 	Addr string            `json:"addr"`           // from ansible_host
 	Vars map[string]string `json:"vars,omitempty"` // extra vars
+	Groups []string        `json:"groups,omitempty"`
 }
 
 var (
@@ -77,11 +78,12 @@ func loadInventory(p string) error {
 		return err
 	}
 	kind, parsed, err := detectInventoryFormat(b)
-	if err != nil {
+	// after parsed := []Host{...}
+	if err := ImportInventoryToDB(context.Background(), parsed); err != nil {
 		return err
 	}
 	invMu.Lock()
-	hosts = parsed
+	hosts = parsed // keep in-memory cache if you like (optional)
 	invMu.Unlock()
 	log.Printf("inventory: loaded %d hosts from %s (%s)", len(parsed), p, kind)
 	return nil

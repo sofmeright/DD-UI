@@ -1,3 +1,4 @@
+// src/api/ci_run.rs
 use axum::{extract::State, Json, response::IntoResponse};
 use serde::Deserialize;
 use futures_util::stream::{self};
@@ -14,7 +15,7 @@ pub struct CiRunRequest {
 }
 
 pub async fn ci_run(
-    State(_cfg): State<AppConfig>),
+    State(_cfg): State<AppConfig>,
     State(ents): State<Entitlements>,
     Json(_req): Json<CiRunRequest>,
 ) -> impl IntoResponse {

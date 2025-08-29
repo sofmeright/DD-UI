@@ -249,10 +249,16 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func SessionHandler(w http.ResponseWriter, r *http.Request) {
-	u := CurrentUser(r.Context())
-	writeJSON(w, http.StatusOK, map[string]any{
-		"user": u,
-	})
+	sess, _ := store.Get(r, sessionName)
+	u, ok := sess.Values["user"].(User)
+	exp, _ := sess.Values["exp"].(int64)
+
+	if !ok || time.Now().Unix() > exp {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+
+	writeJSON(w, http.StatusOK, map[string]any{"user": u})
 }
 
 type ctxKey string

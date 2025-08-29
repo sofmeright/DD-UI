@@ -3,9 +3,11 @@ package main
 import (
 	"context"
 	"crypto/rand"
+    "encoding/gob"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
+    "log"
 	"net/http"
 	"os"
 	"strings"
@@ -15,6 +17,10 @@ import (
 	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
 )
+
+func init() {
+    gob.Register(User{}) // ensure gorilla/sessions can (de)serialize User
+}
 
 type User struct {
 	Sub   string `json:"sub"`
@@ -163,9 +169,9 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func CallbackHandler(w http.ResponseWriter, r *http.Request) {
-	tmp, _ := store.Get(r, oauthTmpName)
-	wantState, _ := tmp.Values["state"].(string)
-	nonce, _ := tmp.Values["nonce"].(string)
+	// expire the temporary oauth cookie
+	tmp.Options.MaxAge = -1
+	_ = tmp.Save(r, w)
 	tmp.Options = &sessions.Options{
 		Path:     "/",
 		MaxAge:   -1,
@@ -238,6 +244,8 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	sess.Values["exp"] = time.Now().Add(7 * 24 * time.Hour).Unix()
 	_ = sess.Save(r, w)
 
+	log.Printf("auth: login ok sub=%s email=%s", u.Sub, u.Email)
+
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
@@ -249,16 +257,23 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func SessionHandler(w http.ResponseWriter, r *http.Request) {
-	sess, _ := store.Get(r, sessionName)
-	u, ok := sess.Values["user"].(User)
-	exp, _ := sess.Values["exp"].(int64)
+    sess, _ := store.Get(r, sessionName)
 
-	if !ok || time.Now().Unix() > exp {
-		http.Error(w, "unauthorized", http.StatusUnauthorized)
-		return
-	}
+    // try to decode user and expiry
+    u, ok := sess.Values["user"].(User)
+    exp, _ := sess.Values["exp"].(int64)
 
-	writeJSON(w, http.StatusOK, map[string]any{"user": u})
+    if !ok || exp == 0 || time.Now().Unix() > exp {
+        // signed out
+        writeJSON(w, http.StatusOK, map[string]any{
+            "user": nil,
+        })
+        return
+    }
+
+    writeJSON(w, http.StatusOK, map[string]any{
+        "user": u,
+    })
 }
 
 type ctxKey string

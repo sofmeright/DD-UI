@@ -44,9 +44,9 @@ type AuthConfig struct {
 }
 
 const (
-	sessionName   = "ddui_sess"
-	oauthTmpName  = "ddui_oauth"
-	cookieMaxAge  = 7 * 24 * 3600 // 7d
+	sessionName  = "ddui_sess"
+	oauthTmpName = "ddui_oauth"
+	cookieMaxAge = 7 * 24 * 3600
 )
 
 func env(k, def string) string {
@@ -57,7 +57,6 @@ func env(k, def string) string {
 }
 
 func readSecretMaybeFile(v string) (string, error) {
-	// supports either raw secret or @/path/to/secretfile
 	if v == "" {
 		return "", nil
 	}
@@ -151,7 +150,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	tmp.Values["nonce"] = nonce
 	tmp.Options = &sessions.Options{
 		Path:     "/",
-		MaxAge:   300, // 5 min
+		MaxAge:   300,
 		HttpOnly: true,
 		Secure:   cfg.SecureCookies,
 		SameSite: http.SameSiteLaxMode,
@@ -167,7 +166,14 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	tmp, _ := store.Get(r, oauthTmpName)
 	wantState, _ := tmp.Values["state"].(string)
 	nonce, _ := tmp.Values["nonce"].(string)
-	_ = store.MaxAge(0)
+	tmp.Options = &sessions.Options{
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   cfg.SecureCookies,
+		SameSite: http.SameSiteLaxMode,
+		Domain:   cfg.CookieDomain,
+	}
 	_ = tmp.Save(r, w)
 
 	if r.URL.Query().Get("state") != wantState || wantState == "" {
@@ -203,7 +209,7 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		Email  string `json:"email"`
 		Name   string `json:"name"`
 		Pic    string `json:"picture"`
-		HD     string `json:"hd"` // google hosted domain
+		HD     string `json:"hd"`
 		Domain string `json:"domain"`
 		Exp    int64  `json:"exp"`
 	}
@@ -248,8 +254,6 @@ func SessionHandler(w http.ResponseWriter, r *http.Request) {
 		"user": u,
 	})
 }
-
-// --- middleware/utils ---
 
 type ctxKey string
 

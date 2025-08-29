@@ -29,10 +29,10 @@ func makeRouter() http.Handler {
 		api.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 			respondJSON(w, Health{Status: "ok", StartedAt: startedAt, Edition: "Community"})
 		})
-		api.Get("/session", SessionHandler) // no auth; returns 200 with user or empty user
+		api.Get("/session", SessionHandler) // 200 with user if logged in; 200 with empty user otherwise (adjust if you prefer 401)
 	})
 
-	// --- Auth endpoints (server-handled, not SPA)
+	// --- Auth endpoints (server-handled; must come before SPA fallback)
 	r.Get("/login", LoginHandler)
 	r.Get("/auth/callback", CallbackHandler)
 	r.Post("/logout", LogoutHandler)
@@ -46,7 +46,7 @@ func makeRouter() http.Handler {
 		fs.ServeHTTP(w, req)
 	})
 
-	// SPA fallback
+	// SPA fallback (last)
 	r.Get("/*", func(w http.ResponseWriter, req *http.Request) {
 		path := filepath.Join(uiRoot, strings.TrimPrefix(req.URL.Path, "/"))
 		if info, err := os.Stat(path); err == nil && !info.IsDir() {

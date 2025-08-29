@@ -13,6 +13,18 @@ import (
 )
 
 func main() {
+	addr := os.Getenv("DDUI_BIND")
+	if addr == "" { addr = ":8080" }
+
+	if err := InitAuthFromEnv(); err != nil {
+		log.Fatalf("OIDC setup failed: %v", err)
+	}
+	log.Printf("DDUI API on %s (ui=/home/ddui/ui/dist)", addr)
+
+	if err := http.ListenAndServe(addr, makeRouter()); err != nil {
+		log.Fatal(err)
+	}
+	
 	if err := InitAuthFromEnv(); err != nil {
 		log.Fatalf("auth init: %v", err)
 	}

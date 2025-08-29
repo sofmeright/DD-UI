@@ -7,7 +7,7 @@ COPY ui/ .
 RUN npm run build
 
 # --- Go build ---
-FROM golang:1.22-alpine AS api
+FROM golang:1.23-alpine AS api
 WORKDIR /src/api
 COPY src/api/go.mod ./
 RUN go mod download

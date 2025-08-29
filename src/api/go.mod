@@ -1,6 +1,6 @@
 module ddui
 
-go 1.22
+go 1.23
 
 require (
 	github.com/coreos/go-oidc/v3 v3.11.0

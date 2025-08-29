@@ -1,13 +1,13 @@
 # --- UI build ---
 FROM node:20-alpine AS ui
 WORKDIR /ui
-COPY ui/package*.json ./
+COPY ui/package.json ui/package-lock.json* ./
 RUN if [ -f package-lock.json ]; then \
-        npm ci --no-audit --no-fund; \
+        npm ci --include=dev --no-audit --no-fund; \
     else \
-        npm install --no-audit --no-fund; \
+        npm install --include=dev --no-audit --no-fund; \
     fi
-COPY ui ./ 
+COPY ui/ .
 RUN npm run build
 
 # --- Rust build ---
@@ -24,8 +24,8 @@ WORKDIR /home/ddui
 COPY --from=builder /app/target/release/ddui /usr/local/bin/ddui
 COPY --from=ui /ui/dist ./ui/dist
 ENV UI_DIST=/home/ddui/ui/dist
-ENV BIND_ADDR=0.0.0.0:8080
-EXPOSE 8080
+ENV BIND_ADDR=0.0.0.0:4421
+EXPOSE 4421
 ENV RUST_LOG=info
 
 # Inline healthcheck (allowing extra startup time for DH param/gen etc.)

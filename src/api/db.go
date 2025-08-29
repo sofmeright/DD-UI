@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
-	"os"
 	"sort"
 	"strconv"
 	"strings"
@@ -16,7 +15,7 @@ import (
 )
 
 // Exported pool for handlers.
-var DB *pgxpool.Pool
+var db *pgxpool.Pool
 
 // ---- ENV helpers ----
 

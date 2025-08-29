@@ -1,21 +1,8 @@
-import * as React from "react";
-import { cva, type VariantProps } from "class-variance-authority";
-import { cn } from "@/lib/utils";
+import React from "react";
 
-const badgeVariants = cva(
-  "inline-flex items-center rounded-md border px-2 py-0.5 text-xs font-medium",
-  {
-    variants: {
-      variant: {
-        default: "border-transparent bg-slate-800 text-slate-100",
-        outline: "border-slate-700/60 text-slate-300 bg-transparent"
-      }
-    },
-    defaultVariants: { variant: "default" }
-  }
-);
-
-export interface BadgeProps extends React.HTMLAttributes<HTMLDivElement>, VariantProps<typeof badgeVariants> {}
-export const Badge = ({ className, variant, ...props }: BadgeProps) => (
-  <div className={cn(badgeVariants({ variant }), className)} {...props} />
-);
+export function Badge({ className="", variant="default", children }: React.PropsWithChildren<{className?: string; variant?: "default"|"outline"}>) {
+  const v = variant === "outline"
+    ? "border border-slate-700/60 text-slate-300"
+    : "bg-slate-800 text-slate-200";
+  return <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] ${v} ${className}`}>{children}</span>;
+}

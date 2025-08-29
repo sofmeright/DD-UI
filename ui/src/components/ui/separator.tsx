@@ -1,14 +1,5 @@
-import * as React from "react";
-import { cn } from "@/lib/utils";
+import React from "react";
 
-export function Separator({ className, orientation = "horizontal" as "horizontal" | "vertical" }) {
-  return (
-    <div
-      className={cn(
-        "bg-slate-800",
-        orientation === "horizontal" ? "h-px w-full" : "w-px h-full",
-        className
-      )}
-    />
-  );
+export function Separator({ orientation="horizontal", className="" }: {orientation?: "horizontal"|"vertical"; className?: string}) {
+  return <div className={`${orientation==="vertical" ? "w-px" : "h-px"} bg-slate-800 ${className}`} />;
 }

@@ -1,40 +1,30 @@
-import * as React from "react";
-import * as TabsPr from "@radix-ui/react-tabs";
-import { cn } from "@/lib/utils";
+import React, { createContext, useContext, useState } from "react";
 
-export const Tabs = TabsPr.Root;
+type Ctx = { value: string; setValue: (v:string)=>void };
+const TabsCtx = createContext<Ctx | null>(null);
 
-export const TabsList = React.forwardRef<
-  React.ElementRef<typeof TabsPr.List>,
-  React.ComponentPropsWithoutRef<typeof TabsPr.List>
->(({ className, ...props }, ref) => (
-  <TabsPr.List
-    ref={ref}
-    className={cn("inline-flex items-center gap-1 rounded-lg p-1", className)}
-    {...props}
-  />
-));
-TabsList.displayName = "TabsList";
+export function Tabs({ defaultValue, children, className="" }: React.PropsWithChildren<{defaultValue: string; className?: string}>) {
+  const [value, setValue] = useState(defaultValue);
+  return <TabsCtx.Provider value={{value,setValue}}><div className={className}>{children}</div></TabsCtx.Provider>;
+}
 
-export const TabsTrigger = React.forwardRef<
-  React.ElementRef<typeof TabsPr.Trigger>,
-  React.ComponentPropsWithoutRef<typeof TabsPr.Trigger>
->(({ className, ...props }, ref) => (
-  <TabsPr.Trigger
-    ref={ref}
-    className={cn(
-      "inline-flex items-center justify-center whitespace-nowrap rounded-md px-3 py-1.5 text-sm font-medium text-slate-300 data-[state=active]:bg-slate-800 data-[state=active]:text-white",
-      className
-    )}
-    {...props}
-  />
-));
-TabsTrigger.displayName = "TabsTrigger";
+export function TabsList({ children, className="" }: React.PropsWithChildren<{className?: string}>) {
+  return <div className={`inline-flex rounded-xl overflow-hidden ${className}`}>{children}</div>;
+}
 
-export const TabsContent = React.forwardRef<
-  React.ElementRef<typeof TabsPr.Content>,
-  React.ComponentPropsWithoutRef<typeof TabsPr.Content>
->(({ className, ...props }, ref) => (
-  <TabsPr.Content ref={ref} className={cn("mt-2", className)} {...props} />
-));
-TabsContent.displayName = "TabsContent";
+export function TabsTrigger({ value, children }: React.PropsWithChildren<{value: string}>) {
+  const ctx = useContext(TabsCtx)!;
+  const active = ctx.value === value;
+  return (
+    <button
+      className={`px-4 py-2 text-sm border ${active ? "bg-slate-800 text-white border-slate-700" : "bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800"}`}
+      onClick={()=>ctx.setValue(value)}
+    >{children}</button>
+  );
+}
+
+export function TabsContent({ value, children, className="" }: React.PropsWithChildren<{value: string; className?: string}>) {
+  const ctx = useContext(TabsCtx)!;
+  if (ctx.value !== value) return null;
+  return <div className={className}>{children}</div>;
+}

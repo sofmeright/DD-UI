@@ -18,27 +18,47 @@ type Health struct {
 	Edition   string    `json:"edition"`
 }
 
-var startedAt = time.Now()
-
 func makeRouter() http.Handler {
 	r := chi.NewRouter()
-	r.Use(cors.AllowAll().Handler)
 
-	// --- Public API
+	// CORS – permissive for now; tighten later
+	r.Use(cors.Handler(cors.Options{
+		AllowedOrigins:   []string{"*"},
+		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+		AllowedHeaders:   []string{"Accept", "Content-Type", "Authorization"},
+		AllowCredentials: true,
+		MaxAge:           300,
+	}))
+
+	// -------- Public API
 	r.Route("/api", func(api chi.Router) {
 		api.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-			respondJSON(w, Health{Status: "ok", StartedAt: startedAt, Edition: "Community"})
+			respondJSON(w, Health{
+				Status:    "ok",
+				StartedAt: startedAt,
+				Edition:   "Community",
+			})
 		})
-		api.Get("/session", SessionHandler) // 200 with user if logged in; 200 with empty user otherwise (adjust if you prefer 401)
+
+		// IMPORTANT: do NOT wrap this with RequireAuth.
+		// The UI probes it to learn whether a session exists.
+		api.Get("/session", SessionHandler)
+	})
+	// legacy alias
+	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+		respondJSON(w, Health{Status: "ok", StartedAt: startedAt, Edition: "Community"})
 	})
 
-	// --- Auth endpoints (server-handled; must come before SPA fallback)
+	// -------- Auth endpoints (must come BEFORE SPA fallback)
+	// expose both forms for compatibility with the UI
 	r.Get("/login", LoginHandler)
+	r.Get("/auth/login", LoginHandler) // alias
 	r.Get("/auth/callback", CallbackHandler)
 	r.Post("/logout", LogoutHandler)
+	r.Post("/auth/logout", LogoutHandler) // alias
 
-	// --- Static SPA (Vite build)
-	uiRoot := "/home/ddui/ui/dist"
+	// -------- Static SPA (Vite)
+	uiRoot := env("DDUI_UI_DIR", "/home/ddui/ui/dist")
 	fs := http.FileServer(http.Dir(uiRoot))
 
 	// serve built assets directly
@@ -48,18 +68,8 @@ func makeRouter() http.Handler {
 
 	// SPA fallback (last)
 	r.Get("/*", func(w http.ResponseWriter, req *http.Request) {
-		path := filepath.Join(uiRoot, strings.TrimPrefix(req.URL.Path, "/"))
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			fs.ServeHTTP(w, req)
+		if strings.HasPrefix(req.URL.Path, "/api") || strings.HasPrefix(req.URL.Path, "/auth") {
+			http.NotFound(w, req)
 			return
 		}
-		http.ServeFile(w, req, filepath.Join(uiRoot, "index.html"))
-	})
-
-	return r
-}
-
-func respondJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(v)
-}
+		path := filepath.Join(uiRoot, filepath.Clean(strings.TrimPrefix(req.URL.Path, "/")

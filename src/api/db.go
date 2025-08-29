@@ -15,7 +15,7 @@ import (
 )
 
 // Exported pool for handlers.
-var DB *pgxpool.Pool
+var db *pgxpool.Pool
 
 // ---- ENV helpers ----
 
@@ -87,13 +87,13 @@ func InitDBFromEnv(ctx context.Context) error {
 		return fmt.Errorf("ping: %w", err)
 	}
 
-	DB = pool
+	db = pool
 	log.Printf("db: connected (max=%d min=%d idle=%s lifetime=%s)",
 		cfg.MaxConns, cfg.MinConns, cfg.MaxConnIdleTime, cfg.MaxConnLifetime)
 
 	// Migrate (opt-out with DDUI_DB_MIGRATE=false)
 	if strings.ToLower(env("DDUI_DB_MIGRATE", "true")) == "true" {
-		if err := runMigrations(ctx, DB); err != nil {
+		if err := runMigrations(ctx, db); err != nil {
 			return fmt.Errorf("migrations: %w", err)
 		}
 	}
@@ -102,12 +102,12 @@ func InitDBFromEnv(ctx context.Context) error {
 }
 
 func CloseDB() {
-	if DB != nil {
-		DB.Close()
+	if db != nil {
+		db.Close()
 	}
 }
 
-func DBReady() bool { return DB != nil }
+func DBReady() bool { return db != nil }
 
 // ---- Migrations ----
 

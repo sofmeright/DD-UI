@@ -32,9 +32,13 @@ func makeRouter() http.Handler {
 
 	// -------- Public API
 	r.Route("/api", func(api chi.Router) {
-		api.Get("/session", SessionHandler) // no RequireAuth wrapper
-		api.Get("/healthz", ... )
-	})
+		api.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
+			respondJSON(w, Health{
+				Status:    "ok",
+				StartedAt: startedAt,
+				Edition:   "Community",
+			})
+		})
 
 		// IMPORTANT: do NOT wrap this with RequireAuth.
 		// The UI probes it to learn whether a session exists.

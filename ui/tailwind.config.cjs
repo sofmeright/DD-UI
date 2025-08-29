@@ -1,6 +1,10 @@
+// ui/tailwind.config.cjs
 module.exports = {
-  plugins: {
-    tailwindcss: {},
-    autoprefixer: {}
-  }
+  content: ["./index.html", "./src/**/*.{ts,tsx}"],
+  theme: {
+    extend: {
+      colors: { brand: "#74ecbe" }
+    }
+  },
+  plugins: []
 };

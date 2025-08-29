@@ -1,0 +1,13 @@
+version: "3.8"
+services:
+  ddui:
+    build: .
+    image: ddui:dev
+    ports:
+      - "3000:3000"
+    environment:
+      - DDUI_BIND=0.0.0.0:3000
+      - DDUI_SCAN_KIND=local
+      - DDUI_SCAN_ROOT=/data/docker-compose
+    volumes:
+      - ./example:/data

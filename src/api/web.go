@@ -72,4 +72,18 @@ func makeRouter() http.Handler {
 			http.NotFound(w, req)
 			return
 		}
-		path := filepath.Join(uiRoot, filepath.Clean(strings.TrimPrefix(req.URL.Path, "/")
+		path := filepath.Join(uiRoot, filepath.Clean(strings.TrimPrefix(req.URL.Path, "/")))
+		if info, err := os.Stat(path); err == nil && !info.IsDir() {
+			http.ServeFile(w, req, path)
+			return
+		}
+		http.ServeFile(w, req, filepath.Join(uiRoot, "index.html"))
+	})
+
+	return r
+}
+
+func respondJSON(w http.ResponseWriter, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(v)
+}

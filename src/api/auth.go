@@ -3,11 +3,11 @@ package main
 import (
 	"context"
 	"crypto/rand"
-    "encoding/gob"
+	"encoding/gob"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-    "log"
+	"log"
 	"net/http"
 	"os"
 	"strings"
@@ -19,7 +19,7 @@ import (
 )
 
 func init() {
-    gob.Register(User{}) // ensure gorilla/sessions can (de)serialize User
+	gob.Register(User{}) // ensure gorilla/sessions can (de)serialize User
 }
 
 type User struct {
@@ -52,7 +52,7 @@ type AuthConfig struct {
 const (
 	sessionName  = "ddui_sess"
 	oauthTmpName = "ddui_oauth"
-	cookieMaxAge = 7 * 24 * 3600
+	cookieMaxAge = 7 * 24 * 3600 // 7d
 )
 
 func env(k, def string) string {
@@ -156,7 +156,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	tmp.Values["nonce"] = nonce
 	tmp.Options = &sessions.Options{
 		Path:     "/",
-		MaxAge:   300,
+		MaxAge:   300, // 5 min
 		HttpOnly: true,
 		Secure:   cfg.SecureCookies,
 		SameSite: http.SameSiteLaxMode,
@@ -169,19 +169,14 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func CallbackHandler(w http.ResponseWriter, r *http.Request) {
-	// expire the temporary oauth cookie
+	// Read and immediately expire the temporary oauth cookie
+	tmp, _ := store.Get(r, oauthTmpName)
+	wantState, _ := tmp.Values["state"].(string)
+	nonce, _ := tmp.Values["nonce"].(string)
 	tmp.Options.MaxAge = -1
 	_ = tmp.Save(r, w)
-	tmp.Options = &sessions.Options{
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   cfg.SecureCookies,
-		SameSite: http.SameSiteLaxMode,
-		Domain:   cfg.CookieDomain,
-	}
-	_ = tmp.Save(r, w)
 
+	// CSRF protection: state must match
 	if r.URL.Query().Get("state") != wantState || wantState == "" {
 		http.Error(w, "state mismatch", http.StatusBadRequest)
 		return
@@ -215,8 +210,8 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		Email  string `json:"email"`
 		Name   string `json:"name"`
 		Pic    string `json:"picture"`
-		HD     string `json:"hd"`
-		Domain string `json:"domain"`
+		HD     string `json:"hd"`     // Google hosted domain (if used)
+		Domain string `json:"domain"` // some providers set this
 		Exp    int64  `json:"exp"`
 	}
 	if err := idt.Claims(&claims); err != nil {
@@ -257,24 +252,18 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func SessionHandler(w http.ResponseWriter, r *http.Request) {
-    sess, _ := store.Get(r, sessionName)
+	sess, _ := store.Get(r, sessionName)
+	u, ok := sess.Values["user"].(User)
+	exp, _ := sess.Values["exp"].(int64)
 
-    // try to decode user and expiry
-    u, ok := sess.Values["user"].(User)
-    exp, _ := sess.Values["exp"].(int64)
-
-    if !ok || exp == 0 || time.Now().Unix() > exp {
-        // signed out
-        writeJSON(w, http.StatusOK, map[string]any{
-            "user": nil,
-        })
-        return
-    }
-
-    writeJSON(w, http.StatusOK, map[string]any{
-        "user": u,
-    })
+	if !ok || exp == 0 || time.Now().Unix() > exp {
+		writeJSON(w, http.StatusOK, map[string]any{"user": nil})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"user": u})
 }
+
+// --- auth helpers/middleware ---
 
 type ctxKey string
 

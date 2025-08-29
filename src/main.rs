@@ -4,8 +4,9 @@ mod api;
 
 use axum::{routing::{get, post}, Router};
 use tower_http::{trace::TraceLayer, cors::CorsLayer};
-use std::{net::SocketAddr, sync::Arc};
+use std::net::SocketAddr;
 use tracing_subscriber::{EnvFilter, fmt};
+use tokio::net::TcpListener;
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
@@ -27,6 +28,7 @@ async fn main() -> anyhow::Result<()> {
 
     let addr: SocketAddr = cfg.bind_addr.parse()?;
     tracing::info!(%addr, "DDUI starting");
-    axum::Server::bind(&addr).serve(app.into_make_service()).await?;
+    let listener = TcpListener::bind(addr).await?;
+    axum::serve(listener, app).await?;
     Ok(())
 }

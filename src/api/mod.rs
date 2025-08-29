@@ -1,4 +1,3 @@
-use std::sync::Arc;
 use axum::extract::FromRef;
 
 use crate::{config::AppConfig, entitlements::Entitlements};

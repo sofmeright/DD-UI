@@ -1,9 +1,10 @@
 use axum::{extract::State, Json, response::IntoResponse};
-use serde::{Deserialize, Serialize};
-use futures_util::stream::{self, StreamExt};
+use serde::Deserialize;
+use futures_util::stream::{self};
 use axum::body::Body;
 use std::time::Duration;
 use time::OffsetDateTime;
+use tokio_stream::StreamExt;
 
 use crate::{config::AppConfig, entitlements::Entitlements};
 
@@ -13,7 +14,7 @@ pub struct CiRunRequest {
 }
 
 pub async fn ci_run(
-    State(cfg): State<AppConfig>,
+    State(_cfg): State<AppConfig>),
     State(ents): State<Entitlements>,
     Json(_req): Json<CiRunRequest>,
 ) -> impl IntoResponse {
@@ -26,8 +27,7 @@ pub async fn ci_run(
     ];
     let stream = stream::iter(lines.into_iter())
         .throttle(Duration::from_millis(200))
-        .map(|v| Ok::<_, std::io::Error>(format!("{}
-", serde_json::to_string(&v).unwrap())));
+        .map(|v| Ok::<_, std::io::Error>(format!("{}\n", serde_json::to_string(&v).unwrap())));
     axum::http::Response::builder()
         .header("Content-Type", "application/x-ndjson")
         .body(Body::from_stream(stream))

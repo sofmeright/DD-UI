@@ -1,5 +1,5 @@
-import React, { useMemo, useState } from "react";
-import { Boxes, Layers, AlertTriangle, XCircle, Search, GitBranch, HardDrive, Clock, PanelLeft, RefreshCw, PlayCircle, Rocket, ShieldCheck } from "lucide-react";
+import React, { useEffect, useMemo, useState } from "react";
+import { Boxes, Layers, AlertTriangle, XCircle, Search, PanelLeft, RefreshCw, PlayCircle, Rocket, ShieldCheck } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -8,25 +8,28 @@ import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { Separator } from "@/components/ui/separator";
 
-const mockConfig = {
-  projectPath: "precision/antparade",
-  branch: "main",
-  localPath: "/opt/docker/ant-parade/docker-compose",
-  refresh: "Every 10 min",
-  sopsConfigured: true,
-  autoPullLatest: true,
-  applyOnChange: false,
-  stagingMode: true
+type Host = {
+  name: string;
+  address?: string;
+  groups?: string[];
+  lastSync?: string;      // ISO string if your API sets this later
+  stacks?: Array<{
+    name: string;
+    type?: string;
+    status?: "in_sync" | "drift" | "stopped" | "error";
+    pullPolicy?: string;
+    sops?: boolean;
+    containers: Array<{
+      name: string;
+      image: string;
+      desiredImage?: string;
+      state: "running" | "exited" | string;
+      ports?: string;
+      created?: string;
+      lastPulled?: string;
+    }>;
+  }>;
 };
-
-const mockData = [
-  { host: "anchorage", groups: ["docker", "clustered"], lastSync: new Date().toISOString(), stacks: [
-    { name: "grafana", type: "compose", status: "drift", pullPolicy: "always", sops: true, containers: [{ name: "grafana", image: "grafana/grafana:10.3", desiredImage: "grafana/grafana:10.4", state: "running", ports: "3000->3000/tcp", created: "2d ago", lastPulled: "7d ago" }]}
-  ]},
-  { host: "driftwood", groups: ["docker"], lastSync: new Date().toISOString(), stacks: [
-    { name: "prom", type: "compose", status: "stopped", pullPolicy: "missing", sops: false, containers: [{ name: "prometheus", image: "prom/prometheus:latest", desiredImage: "prom/prometheus:latest", state: "exited", ports: "9090->9090/tcp", created: "13d ago", lastPulled: "13d ago" }]}
-  ]}
-];
 
 function MetricCard({ title, value, icon: Icon, accent=false }: { title: string; value: React.ReactNode; icon: any; accent?: boolean }) {
   return (
@@ -44,14 +47,57 @@ function MetricCard({ title, value, icon: Icon, accent=false }: { title: string;
 
 export default function App() {
   const [query, setQuery] = useState("");
-  const [toggles, setToggles] = useState({ staging: mockConfig.stagingMode, autoPull: mockConfig.autoPullLatest, applyOnChange: mockConfig.applyOnChange });
+  const [toggles, setToggles] = useState({ staging: false, autoPull: false, applyOnChange: false });
+  const [hosts, setHosts] = useState<Host[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
 
-  const flatStacks = useMemo(() => mockData.flatMap(h => h.stacks), []);
+  // Fetch hosts on load
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setLoading(true);
+      setErr(null);
+      try {
+        const res = await fetch("/api/hosts", { credentials: "include" });
+        if (res.status === 401) {
+          window.location.href = "/login";
+          return;
+        }
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!cancelled) setHosts(Array.isArray(data.items) ? data.items : []);
+      } catch (e: any) {
+        if (!cancelled) setErr(e?.message || "Failed to load hosts");
+      } finally {
+        if (!cancelled) setLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+
+  const filteredHosts = useMemo(() => {
+    const q = query.trim().toLowerCase();
+    if (!q) return hosts;
+    return hosts.filter(h => {
+      const hay = [
+        h.name,
+        h.address || "",
+        ...(h.groups || [])
+      ].join(" ").toLowerCase();
+      return hay.includes(q);
+    });
+  }, [hosts, query]);
+
+  const flatStacks = useMemo(
+    () => filteredHosts.flatMap(h => h.stacks || []),
+    [filteredHosts]
+  );
   const metrics = useMemo(() => {
     const stacks = flatStacks.length;
-    const containers = flatStacks.reduce((acc, s:any) => acc + s.containers.length, 0);
-    const drift = flatStacks.filter((s:any) => s.status === "drift").length;
-    const errors = flatStacks.filter((s:any) => s.status === "error").length;
+    const containers = flatStacks.reduce((acc, s) => acc + (s.containers?.length || 0), 0);
+    const drift = flatStacks.filter(s => s.status === "drift").length;
+    const errors = flatStacks.filter(s => s.status === "error").length;
     return { stacks, containers, drift, errors };
   }, [flatStacks]);
 
@@ -65,21 +111,33 @@ export default function App() {
             <Badge variant="outline">Community</Badge>
           </div>
           <Separator orientation="vertical" className="mx-2 h-8 bg-slate-800" />
-          <div className="hidden md:flex items-center gap-2 text-xs">
-            <Badge className="bg-slate-800 text-slate-200"><GitBranch className="h-3.5 w-3.5 mr-1" /> {mockConfig.projectPath}@{mockConfig.branch}</Badge>
-            <Badge variant="outline" className="border-slate-700/60 text-slate-300"><HardDrive className="h-3.5 w-3.5 mr-1" /> {mockConfig.localPath}</Badge>
-            <Badge variant="outline" className="border-slate-700/60 text-slate-300"><Clock className="h-3.5 w-3.5 mr-1" /> Refresh: {mockConfig.refresh}</Badge>
-            <Badge variant="outline" className="border-slate-700/60 text-slate-300">SOPS {mockConfig.sopsConfigured ? "enabled" : "—"}</Badge>
-          </div>
           <div className="ml-auto flex items-center gap-2">
-            <Button className="bg-[#310937] hover:bg-[#2a0830] text-white"><RefreshCw className="h-4 w-4 mr-1" /> Sync</Button>
-            <Button variant="outline" className="border-brand bg-slate-900/70 text-white hover:bg-slate-800"><PlayCircle className="h-4 w-4 mr-1" /> Plan</Button>
-            <Button className="bg-brand hover:brightness-110 text-slate-900"><Rocket className="h-4 w-4 mr-1" /> Apply</Button>
+            <Button className="bg-[#310937] hover:bg-[#2a0830] text-white">
+              <RefreshCw className="h-4 w-4 mr-1" /> Sync
+            </Button>
+            <Button variant="outline" className="border-brand bg-slate-900/70 text-white hover:bg-slate-800">
+              <PlayCircle className="h-4 w-4 mr-1" /> Plan
+            </Button>
+            <Button className="bg-brand hover:brightness-110 text-slate-900">
+              <Rocket className="h-4 w-4 mr-1" /> Apply
+            </Button>
           </div>
         </div>
       </div>
 
       <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
+        {/* Loading/Error banners */}
+        {loading && (
+          <div className="text-sm px-3 py-2 rounded-lg border border-slate-800 bg-slate-900/60 text-slate-300">
+            Loading hosts…
+          </div>
+        )}
+        {err && (
+          <div className="text-sm px-3 py-2 rounded-lg border border-rose-800/50 bg-rose-950/50 text-rose-200">
+            Error: {err}
+          </div>
+        )}
+
         <div className="grid md:grid-cols-4 gap-4">
           <MetricCard title="Stacks" value={metrics.stacks} icon={Boxes} accent />
           <MetricCard title="Containers" value={metrics.containers} icon={Layers} accent />
@@ -93,7 +151,12 @@ export default function App() {
               <div className="flex items-center gap-2 w-full md:w-auto">
                 <div className="relative w-full md:w-96">
                   <Search className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-                  <Input placeholder="Filter by host, stack, image…" className="pl-9 bg-slate-900/50 border-slate-800 text-slate-200 placeholder:text-slate-500" value={query} onChange={(e) => setQuery(e.target.value)} />
+                  <Input
+                    placeholder="Filter by host, group, address…"
+                    className="pl-9 bg-slate-900/50 border-slate-800 text-slate-200 placeholder:text-slate-500"
+                    value={query}
+                    onChange={(e) => setQuery(e.target.value)}
+                  />
                 </div>
               </div>
               <div className="flex items-center gap-5">
@@ -126,11 +189,61 @@ export default function App() {
             <TabsTrigger value="manifest">Manifest View</TabsTrigger>
             <TabsTrigger value="cards">Cards View</TabsTrigger>
           </TabsList>
+
+          {/* Manifest: simple host table for now */}
           <TabsContent value="manifest" className="mt-4">
-            <div className="text-slate-300 text-sm">Manifest table goes here.</div>
+            <div className="overflow-hidden rounded-xl border border-slate-800">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-900/70 text-slate-300">
+                  <tr>
+                    <th className="p-3 text-left">Host</th>
+                    <th className="p-3 text-left">Address</th>
+                    <th className="p-3 text-left">Groups</th>
+                    <th className="p-3 text-left">Last Sync</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredHosts.map((h) => (
+                    <tr key={h.name} className="border-t border-slate-800 hover:bg-slate-900/40">
+                      <td className="p-3 font-medium text-slate-200">{h.name}</td>
+                      <td className="p-3 text-slate-300">{h.address || "—"}</td>
+                      <td className="p-3 text-slate-300">
+                        {(h.groups || []).length ? (h.groups || []).join(", ") : "—"}
+                      </td>
+                      <td className="p-3 text-slate-300">
+                        {h.lastSync ? new Date(h.lastSync).toLocaleString() : "—"}
+                      </td>
+                    </tr>
+                  ))}
+                  {!loading && !err && filteredHosts.length === 0 && (
+                    <tr>
+                      <td className="p-6 text-center text-slate-500" colSpan={4}>No hosts.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
           </TabsContent>
+
+          {/* Cards: minimal host tiles (stacks will populate later) */}
           <TabsContent value="cards" className="mt-4">
-            <div className="text-slate-300 text-sm">Cards grid goes here.</div>
+            <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
+              {filteredHosts.map(h => (
+                <Card key={h.name} className="bg-slate-900/50 border-slate-800 rounded-2xl">
+                  <CardHeader className="pb-2">
+                    <CardTitle className="text-2xl font-extrabold tracking-tight text-white">{h.name}</CardTitle>
+                    <div className="text-xs text-slate-400">{h.address || "—"}</div>
+                  </CardHeader>
+                  <CardContent className="text-sm text-slate-300">
+                    <div><span className="text-slate-400">Groups:</span> {(h.groups || []).length ? (h.groups || []).join(", ") : "—"}</div>
+                    <div><span className="text-slate-400">Stacks:</span> {(h.stacks || []).length}</div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+            {!loading && !err && filteredHosts.length === 0 && (
+              <div className="text-center py-20 text-slate-400">No hosts.</div>
+            )}
           </TabsContent>
         </Tabs>
       </main>

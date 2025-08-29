@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+	"os" 
 	"sort"
 	"strconv"
 	"strings"
@@ -23,13 +24,30 @@ func dsnFromEnv() string {
 	if s := env("DDUI_DB_DSN", ""); s != "" {
 		return s
 	}
-	// Convenient defaults for dev; override with DDUI_DB_* or DDUI_DB_DSN.
+
 	host := env("DDUI_DB_HOST", "postgres")
 	port := env("DDUI_DB_PORT", "5432")
 	user := env("DDUI_DB_USER", "ddui")
-	pass := env("DDUI_DB_PASS", "ddui")
+
+	// password: support DDUI_DB_PASS, DDUI_DB_PASS_FILE, and "@/path" shorthand
+	pass := env("DDUI_DB_PASS", "")
+	if pf := env("DDUI_DB_PASS_FILE", ""); pf != "" {
+		if b, err := os.ReadFile(pf); err == nil {
+			pass = strings.TrimSpace(string(b))
+		}
+	}
+	if strings.HasPrefix(pass, "@") {
+		if b, err := os.ReadFile(strings.TrimPrefix(pass, "@")); err == nil {
+			pass = strings.TrimSpace(string(b))
+		}
+	}
+	if pass == "" {
+		pass = "ddui"
+	}
+
 	name := env("DDUI_DB_NAME", "ddui")
-	ssl := env("DDUI_DB_SSLMODE", "disable") // set "require" if TLS
+	ssl := env("DDUI_DB_SSLMODE", "disable") // use "require" if you enable TLS
+
 	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, ssl)
 }
 

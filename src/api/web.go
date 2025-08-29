@@ -1,3 +1,4 @@
+// src/api/web.go
 package main
 
 import (
@@ -24,16 +25,22 @@ func makeRouter() http.Handler {
 	r := chi.NewRouter()
 	r.Use(cors.AllowAll().Handler)
 
+	// health (both paths for compatibility)
 	h := func(w http.ResponseWriter, _ *http.Request) {
-		respondJSON(w, Health{
-			Status:    "ok",
-			StartedAt: startedAt,
-			Edition:   "Community",
-		})
+		respondJSON(w, Health{Status: "ok", StartedAt: startedAt, Edition: "Community"})
 	}
 	r.Get("/healthz", h)
 	r.Get("/api/healthz", h)
 
+	// auth endpoints
+	r.Get("/login", LoginHandler)
+	r.Get("/auth/callback", CallbackHandler) // OIDC_REDIRECT_URL must point to this path
+	r.Post("/logout", LogoutHandler)
+
+	// session: 401 if not signed in, user JSON if signed in
+	r.With(RequireAuth).Get("/api/session", SessionHandler)
+
+	// SPA
 	uiRoot := "/home/ddui/ui/dist"
 	fs := http.FileServer(http.Dir(uiRoot))
 

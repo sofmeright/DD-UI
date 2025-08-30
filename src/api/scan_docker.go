@@ -1,8 +1,10 @@
+// src/api/scan_docker.go
 package main
 
 import (
 	"context"
 	"fmt"
+	"log" // <- needed for debug logging
 	"os"
 	"strings"
 	"sync"
@@ -37,19 +39,23 @@ func localHostAllowed(h HostRow) bool {
 }
 
 func dockerURLFor(h HostRow) (string, string) {
+	// Per-host override wins
 	if v := h.Vars["docker_host"]; v != "" {
 		return v, h.Vars["docker_ssh_cmd"]
 	}
 
-	kind := env("DDUI_SCAN_KIND", "local") // ssh|tcp|local
+	// Safer default is SSH
+	kind := env("DDUI_SCAN_KIND", "ssh") // ssh|tcp|local
 	switch kind {
 	case "local":
-		// Only valid for the one “local” host (we’ll enforce in ScanHostContainers)
+		// Only valid for the one “local” host (enforced in ScanHostContainers)
 		sock := env("DDUI_LOCAL_SOCK", "/var/run/docker.sock")
 		return "unix://" + sock, ""
 	case "tcp":
 		host := h.Addr
-		if host == "" { host = h.Name }
+		if host == "" {
+			host = h.Name
+		}
 		port := env("DDUI_DOCKER_TCP_PORT", "2375")
 		return fmt.Sprintf("tcp://%s:%s", host, port), ""
 	default: // ssh
@@ -58,7 +64,9 @@ func dockerURLFor(h HostRow) (string, string) {
 			user = env("DDUI_SSH_USER", "root")
 		}
 		addr := h.Addr
-		if addr == "" { addr = h.Name }
+		if addr == "" {
+			addr = h.Name
+		}
 		return fmt.Sprintf("ssh://%s@%s", user, addr), os.Getenv("DOCKER_SSH_CMD")
 	}
 }
@@ -82,8 +90,7 @@ func withSSHEnv(cmd string, fn func() error) error {
 	return fn()
 }
 
-func dockerClientFor(ctx context.Context, h HostRow) (*client.Client, func(), error) {
-	url, sshCmd := dockerURLFor(h)
+func dockerClientForURL(ctx context.Context, url, sshCmd string) (*client.Client, func(), error) {
 	var cli *client.Client
 	err := withSSHEnv(sshCmd, func() error {
 		var err error
@@ -102,8 +109,7 @@ func dockerClientFor(ctx context.Context, h HostRow) (*client.Client, func(), er
 	if err != nil {
 		return nil, nil, err
 	}
-	cleanup := func() { _ = cli.Close() }
-	return cli, cleanup, nil
+	return cli, func() { _ = cli.Close() }, nil
 }
 
 // ScanHostContainers connects to a host's Docker and persists containers.
@@ -123,8 +129,8 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 		return 0, msg
 	}
 
-	// (optional) debug log of the URL we’re about to dial
-	if strings.EqualFold(env("DDUI_SCAN_DEBUG", ""), "true") {
+	// optional debug
+	if strings.EqualFold(env("DDUI_SCAN_DEBUG", "false"), "true") {
 		log.Printf("scan: host=%s docker_url=%s", h.Name, url)
 	}
 
@@ -141,6 +147,7 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 		scanLog(ctx, h.ID, "error", "container list failed", map[string]any{"error": err.Error()})
 		return 0, err
 	}
+
 	count := 0
 	for _, c := range containers {
 		name := ""
@@ -160,19 +167,19 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 			if err != nil {
 				scanLog(ctx, h.ID, "warn", "ensure stack failed", map[string]any{"project": project, "error": err.Error()})
 			} else {
-				// make a pointer for upsertContainer; nil means “no stack”
 				stackID := sid
-				stackIDPtr = &stackID
+				stackIDPtr = &stackID // pointer for NULLable stack_id
 			}
 		}
 
 		// ports as a generic map for UI
 		ports := map[string]any{"ports": c.Ports}
 
+		// NOTE: upsertContainer must accept stackID *int64 (pointer)
 		if err := upsertContainer(
 			ctx,
 			h.ID,
-			stackIDPtr,                 // <— pointer (or nil)
+			stackIDPtr,
 			c.ID,
 			trimSlash(name),
 			c.Image,
@@ -186,11 +193,11 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 			continue
 		}
 
-
 		scanLog(ctx, h.ID, "info", "container discovered",
 			map[string]any{"name": name, "image": c.Image, "state": c.State, "project": project})
 		count++
 	}
+
 	scanLog(ctx, h.ID, "info", "scan complete", map[string]any{"containers": count})
 	return count, nil
 }

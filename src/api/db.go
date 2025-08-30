@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log"
+    "net/url"
 	"os" 
 	"sort"
 	"strconv"
@@ -29,25 +30,26 @@ func dsnFromEnv() string {
     port := env("DDUI_DB_PORT", "5432")
     user := env("DDUI_DB_USER", "ddui")
 
-    // Prefer file, fall back to DDUI_DB_PASS. Do NOT trim; use bytes as-is.
-    pass := env("DDUI_DB_PASS", "")
-    if pf := env("DDUI_DB_PASS_FILE", ""); pf != "" {
-        if b, err := os.ReadFile(pf); err == nil {
-            pass = string(b) // no TrimSpace!
-        }
-    }
-    if strings.HasPrefix(pass, "@") {
-        if b, err := os.ReadFile(strings.TrimPrefix(pass, "@")); err == nil {
-            pass = string(b)
+    // read from secret path if DDUI_DB_PASS looks like "@/path"
+    passRaw := env("DDUI_DB_PASS", "")
+    pass, _ := readSecretMaybeFile(passRaw) // supports "@/path/to/secret"
+    if pass == "" {
+        // optional secondary: explicit file var
+        if pf := env("DDUI_DB_PASS_FILE", ""); pf != "" {
+            if b, err := os.ReadFile(pf); err == nil {
+                pass = strings.TrimSpace(string(b))
+            }
         }
     }
 
     name := env("DDUI_DB_NAME", "ddui")
-    ssl  := env("DDUI_DB_SSLMODE", "disable")
+    ssl := env("DDUI_DB_SSLMODE", "disable")
 
-    // Quote values to be safe with spaces/specials.
-    return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
-        kv(host), kv(port), kv(user), kv(pass), kv(name), kv(ssl))
+    return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+        url.QueryEscape(user),
+        url.QueryEscape(pass),
+        host, port, name, ssl,
+    )
 }
 
 func kv(v string) string {

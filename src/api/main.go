@@ -3,6 +3,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"strconv"
@@ -70,8 +71,9 @@ func scanAllOnce(ctx context.Context, perHostTO time.Duration, conc int) {
 	}
 	sem := make(chan struct{}, conc)
 	var wg sync.WaitGroup
-	var total, errs int
 	var mu sync.Mutex
+
+	var total, scanned, skipped, failed int
 
 	for _, h := range hostRows {
 		h := h
@@ -80,22 +82,39 @@ func scanAllOnce(ctx context.Context, perHostTO time.Duration, conc int) {
 		go func() {
 			defer wg.Done()
 			defer func() { <-sem }()
+
+			// Pre-filter: skip non-local hosts when URL is unix:// and they aren’t the designated local host
+			url, _ := dockerURLFor(h)
+			if isUnixSock(url) && !localHostAllowed(h) {
+				mu.Lock()
+				skipped++
+				mu.Unlock()
+				return
+			}
+
 			hctx, cancel := context.WithTimeout(ctx, perHostTO)
 			n, err := ScanHostContainers(hctx, h.Name)
 			cancel()
+
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
-				errs++
+				if errors.Is(err, ErrSkipScan) {
+					skipped++
+					return
+				}
+				failed++
 				log.Printf("scan: host=%s error=%v", h.Name, err)
 				return
 			}
+			scanned++
 			total += n
 			log.Printf("scan: host=%s saved=%d", h.Name, n)
 		}()
 	}
 	wg.Wait()
-	log.Printf("scan: complete hosts=%d total_saved=%d errors=%d", len(hostRows), total, errs)
+	log.Printf("scan: complete hosts=%d scanned=%d skipped=%d total_saved=%d errors=%d",
+		len(hostRows), scanned, skipped, total, failed)
 }
 
 func startAutoScanner(ctx context.Context) {
@@ -120,7 +139,6 @@ func startAutoScanner(ctx context.Context) {
 		for {
 			select {
 			case <-t.C:
-				// periodic scan
 				scanAllOnce(ctx, perHostTO, conc)
 			case <-ctx.Done():
 				log.Printf("scan: auto scanner stopping: %v", ctx.Err())

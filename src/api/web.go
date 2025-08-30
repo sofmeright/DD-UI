@@ -107,14 +107,20 @@ func makeRouter() http.Handler {
 			// Trigger on-demand scan for a single host
 			priv.Post("/scan/host/{name}", func(w http.ResponseWriter, r *http.Request) {
 				name := chi.URLParam(r, "name")
-
-				// Optional per-host timeout (default 45s)
 				to := parseDurationDefault(r.URL.Query().Get("timeout"), 45*time.Second)
 				ctx, cancel := context.WithTimeout(r.Context(), to)
 				defer cancel()
-
+			
 				n, err := ScanHostContainers(ctx, name)
 				if err != nil {
+					if errors.Is(err, ErrSkipScan) {
+						writeJSON(w, http.StatusOK, map[string]any{
+							"host":   name,
+							"saved":  0,
+							"status": "skipped",
+						})
+						return
+					}
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}

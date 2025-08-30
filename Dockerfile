@@ -12,7 +12,6 @@ WORKDIR /src/api
 COPY src/api/go.mod ./
 RUN go mod download
 COPY src/api/ .
-COPY src/*.go .     # bring in top-level main files (db.go, db_hosts.go, etc.)
 RUN go mod tidy
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /bin/ddui
 

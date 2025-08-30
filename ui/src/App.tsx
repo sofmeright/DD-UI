@@ -1,5 +1,9 @@
+// ui/src/App.tsx
 import React, { useEffect, useMemo, useState } from "react";
-import { Boxes, Layers, AlertTriangle, XCircle, Search, PanelLeft, RefreshCw, PlayCircle, Rocket, ShieldCheck } from "lucide-react";
+import {
+  Boxes, Layers, AlertTriangle, XCircle, Search, PanelLeft,
+  RefreshCw, PlayCircle, Rocket, ShieldCheck
+} from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -12,7 +16,7 @@ type Host = {
   name: string;
   address?: string;
   groups?: string[];
-  lastSync?: string;      // ISO string if your API sets this later
+  lastSync?: string;
   stacks?: Array<{
     name: string;
     type?: string;
@@ -31,6 +35,30 @@ type Host = {
   }>;
 };
 
+type ScanHostResult = {
+  host: string;
+  saved?: number;
+  status?: "ok" | "skipped";
+  err?: string;
+  reason?: string;
+};
+
+type ScanAllResponse = {
+  hosts_total: number;
+  scanned: number;
+  skipped: number;
+  errors: number;
+  saved: number;
+  results: Array<{
+    host: string;
+    saved?: number;
+    err?: string;
+    skipped?: boolean;
+    reason?: string;
+  }>;
+  status: "ok";
+};
+
 function MetricCard({ title, value, icon: Icon, accent=false }: { title: string; value: React.ReactNode; icon: any; accent?: boolean }) {
   return (
     <Card className={`border-slate-800 ${accent ? "bg-slate-900/40 border-brand/40" : "bg-slate-900/40"}`}>
@@ -45,6 +73,18 @@ function MetricCard({ title, value, icon: Icon, accent=false }: { title: string;
   );
 }
 
+function StatusPill({ result }: { result?: { kind: "ok" | "skipped" | "error"; saved?: number; reason?: string; err?: string } }) {
+  if (!result) return null;
+  const base = "px-2 py-0.5 rounded text-xs border";
+  if (result.kind === "ok") {
+    return <span className={`${base} border-emerald-700/50 bg-emerald-900/30 text-emerald-200`}>OK{typeof result.saved === "number" ? ` • saved ${result.saved}` : ""}</span>;
+  }
+  if (result.kind === "skipped") {
+    return <span className={`${base} border-amber-700/50 bg-amber-900/30 text-amber-200`}>Skipped{result.reason ? ` • ${result.reason}` : ""}</span>;
+  }
+  return <span className={`${base} border-rose-700/50 bg-rose-900/30 text-rose-200`}>Error{result.err ? ` • ${result.err}` : ""}</span>;
+}
+
 export default function App() {
   const [query, setQuery] = useState("");
   const [toggles, setToggles] = useState({ staging: false, autoPull: false, applyOnChange: false });
@@ -52,39 +92,126 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
 
-  // Fetch hosts on load
+  // scanning UI state
+  const [scanning, setScanning] = useState(false);
+  const [scanSummary, setScanSummary] = useState<ScanAllResponse | null>(null);
+  const [scanErr, setScanErr] = useState<string | null>(null);
+  // map host → last scan status in this session
+  const [hostScanState, setHostScanState] = useState<Record<string, { kind: "ok" | "skipped" | "error"; saved?: number; reason?: string; err?: string }>>({});
+
+  async function fetchHosts() {
+    setLoading(true);
+    setErr(null);
+    try {
+      const res = await fetch("/api/hosts", { credentials: "include" });
+      if (res.status === 401) {
+        window.location.href = "/login";
+        return;
+      }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data = await res.json();
+
+      // Map backend HostRow -> UI Host
+      const items = Array.isArray(data.items) ? data.items : [];
+      const mapped: Host[] = items.map((h: any) => ({
+        name: h.name,
+        address: h.addr ?? h.address ?? "",
+        groups: h.groups ?? [],
+        // lastSync could be wired later from DB if you add it
+      }));
+      setHosts(mapped);
+    } catch (e: any) {
+      setErr(e?.message || "Failed to load hosts");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      setLoading(true);
-      setErr(null);
-      try {
-        const res = await fetch("/api/hosts", { credentials: "include" });
-        if (res.status === 401) {
-          window.location.href = "/login";
-          return;
-        }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        const data = await res.json();
-        if (!cancelled) setHosts(Array.isArray(data.items) ? data.items : []);
-      } catch (e: any) {
-        if (!cancelled) setErr(e?.message || "Failed to load hosts");
-      } finally {
-        if (!cancelled) setLoading(false);
+      if (!cancelled) {
+        await fetchHosts();
       }
     })();
     return () => { cancelled = true; };
   }, []);
 
+  // ---- SCAN handlers
+
+  async function handleScanAll() {
+    if (scanning) return;
+    setScanning(true);
+    setScanErr(null);
+    setScanSummary(null);
+    try {
+      const res = await fetch("/api/scan/all", {
+        method: "POST",
+        credentials: "include"
+      });
+      if (res.status === 401) { window.location.href = "/login"; return; }
+      if (!res.ok) throw new Error(`HTTP ${res.status}`);
+      const data: ScanAllResponse = await res.json();
+      setScanSummary(data);
+
+      // build host -> status map
+      const map: Record<string, { kind: "ok" | "skipped" | "error"; saved?: number; reason?: string; err?: string }> = {};
+      for (const r of data.results) {
+        if (r.skipped) {
+          map[r.host] = { kind: "skipped", reason: r.reason };
+        } else if (r.err) {
+          map[r.host] = { kind: "error", err: r.err };
+        } else {
+          map[r.host] = { kind: "ok", saved: r.saved ?? 0 };
+        }
+      }
+      setHostScanState(prev => ({ ...prev, ...map }));
+
+      // refresh hosts after scan
+      await fetchHosts();
+    } catch (e: any) {
+      setScanErr(e?.message || "Scan failed");
+    } finally {
+      setScanning(false);
+    }
+  }
+
+  async function handleScanHost(name: string) {
+    if (scanning) return; // keep it simple; could do per-row locking later
+    setScanning(true);
+    setScanErr(null);
+    try {
+      const res = await fetch(`/api/scan/host/${encodeURIComponent(name)}`, {
+        method: "POST",
+        credentials: "include"
+      });
+      if (res.status === 401) { window.location.href = "/login"; return; }
+
+      const payload = await res.json() as ScanHostResult | { error?: string };
+      // The API returns {status:"skipped"} on intentional skips.
+      if ("status" in payload && payload.status === "skipped") {
+        setHostScanState(prev => ({ ...prev, [name]: { kind: "skipped" } }));
+      } else if ("err" in payload) {
+        setHostScanState(prev => ({ ...prev, [name]: { kind: "error", err: (payload as any).err || "error" } }));
+      } else {
+        const saved = (payload as any).saved ?? 0;
+        setHostScanState(prev => ({ ...prev, [name]: { kind: "ok", saved } }));
+      }
+
+      await fetchHosts();
+    } catch (e: any) {
+      setScanErr(e?.message || "Host scan failed");
+      setHostScanState(prev => ({ ...prev, [name]: { kind: "error", err: String(e?.message || e) } }));
+    } finally {
+      setScanning(false);
+    }
+  }
+
   const filteredHosts = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return hosts;
     return hosts.filter(h => {
-      const hay = [
-        h.name,
-        h.address || "",
-        ...(h.groups || [])
-      ].join(" ").toLowerCase();
+      const hay = [h.name, h.address || "", ...(h.groups || [])].join(" ").toLowerCase();
       return hay.includes(q);
     });
   }, [hosts, query]);
@@ -112,8 +239,13 @@ export default function App() {
           </div>
           <Separator orientation="vertical" className="mx-2 h-8 bg-slate-800" />
           <div className="ml-auto flex items-center gap-2">
-            <Button className="bg-[#310937] hover:bg-[#2a0830] text-white">
-              <RefreshCw className="h-4 w-4 mr-1" /> Sync
+            <Button
+              onClick={handleScanAll}
+              disabled={scanning}
+              className="bg-[#310937] hover:bg-[#2a0830] text-white"
+            >
+              <RefreshCw className={`h-4 w-4 mr-1 ${scanning ? "animate-spin" : ""}`} />
+              {scanning ? "Scanning…" : "Sync"}
             </Button>
             <Button variant="outline" className="border-brand bg-slate-900/70 text-white hover:bg-slate-800">
               <PlayCircle className="h-4 w-4 mr-1" /> Plan
@@ -135,6 +267,18 @@ export default function App() {
         {err && (
           <div className="text-sm px-3 py-2 rounded-lg border border-rose-800/50 bg-rose-950/50 text-rose-200">
             Error: {err}
+          </div>
+        )}
+
+        {/* Scan summary banner */}
+        {scanSummary && (
+          <div className="text-sm px-3 py-2 rounded-lg border border-slate-700 bg-slate-900/70 text-slate-200">
+            Scan complete — scanned {scanSummary.scanned} of {scanSummary.hosts_total}, skipped {scanSummary.skipped}, errors {scanSummary.errors}, total saved {scanSummary.saved}.
+          </div>
+        )}
+        {scanErr && (
+          <div className="text-sm px-3 py-2 rounded-lg border border-rose-800/50 bg-rose-950/50 text-rose-200">
+            Scan error: {scanErr}
           </div>
         )}
 
@@ -190,7 +334,7 @@ export default function App() {
             <TabsTrigger value="cards">Cards View</TabsTrigger>
           </TabsList>
 
-          {/* Manifest: simple host table for now */}
+          {/* Manifest: host table with scan actions */}
           <TabsContent value="manifest" className="mt-4">
             <div className="overflow-hidden rounded-xl border border-slate-800">
               <table className="w-full text-sm">
@@ -199,7 +343,8 @@ export default function App() {
                     <th className="p-3 text-left">Host</th>
                     <th className="p-3 text-left">Address</th>
                     <th className="p-3 text-left">Groups</th>
-                    <th className="p-3 text-left">Last Sync</th>
+                    <th className="p-3 text-left">Scan</th>
+                    <th className="p-3 text-left">Status</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -207,17 +352,27 @@ export default function App() {
                     <tr key={h.name} className="border-t border-slate-800 hover:bg-slate-900/40">
                       <td className="p-3 font-medium text-slate-200">{h.name}</td>
                       <td className="p-3 text-slate-300">{h.address || "—"}</td>
-                      <td className="p-3 text-slate-300">
-                        {(h.groups || []).length ? (h.groups || []).join(", ") : "—"}
+                      <td className="p-3 text-slate-300">{(h.groups || []).length ? (h.groups || []).join(", ") : "—"}</td>
+                      <td className="p-3">
+                        <Button
+                          size="sm"
+                          variant="outline"
+                          className="border-slate-700 text-slate-200 hover:bg-slate-800"
+                          onClick={() => handleScanHost(h.name)}
+                          disabled={scanning}
+                        >
+                          <RefreshCw className={`h-4 w-4 mr-1 ${scanning ? "opacity-60" : ""}`} />
+                          Scan
+                        </Button>
                       </td>
-                      <td className="p-3 text-slate-300">
-                        {h.lastSync ? new Date(h.lastSync).toLocaleString() : "—"}
+                      <td className="p-3">
+                        <StatusPill result={hostScanState[h.name]} />
                       </td>
                     </tr>
                   ))}
                   {!loading && !err && filteredHosts.length === 0 && (
                     <tr>
-                      <td className="p-6 text-center text-slate-500" colSpan={4}>No hosts.</td>
+                      <td className="p-6 text-center text-slate-500" colSpan={5}>No hosts.</td>
                     </tr>
                   )}
                 </tbody>
@@ -225,7 +380,7 @@ export default function App() {
             </div>
           </TabsContent>
 
-          {/* Cards: minimal host tiles (stacks will populate later) */}
+          {/* Cards: minimal host tiles */}
           <TabsContent value="cards" className="mt-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
               {filteredHosts.map(h => (
@@ -234,9 +389,21 @@ export default function App() {
                     <CardTitle className="text-2xl font-extrabold tracking-tight text-white">{h.name}</CardTitle>
                     <div className="text-xs text-slate-400">{h.address || "—"}</div>
                   </CardHeader>
-                  <CardContent className="text-sm text-slate-300">
+                  <CardContent className="text-sm text-slate-300 space-y-2">
                     <div><span className="text-slate-400">Groups:</span> {(h.groups || []).length ? (h.groups || []).join(", ") : "—"}</div>
-                    <div><span className="text-slate-400">Stacks:</span> {(h.stacks || []).length}</div>
+                    <div className="flex items-center gap-2">
+                      <Button
+                        size="sm"
+                        variant="outline"
+                        className="border-slate-700 text-slate-200 hover:bg-slate-800"
+                        onClick={() => handleScanHost(h.name)}
+                        disabled={scanning}
+                      >
+                        <RefreshCw className={`h-4 w-4 mr-1 ${scanning ? "opacity-60" : ""}`} />
+                        Scan
+                      </Button>
+                      <StatusPill result={hostScanState[h.name]} />
+                    </div>
                   </CardContent>
                 </Card>
               ))}

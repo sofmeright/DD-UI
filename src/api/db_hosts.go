@@ -147,3 +147,36 @@ func deref(s *string) string {
 	}
 	return *s
 }
+
+func GetHostByName(ctx context.Context, name string) (HostRow, error) {
+	var (
+		id    int64
+		hname string
+		addr  *string
+		varsB []byte
+		grps  []string
+		labsB []byte
+		owner string
+	)
+	err := db.QueryRow(ctx,
+		`SELECT id, name, addr, vars, "groups", labels, owner FROM hosts WHERE name=$1`, name).
+		Scan(&id, &hname, &addr, &varsB, &grps, &labsB, &owner)
+	if err != nil {
+		return HostRow{}, err
+	}
+	v := map[string]string{}
+	_ = json.Unmarshal(varsB, &v)
+	l := map[string]string{}
+	_ = json.Unmarshal(labsB, &l)
+	h := HostRow{
+		ID:     id,
+		Name:   hname,
+		Addr:   deref(addr),
+		Vars:   v,
+		Groups: grps,
+		Labels: l,
+		Owner:  owner,
+	}
+	h.normalize()
+	return h, nil
+}

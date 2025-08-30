@@ -1,197 +1,150 @@
 package main
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"strings"
+	"log"
+	"os"
+	"sync"
 	"time"
 
-	"golang.org/x/crypto/ssh"
+	"github.com/docker/docker/api/types/container"
+	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/client"
 )
 
-type sshCfg struct {
-	User   string
-	Port   string
-	KeyPem string
-	Sudo   bool
-	Strict bool
+var sshEnvMu sync.Mutex
+
+func dockerURLFor(h HostRow) (string, string) {
+	// Prefer explicit var from inventory: docker_host: ssh://user@host or tcp://...
+	if v := h.Vars["docker_host"]; v != "" {
+		return v, h.Vars["docker_ssh_cmd"]
+	}
+
+	kind := env("DDUI_SCAN_KIND", "ssh") // "ssh" | "tcp" | "local"
+	switch kind {
+	case "local":
+		return "unix:///var/run/docker.sock", ""
+	case "tcp":
+		// requires dockerd to listen on TCP (optionally with TLS)
+		host := h.Addr
+		if host == "" { host = h.Name }
+		port := env("DDUI_DOCKER_TCP_PORT", "2375")
+		return fmt.Sprintf("tcp://%s:%s", host, port), ""
+	default: // ssh
+		user := h.Vars["ansible_user"]
+		if user == "" {
+			user = env("DDUI_SSH_USER", "root")
+		}
+		addr := h.Addr
+		if addr == "" { addr = h.Name }
+		return fmt.Sprintf("ssh://%s@%s", user, addr), os.Getenv("DOCKER_SSH_CMD")
+	}
 }
 
-func loadSSH() (sshCfg, error) {
-	key, err := readSecretMaybeFile(env("DDUI_SSH_KEY", "")) // supports "@/run/secrets/…"
+func withSSHEnv(cmd string, fn func() error) error {
+	// DOCKER_SSH_CMD is read by docker's ssh connhelper at dial time.
+	sshEnvMu.Lock()
+	defer sshEnvMu.Unlock()
+
+	prev, had := os.LookupEnv("DOCKER_SSH_CMD")
+	if cmd != "" {
+		_ = os.Setenv("DOCKER_SSH_CMD", cmd)
+	}
+	defer func() {
+		if had {
+			_ = os.Setenv("DOCKER_SSH_CMD", prev)
+		} else {
+			_ = os.Unsetenv("DOCKER_SSH_CMD")
+		}
+	}()
+	return fn()
+}
+
+func dockerClientFor(ctx context.Context, h HostRow) (*client.Client, func(), error) {
+	url, sshCmd := dockerURLFor(h)
+	var cli *client.Client
+	err := withSSHEnv(sshCmd, func() error {
+		var err error
+		cli, err = client.NewClientWithOpts(
+			client.WithHost(url),
+			client.WithAPIVersionNegotiation(),
+		)
+		if err != nil {
+			return err
+		}
+		pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, err = cli.Ping(pctx)
+		return err
+	})
 	if err != nil {
-		return sshCfg{}, err
+		return nil, nil, err
 	}
-	return sshCfg{
-		User:   env("DDUI_SSH_USER", "root"),
-		Port:   env("DDUI_SSH_PORT", "22"),
-		KeyPem: strings.TrimSpace(key),
-		Sudo:   strings.ToLower(env("DDUI_SSH_USE_SUDO", "false")) == "true",
-		Strict: strings.ToLower(env("DDUI_SSH_STRICT_HOST_KEY", "false")) == "true",
-	}, nil
+	cleanup := func() { _ = cli.Close() }
+	return cli, cleanup, nil
 }
 
-func dialSSH(h HostRow) (*ssh.Client, error) {
-	cfg, err := loadSSH()
-	if err != nil {
-		return nil, err
-	}
-	signer, err := ssh.ParsePrivateKey([]byte(cfg.KeyPem))
-	if err != nil {
-		return nil, fmt.Errorf("ssh key parse: %w", err)
-	}
-	cb := ssh.InsecureIgnoreHostKey()
-	if cfg.Strict {
-		// TODO: add known_hosts verification; left off for MVP
-	}
-	clientCfg := &ssh.ClientConfig{
-		User:            cfg.User,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		HostKeyCallback: cb,
-		Timeout:         10 * time.Second,
-	}
-	addr := fmt.Sprintf("%s:%s", firstNonEmpty(h.Addr, h.Name), cfg.Port)
-	return ssh.Dial("tcp", addr, clientCfg)
-}
-
-func runSSH(client *ssh.Client, cmd string) (string, string, error) {
-	sess, err := client.NewSession()
-	if err != nil {
-		return "", "", err
-	}
-	defer sess.Close()
-	var out, errb bytes.Buffer
-	sess.Stdout = &out
-	sess.Stderr = &errb
-	err = sess.Run(cmd)
-	return out.String(), errb.String(), err
-}
-
-func dockerCmd(base string) string {
-	if strings.ToLower(env("DDUI_SSH_USE_SUDO", "false")) == "true" {
-		return "sudo " + base
-	}
-	return base
-}
-
-// Minimal subset of `docker inspect` we care about
-type dockerInspect struct {
-	ID     string `json:"Id"`
-	Name   string `json:"Name"` // starts with "/"
-	Config struct {
-		Image  string            `json:"Image"`
-		Labels map[string]string `json:"Labels"`
-	} `json:"Config"`
-	State struct {
-		Status  string `json:"Status"`  // "running", "exited"
-		Running bool   `json:"Running"` // true/false
-	} `json:"State"`
-	NetworkSettings struct {
-		Ports any `json:"Ports"` // keep raw; JSON friendly
-	} `json:"NetworkSettings"`
-}
-
+// ScanHostContainers connects to a host's Docker and persists containers.
 func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
-	// lookup host
-	row, err := getHostRow(ctx, hostName)
+	h, err := GetHostByName(ctx, hostName)
 	if err != nil {
 		return 0, err
 	}
-	cli, err := dialSSH(row)
+	cli, done, err := dockerClientFor(ctx, h)
 	if err != nil {
+		scanLog(ctx, h.ID, "error", "docker connect failed", map[string]any{"error": err.Error()})
 		return 0, err
 	}
-	defer cli.Close()
+	defer done()
 
-	// 1) list container IDs
-	psCmd := dockerCmd(`docker ps -q`)
-	stdout, stderr, err := runSSH(cli, psCmd)
+	args := filters.NewArgs() // All containers
+	containers, err := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: args})
 	if err != nil {
-		// if docker not installed / permission issue, return verbose error
-		return 0, fmt.Errorf("ps: %v; %s", err, strings.TrimSpace(stderr))
-	}
-	ids := strings.Fields(stdout)
-	if len(ids) == 0 {
-		// nothing running; you might still want to clear stale rows later if desired
-		return 0, nil
-	}
-
-	// 2) inspect all in one shot
-	inspectCmd := dockerCmd(`docker inspect --format='{{json .}}' ` + strings.Join(ids, " "))
-	stdout, stderr, err = runSSH(cli, inspectCmd)
-	if err != nil {
-		return 0, fmt.Errorf("inspect: %v; %s", err, strings.TrimSpace(stderr))
-	}
-
-	// 3) parse and upsert
-	hostID, err := hostIDByName(ctx, hostName)
-	if err != nil {
+		scanLog(ctx, h.ID, "error", "container list failed", map[string]any{"error": err.Error()})
 		return 0, err
 	}
-	lines := splitNonEmptyLines(stdout)
-	n := 0
-	for _, ln := range lines {
-		var di dockerInspect
-		if err := json.Unmarshal([]byte(ln), &di); err != nil {
-			continue // skip malformed
+	count := 0
+	for _, c := range containers {
+		name := ""
+		if len(c.Names) > 0 {
+			name = c.Names[0]
 		}
-		lbls := map[string]string{}
-		for k, v := range di.Config.Labels {
-			lbls[k] = v
-		}
-		cr := ContainerRow{
-			HostID:      hostID,
-			ContainerID: di.ID,
-			Name:        strings.TrimPrefix(di.Name, "/"),
-			Image:       di.Config.Image,
-			State:       di.State.Status,
-			Status:      di.State.Status,
-			Labels:      lbls,
-			Owner:       row.Owner,
-		}
-		// raw Ports -> slice
-		switch p := di.NetworkSettings.Ports.(type) {
-		case map[string]any:
-			cr.Ports = []any{p}
-		case []any:
-			cr.Ports = p
-		default:
-			cr.Ports = []any{}
-		}
-		// compose grouping (if present)
-		cr.ComposeProj = lbls["com.docker.compose.project"]
-		cr.ComposeSvc  = lbls["com.docker.compose.service"]
 
-		if err := upsertContainer(ctx, cr); err == nil {
-			n++
+		// infer stack/compose project name
+		project := c.Labels["com.docker.compose.project"]
+		if project == "" {
+			project = c.Labels["com.docker.stack.namespace"]
 		}
+		var stackID int64
+		if project != "" {
+			sid, err := ensureStack(ctx, h.ID, project, h.Owner)
+			if err != nil {
+				scanLog(ctx, h.ID, "warn", "ensure stack failed", map[string]any{"project": project, "error": err.Error()})
+			} else {
+				stackID = sid
+			}
+		}
+
+		// ports as a generic map for UI
+		ports := map[string]any{"ports": c.Ports}
+
+		if err := upsertContainer(ctx, h.ID, stackID, c.ID, trimSlash(name), c.Image, c.State, c.Status, h.Owner, ports, c.Labels); err != nil {
+			scanLog(ctx, h.ID, "error", "upsert container failed", map[string]any{"name": name, "id": c.ID, "error": err.Error()})
+			continue
+		}
+
+		scanLog(ctx, h.ID, "info", "container discovered",
+			map[string]any{"name": name, "image": c.Image, "state": c.State, "project": project})
+		count++
 	}
-	return n, nil
+	scanLog(ctx, h.ID, "info", "scan complete", map[string]any{"containers": count})
+	return count, nil
 }
 
-func getHostRow(ctx context.Context, name string) (HostRow, error) {
-	var r HostRow
-	err := db.QueryRow(ctx, `SELECT id, name, addr, "groups", labels, owner FROM hosts WHERE name=$1`, name).
-		Scan(&r.ID, &r.Name, &r.Addr, &r.Groups, &r.Labels, &r.Owner)
-	return r, err
-}
-
-func splitNonEmptyLines(s string) []string {
-	var out []string
-	for _, ln := range strings.Split(s, "\n") {
-		ln = strings.TrimSpace(ln)
-		if ln != "" {
-			out = append(out, ln)
-		}
+func trimSlash(s string) string {
+	for len(s) > 0 && s[0] == '/' {
+		s = s[1:]
 	}
-	return out
-}
-
-func firstNonEmpty(a, b string) string {
-	if strings.TrimSpace(a) != "" {
-		return a
-	}
-	return b
+	return s
 }

@@ -1,10 +1,13 @@
+// src/api/web.go
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -35,25 +38,61 @@ func makeRouter() http.Handler {
 		api.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 			respondJSON(w, Health{Status: "ok", StartedAt: startedAt, Edition: "Community"})
 		})
-	
-		// session probe MUST be public
+
+		// Session probe MUST be public
 		api.Get("/session", SessionHandler)
-	
-		// everything below requires auth
+
+		// Everything below requires auth
 		api.Group(func(priv chi.Router) {
 			priv.Use(RequireAuth)
-	
-			// list hosts
+
+			// List hosts with optional filters:
+			//   /api/hosts?owner=alice&q=anch&limit=50&offset=0
 			priv.Get("/hosts", func(w http.ResponseWriter, r *http.Request) {
 				items, err := ListHosts(r.Context())
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
 					return
 				}
-				writeJSON(w, http.StatusOK, map[string]any{"items": items})
+
+				owner := strings.TrimSpace(r.URL.Query().Get("owner"))
+				q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
+				limit := clamp(parseIntDefault(r.URL.Query().Get("limit"), 200), 1, 1000)
+				offset := parseIntDefault(r.URL.Query().Get("offset"), 0)
+
+				// in-process filter/paginate (DB-level can come later)
+				filtered := make([]HostRow, 0, len(items))
+				for _, h := range items {
+					if owner != "" && !strings.EqualFold(h.Owner, owner) {
+						continue
+					}
+					if q != "" {
+						if !strings.Contains(strings.ToLower(h.Name), q) &&
+							!strings.Contains(strings.ToLower(h.Addr), q) {
+							continue
+						}
+					}
+					filtered = append(filtered, h)
+				}
+				lo := offset
+				if lo > len(filtered) {
+					lo = len(filtered)
+				}
+				hi := lo + limit
+				if hi > len(filtered) {
+					hi = len(filtered)
+				}
+				page := filtered[lo:hi]
+
+				writeJSON(w, http.StatusOK, map[string]any{
+					"items":  page,
+					"total":  len(filtered),
+					"limit":  limit,
+					"offset": offset,
+				})
 			})
 
-			// list containers by host
+			// List containers by host
 			priv.Get("/hosts/{name}/containers", func(w http.ResponseWriter, r *http.Request) {
 				name := chi.URLParam(r, "name")
 				items, err := listContainersByHost(r.Context(), name)
@@ -63,11 +102,17 @@ func makeRouter() http.Handler {
 				}
 				writeJSON(w, http.StatusOK, map[string]any{"items": items})
 			})
-	
-			// trigger on-demand scan for a host
+
+			// Trigger on-demand scan for a single host
 			priv.Post("/scan/host/{name}", func(w http.ResponseWriter, r *http.Request) {
 				name := chi.URLParam(r, "name")
-				n, err := ScanHostContainers(r.Context(), name)
+
+				// Optional per-host timeout (default 45s)
+				to := parseDurationDefault(r.URL.Query().Get("timeout"), 45*time.Second)
+				ctx, cancel := context.WithTimeout(r.Context(), to)
+				defer cancel()
+
+				n, err := ScanHostContainers(ctx, name)
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
@@ -78,12 +123,50 @@ func makeRouter() http.Handler {
 					"status": "ok",
 				})
 			})
-	
+
+			// Trigger scan for all known hosts (sequential, simple summary)
+			//   POST /api/scan/all?timeout=30s
+			priv.Post("/scan/all", func(w http.ResponseWriter, r *http.Request) {
+				hostRows, err := ListHosts(r.Context())
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+
+				perHostTO := parseDurationDefault(r.URL.Query().Get("timeout"), 30*time.Second)
+				type result struct {
+					Host  string `json:"host"`
+					Saved int    `json:"saved"`
+					Err   string `json:"err,omitempty"`
+				}
+				var results []result
+				var total int
+
+				for _, h := range hostRows {
+					ctx, cancel := context.WithTimeout(r.Context(), perHostTO)
+					n, err := ScanHostContainers(ctx, h.Name)
+					cancel()
+					if err != nil {
+						results = append(results, result{Host: h.Name, Err: err.Error()})
+						continue
+					}
+					total += n
+					results = append(results, result{Host: h.Name, Saved: n})
+				}
+
+				writeJSON(w, http.StatusOK, map[string]any{
+					"scanned": len(hostRows),
+					"saved":   total,
+					"results": results,
+					"status":  "ok",
+				})
+			})
+
 			// POST /api/inventory/reload  (optional body: {"path":"/new/path"})
 			priv.Post("/inventory/reload", func(w http.ResponseWriter, r *http.Request) {
 				var body struct{ Path string `json:"path"` }
 				_ = json.NewDecoder(r.Body).Decode(&body)
-	
+
 				var err error
 				if strings.TrimSpace(body.Path) != "" {
 					err = ReloadInventoryWithPath(body.Path)
@@ -99,7 +182,7 @@ func makeRouter() http.Handler {
 		})
 	})
 
-	// legacy alias
+	// Legacy alias
 	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
 		respondJSON(w, Health{Status: "ok", StartedAt: startedAt, Edition: "Community"})
 	})
@@ -115,7 +198,7 @@ func makeRouter() http.Handler {
 	uiRoot := env("DDUI_UI_DIR", "/home/ddui/ui/dist")
 	fs := http.FileServer(http.Dir(uiRoot))
 
-	// serve built assets directly
+	// Serve built assets directly
 	r.Get("/assets/*", func(w http.ResponseWriter, req *http.Request) {
 		fs.ServeHTTP(w, req)
 	})
@@ -139,5 +222,44 @@ func makeRouter() http.Handler {
 
 func respondJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	// discourage caching of API responses
+	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func writeJSON(w http.ResponseWriter, code int, v any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.WriteHeader(code)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func parseIntDefault(s string, def int) int {
+	if s == "" {
+		return def
+	}
+	if n, err := strconv.Atoi(s); err == nil {
+		return n
+	}
+	return def
+}
+
+func clamp(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
+}
+
+func parseDurationDefault(s string, def time.Duration) time.Duration {
+	if s == "" {
+		return def
+	}
+	if d, err := time.ParseDuration(s); err == nil {
+		return d
+	}
+	return def
 }

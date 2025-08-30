@@ -17,7 +17,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /bin/ddui
 
 # --- Runtime ---
 FROM debian:bookworm-slim
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl tzdata && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl openssh-client tzdata && rm -rf /var/lib/apt/lists/*
 WORKDIR /home/ddui
 COPY --from=api /bin/ddui /usr/local/bin/ddui
 COPY --from=ui /ui/dist ./ui/dist

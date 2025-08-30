@@ -1,17 +1,11 @@
+// src/api/db_containers.go
 package main
 
 import (
 	"context"
 	"encoding/json"
+	"time"
 )
-
-type StackRow struct {
-	ID      int64  `json:"id"`
-	HostID  int64  `json:"host_id"`
-	Project string `json:"project"`
-	Source  string `json:"source"`
-	Owner   string `json:"owner"`
-}
 
 type ContainerRow struct {
 	ID           int64             `json:"id"`
@@ -22,99 +16,99 @@ type ContainerRow struct {
 	Image        string            `json:"image"`
 	State        string            `json:"state"`
 	Status       string            `json:"status"`
-	Ports        []any             `json:"ports"`
-	Labels       map[string]string `json:"labels"`
-	ComposeProj  string            `json:"compose_project,omitempty"`
+	Ports        []any             `json:"ports"`                    // stored as JSONB array
+	Labels       map[string]string `json:"labels"`                   // stored as JSONB object
+	ComposeProj  string            `json:"compose_project,omitempty"`// from compose/stack labels or stacks.project
 	ComposeSvc   string            `json:"compose_service,omitempty"`
 	Owner        string            `json:"owner"`
+	UpdatedAt    time.Time         `json:"updated_at"`
 }
 
-func hostIDByName(ctx context.Context, name string) (int64, error) {
-	var id int64
-	err := db.QueryRow(ctx, `SELECT id FROM hosts WHERE name=$1`, name).Scan(&id)
-	return id, err
-}
-
-func hostOwnerByID(ctx context.Context, id int64) (string, error) {
-	var owner string
-	err := db.QueryRow(ctx, `SELECT owner FROM hosts WHERE id=$1`, id).Scan(&owner)
-	return owner, err
-}
-
-func upsertStack(ctx context.Context, hostID int64, project string, owner string) (int64, error) {
-	var id int64
-	err := db.QueryRow(ctx, `
-		INSERT INTO stacks(host_id, project, owner) VALUES($1,$2,$3)
-		ON CONFLICT(host_id, project) DO UPDATE SET
-			project = EXCLUDED.project,
-			owner   = EXCLUDED.owner
-		RETURNING id
-	`, hostID, project, owner).Scan(&id)
-	return id, err
-}
-
-func upsertContainer(ctx context.Context, c ContainerRow) error {
-	portsJSON, _ := json.Marshal(c.Ports)
-	labelsJSON, _ := json.Marshal(c.Labels)
-
-	var stackID *int64
-	if c.ComposeProj != "" {
-		id, err := upsertStack(ctx, c.HostID, c.ComposeProj, c.Owner)
-		if err == nil {
-			stackID = &id
-		}
-	}
+// upsertContainer inserts/updates a container row.
+// Pass stackID as nil when no project is inferred.
+func upsertContainer(
+	ctx context.Context,
+	hostID int64,
+	stackID *int64,
+	cid, name, image, state, status, owner string,
+	ports any,                       // e.g. docker's []types.Port or already-marshaled shape
+	labels map[string]string,
+) error {
+	portsB, _ := json.Marshal(ports)
+	labsB, _ := json.Marshal(labels)
 
 	_, err := db.Exec(ctx, `
-		INSERT INTO containers
-		  (host_id, stack_id, container_id, name, image, state, status, ports, labels, owner)
-		VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)
-		ON CONFLICT(host_id, container_id) DO UPDATE SET
-		  stack_id = EXCLUDED.stack_id,
-		  name     = EXCLUDED.name,
-		  image    = EXCLUDED.image,
-		  state    = EXCLUDED.state,
-		  status   = EXCLUDED.status,
-		  ports    = EXCLUDED.ports,
-		  labels   = EXCLUDED.labels,
-		  owner    = EXCLUDED.owner,
-		  updated_at = now()
-	`, c.HostID, stackID, c.ContainerID, c.Name, c.Image, c.State, c.Status, string(portsJSON), string(labelsJSON), c.Owner)
+		INSERT INTO containers (host_id, stack_id, container_id, name, image, state, status, ports, labels, owner)
+		VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9::jsonb,COALESCE(NULLIF($10,''), 'unassigned'))
+		ON CONFLICT (host_id, container_id) DO UPDATE
+		  SET stack_id   = EXCLUDED.stack_id,
+		      name       = EXCLUDED.name,
+		      image      = EXCLUDED.image,
+		      state      = EXCLUDED.state,
+		      status     = EXCLUDED.status,
+		      ports      = EXCLUDED.ports,
+		      labels     = EXCLUDED.labels,
+		      owner      = COALESCE(EXCLUDED.owner, containers.owner),
+		      updated_at = now()
+	`, hostID, stackID, cid, name, image, state, status, string(portsB), string(labsB), owner)
 	return err
 }
 
+// listContainersByHost returns the persisted container state for a host.
 func listContainersByHost(ctx context.Context, hostName string) ([]ContainerRow, error) {
-	var out []ContainerRow
+	h, err := GetHostByName(ctx, hostName)
+	if err != nil {
+		return nil, err
+	}
+
 	rows, err := db.Query(ctx, `
-		SELECT c.container_id, c.name, c.image, c.state, c.status, c.ports, c.labels,
-		       s.project, c.stack_id, c.host_id, c.owner
+		SELECT
+		  c.id, c.host_id, c.stack_id, c.container_id, c.name, c.image, c.state, c.status,
+		  c.ports, c.labels, s.project, c.owner, c.updated_at
 		FROM containers c
 		LEFT JOIN stacks s ON s.id = c.stack_id
-		JOIN hosts h ON h.id = c.host_id
-		WHERE h.name = $1
+		WHERE c.host_id = $1
 		ORDER BY c.name
-	`, hostName)
+	`, h.ID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 
+	var out []ContainerRow
 	for rows.Next() {
-		var portsB []byte
-		var labelsB []byte
-		var proj *string
-		var stackID *int64
-		var c ContainerRow
-		if err := rows.Scan(&c.ContainerID, &c.Name, &c.Image, &c.State, &c.Status, &portsB, &labelsB, &proj, &stackID, &c.HostID, &c.Owner); err != nil {
+		var (
+			cr                  ContainerRow
+			portsB, labelsB     []byte
+			projectFromStack    *string
+		)
+		if err := rows.Scan(
+			&cr.ID, &cr.HostID, &cr.StackID, &cr.ContainerID, &cr.Name, &cr.Image, &cr.State, &cr.Status,
+			&portsB, &labelsB, &projectFromStack, &cr.Owner, &cr.UpdatedAt,
+		); err != nil {
 			return nil, err
 		}
-		_ = json.Unmarshal(portsB, &c.Ports)
-		_ = json.Unmarshal(labelsB, &c.Labels)
-		if proj != nil {
-			c.ComposeProj = *proj
+
+		// Decode JSON fields
+		_ = json.Unmarshal(portsB, &cr.Ports)   // []any
+		_ = json.Unmarshal(labelsB, &cr.Labels) // map[string]string
+
+		// Derive compose metadata
+		if projectFromStack != nil && *projectFromStack != "" {
+			cr.ComposeProj = *projectFromStack
+		} else if v, ok := cr.Labels["com.docker.compose.project"]; ok && v != "" {
+			cr.ComposeProj = v
+		} else if v, ok := cr.Labels["com.docker.stack.namespace"]; ok && v != "" {
+			cr.ComposeProj = v
 		}
-		c.StackID = stackID
-		out = append(out, c)
+
+		if v, ok := cr.Labels["com.docker.compose.service"]; ok && v != "" {
+			cr.ComposeSvc = v
+		} else if v, ok := cr.Labels["com.docker.service.name"]; ok && v != "" {
+			cr.ComposeSvc = v
+		}
+
+		out = append(out, cr)
 	}
 	return out, rows.Err()
 }

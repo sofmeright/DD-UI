@@ -15,10 +15,27 @@ import (
 )
 
 type Host struct {
-	Name string            `json:"name"`
-	Addr string            `json:"addr"`           // from ansible_host
-	Vars map[string]string `json:"vars,omitempty"` // extra vars
-	Groups []string        `json:"groups,omitempty"`
+	Name   string            `json:"name"`
+	Addr   string            `json:"addr"`            // from ansible_host
+	Vars   map[string]string `json:"vars,omitempty"`  // extra vars (we store as labels)
+	Groups []string          `json:"groups,omitempty"`
+}
+
+// DB row payload (separate from API wire model so we can normalize cleanly)
+type HostRow struct {
+	Name   string
+	Addr   string
+	Groups []string
+	Labels map[string]string
+}
+
+func (h *HostRow) normalize() {
+	if h.Groups == nil {
+		h.Groups = []string{}
+	}
+	if h.Labels == nil {
+		h.Labels = map[string]string{}
+	}
 }
 
 var (
@@ -78,14 +95,21 @@ func loadInventory(p string) error {
 	if err != nil {
 		return err
 	}
-	kind, parsed, err := detectInventoryFormat(b)
-	// after parsed := []Host{...}
+	kind, parsed, derr := detectInventoryFormat(b)
+	if derr != nil {
+		return derr
+	}
+
+	// persist to DB
 	if err := ImportInventoryToDB(context.Background(), parsed); err != nil {
 		return err
 	}
+
+	// optional in-memory cache for quick GET /api/hosts
 	invMu.Lock()
-	hosts = parsed // keep in-memory cache if you like (optional)
+	hosts = parsed
 	invMu.Unlock()
+
 	log.Printf("inventory: loaded %d hosts from %s (%s)", len(parsed), p, kind)
 	return nil
 }
@@ -183,3 +207,30 @@ func parseINIInventory(b []byte) ([]Host, error) {
 }
 
 func stringify(v any) string { return fmt.Sprintf("%v", v) }
+
+// ----- DB import (upsert hosts) -----
+
+func ImportInventoryToDB(ctx context.Context, hs []Host) error {
+	for _, h := range hs {
+		row := HostRow{
+			Name:   h.Name,
+			Addr:   h.Addr,
+			Groups: h.Groups, // may be nil; normalize() fixes to []
+			Labels: h.Vars,   // store vars as labels jsonb
+		}
+		row.normalize()
+
+		_, err := db.Exec(ctx, `
+			INSERT INTO hosts (name, addr, "groups", labels)
+			VALUES ($1, $2, $3, $4)
+			ON CONFLICT (name) DO UPDATE
+			  SET addr    = EXCLUDED.addr,
+			      "groups" = COALESCE(EXCLUDED."groups", hosts."groups"),
+			      labels   = COALESCE(EXCLUDED.labels, hosts.labels)
+		`, row.Name, row.Addr, row.Groups, row.Labels)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}

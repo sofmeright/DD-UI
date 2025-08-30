@@ -20,35 +20,41 @@ var db *pgxpool.Pool
 
 // ---- ENV helpers ----
 
+// dsnFromEnv builds a libpq keyword connection string so we don't fight URL escaping.
 func dsnFromEnv() string {
-	if s := env("DDUI_DB_DSN", ""); s != "" {
-		return s
-	}
+    if s := env("DDUI_DB_DSN", ""); s != "" {
+        return s
+    }
+    host := env("DDUI_DB_HOST", "postgres")
+    port := env("DDUI_DB_PORT", "5432")
+    user := env("DDUI_DB_USER", "ddui")
 
-	host := env("DDUI_DB_HOST", "postgres")
-	port := env("DDUI_DB_PORT", "5432")
-	user := env("DDUI_DB_USER", "ddui")
+    // Prefer file, fall back to DDUI_DB_PASS. Do NOT trim; use bytes as-is.
+    pass := env("DDUI_DB_PASS", "")
+    if pf := env("DDUI_DB_PASS_FILE", ""); pf != "" {
+        if b, err := os.ReadFile(pf); err == nil {
+            pass = string(b) // no TrimSpace!
+        }
+    }
+    if strings.HasPrefix(pass, "@") {
+        if b, err := os.ReadFile(strings.TrimPrefix(pass, "@")); err == nil {
+            pass = string(b)
+        }
+    }
 
-	// password: support DDUI_DB_PASS, DDUI_DB_PASS_FILE, and "@/path" shorthand
-	pass := env("DDUI_DB_PASS", "")
-	if pf := env("DDUI_DB_PASS_FILE", ""); pf != "" {
-		if b, err := os.ReadFile(pf); err == nil {
-			pass = strings.TrimSpace(string(b))
-		}
-	}
-	if strings.HasPrefix(pass, "@") {
-		if b, err := os.ReadFile(strings.TrimPrefix(pass, "@")); err == nil {
-			pass = strings.TrimSpace(string(b))
-		}
-	}
-	if pass == "" {
-		pass = "ddui"
-	}
+    name := env("DDUI_DB_NAME", "ddui")
+    ssl  := env("DDUI_DB_SSLMODE", "disable")
 
-	name := env("DDUI_DB_NAME", "ddui")
-	ssl := env("DDUI_DB_SSLMODE", "disable") // use "require" if you enable TLS
+    // Quote values to be safe with spaces/specials.
+    return fmt.Sprintf("host=%s port=%s user=%s password=%s dbname=%s sslmode=%s",
+        kv(host), kv(port), kv(user), kv(pass), kv(name), kv(ssl))
+}
 
-	return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s", user, pass, host, port, name, ssl)
+func kv(v string) string {
+    // Single-quote and escape backslash and single quote for libpq.
+    v = strings.ReplaceAll(v, `\`, `\\`)
+    v = strings.ReplaceAll(v, `'`, `\'`)
+    return "'" + v + "'"
 }
 
 func atoiEnv(key, def string) int {

@@ -1,3 +1,4 @@
+// src/api/auth.go
 package main
 
 import (

@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os"
 	"sync"
 	"time"
@@ -116,23 +115,39 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 		if project == "" {
 			project = c.Labels["com.docker.stack.namespace"]
 		}
-		var stackID int64
+
+		var stackIDPtr *int64
 		if project != "" {
 			sid, err := ensureStack(ctx, h.ID, project, h.Owner)
 			if err != nil {
 				scanLog(ctx, h.ID, "warn", "ensure stack failed", map[string]any{"project": project, "error": err.Error()})
 			} else {
-				stackID = sid
+				// make a pointer for upsertContainer; nil means “no stack”
+				stackID := sid
+				stackIDPtr = &stackID
 			}
 		}
 
 		// ports as a generic map for UI
 		ports := map[string]any{"ports": c.Ports}
 
-		if err := upsertContainer(ctx, h.ID, stackID, c.ID, trimSlash(name), c.Image, c.State, c.Status, h.Owner, ports, c.Labels); err != nil {
+		if err := upsertContainer(
+			ctx,
+			h.ID,
+			stackIDPtr,                 // <— pointer (or nil)
+			c.ID,
+			trimSlash(name),
+			c.Image,
+			c.State,
+			c.Status,
+			h.Owner,
+			ports,
+			c.Labels,
+		); err != nil {
 			scanLog(ctx, h.ID, "error", "upsert container failed", map[string]any{"name": name, "id": c.ID, "error": err.Error()})
 			continue
 		}
+
 
 		scanLog(ctx, h.ID, "info", "container discovered",
 			map[string]any{"name": name, "image": c.Image, "state": c.State, "project": project})

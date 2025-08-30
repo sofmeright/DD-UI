@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"strings"
 )
 
 type HostRow struct {
@@ -35,17 +36,27 @@ func UpsertHosts(ctx context.Context, items []Host) error {
 			g = []string{}
 		}
 
+		// ensure non-empty owner (never NULL)
+		owner := strings.TrimSpace(h.Owner)
+		if owner == "" {
+			if def := env("DDUI_DEFAULT_OWNER", ""); def != "" {
+				owner = def
+			} else {
+				owner = "unassigned"
+			}
+		}
+
 		varsJSON, _ := json.Marshal(h.Vars)
 		if _, err := db.Exec(ctx, `
 			INSERT INTO hosts (name, addr, vars, "groups", owner, updated_at)
-			VALUES ($1, $2, $3::jsonb, $4, NULLIF($5,''), now())
+			VALUES ($1, $2, $3::jsonb, $4, $5, now())
 			ON CONFLICT (name) DO UPDATE
-			SET addr      = EXCLUDED.addr,
-			    vars      = EXCLUDED.vars,
-			    "groups"  = EXCLUDED."groups",
-			    owner     = COALESCE(EXCLUDED.owner, hosts.owner),
-			    updated_at= now()
-		`, h.Name, h.Addr, string(varsJSON), g, h.Owner); err != nil {
+			SET addr       = EXCLUDED.addr,
+			    vars       = EXCLUDED.vars,
+			    "groups"   = EXCLUDED."groups",
+			    owner      = EXCLUDED.owner,
+			    updated_at = now()
+		`, h.Name, h.Addr, string(varsJSON), g, owner); err != nil {
 			return err
 		}
 	}

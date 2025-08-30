@@ -1,3 +1,4 @@
+// src/api/db_hosts.go
 package main
 
 import (
@@ -5,24 +6,6 @@ import (
 	"encoding/json"
 	"time"
 )
-
-func UpsertHosts(ctx context.Context, items []Host) error {
-	for _, h := range items {
-		varsJSON, _ := json.Marshal(h.Vars)
-		if _, err := db.Exec(ctx, `
-			INSERT INTO hosts (name, addr, vars, groups, updated_at)
-			VALUES ($1, $2, $3::jsonb, $4, now())
-			ON CONFLICT (name) DO UPDATE
-			SET addr = EXCLUDED.addr,
-			    vars = EXCLUDED.vars,
-			    groups = EXCLUDED.groups,
-			    updated_at = now()
-		`, h.Name, h.Addr, string(varsJSON), h.Groups); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
 type HostRow struct {
 	ID     int64             `json:"id"`
@@ -32,8 +15,35 @@ type HostRow struct {
 	Groups []string          `json:"groups"`
 }
 
+func UpsertHosts(ctx context.Context, items []Host) error {
+	for _, h := range items {
+		// normalize so we never send NULL to NOT NULL columns
+		if h.Vars == nil {
+			h.Vars = map[string]string{}
+		}
+		if h.Groups == nil {
+			h.Groups = []string{}
+		}
+
+		varsJSON, _ := json.Marshal(h.Vars)
+
+		if _, err := db.Exec(ctx, `
+			INSERT INTO hosts (name, addr, vars, "groups", updated_at)
+			VALUES ($1, $2, $3::jsonb, $4, now())
+			ON CONFLICT (name) DO UPDATE
+			SET addr      = EXCLUDED.addr,
+			    vars      = EXCLUDED.vars,
+			    "groups"  = EXCLUDED."groups",
+			    updated_at = now()
+		`, h.Name, h.Addr, string(varsJSON), h.Groups); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func ListHosts(ctx context.Context) ([]HostRow, error) {
-	rows, err := db.Query(ctx, `SELECT id, name, addr, vars, groups FROM hosts ORDER BY name`)
+	rows, err := db.Query(ctx, `SELECT id, name, addr, vars, "groups" FROM hosts ORDER BY name`)
 	if err != nil {
 		return nil, err
 	}
@@ -73,7 +83,6 @@ func deref(s *string) string {
 
 // Called by the inventory loader after parsing
 func ImportInventoryToDB(ctx context.Context, hs []Host) error {
-	// light throttle for very large imports in the future; not needed now
 	return UpsertHosts(ctx, hs)
 }
 

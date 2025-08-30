@@ -18,19 +18,12 @@ type Host = {
   groups?: string[];
   lastSync?: string;
   stacks?: Array<{
-    name: string;
-    type?: string;
-    status?: "in_sync" | "drift" | "stopped" | "error";
-    pullPolicy?: string;
-    sops?: boolean;
+    name: string;                // stack/project name or "(none)"
     containers: Array<{
       name: string;
       image: string;
-      desiredImage?: string;
-      state: "running" | "exited" | string;
-      ports?: string;
-      created?: string;
-      lastPulled?: string;
+      state: string;             // running/exited/…
+      status: string;
     }>;
   }>;
 };
@@ -57,6 +50,15 @@ type ScanAllResponse = {
     reason?: string;
   }>;
   status: "ok";
+};
+
+type ApiContainer = {
+  name: string;
+  image: string;
+  state: string;
+  status: string;
+  stack?: string | null;         // from backend SELECT s.project as stack
+  // other fields exist but we don't need them here
 };
 
 function MetricCard({ title, value, icon: Icon, accent=false }: { title: string; value: React.ReactNode; icon: any; accent?: boolean }) {
@@ -88,17 +90,19 @@ function StatusPill({ result }: { result?: { kind: "ok" | "skipped" | "error"; s
 export default function App() {
   const [query, setQuery] = useState("");
   const [toggles, setToggles] = useState({ staging: false, autoPull: false, applyOnChange: false });
+
   const [hosts, setHosts] = useState<Host[]>([]);
   const [loading, setLoading] = useState(true);
+  const [stacksLoading, setStacksLoading] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   // scanning UI state
   const [scanning, setScanning] = useState(false);
   const [scanSummary, setScanSummary] = useState<ScanAllResponse | null>(null);
   const [scanErr, setScanErr] = useState<string | null>(null);
-  // map host → last scan status in this session
   const [hostScanState, setHostScanState] = useState<Record<string, { kind: "ok" | "skipped" | "error"; saved?: number; reason?: string; err?: string }>>({});
 
+  // --- fetch hosts then their stacks/containers ---
   async function fetchHosts() {
     setLoading(true);
     setErr(null);
@@ -110,16 +114,16 @@ export default function App() {
       }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data = await res.json();
-
-      // Map backend HostRow -> UI Host
       const items = Array.isArray(data.items) ? data.items : [];
       const mapped: Host[] = items.map((h: any) => ({
         name: h.name,
         address: h.addr ?? h.address ?? "",
         groups: h.groups ?? [],
-        // lastSync could be wired later from DB if you add it
+        stacks: [],               // will fill below
       }));
       setHosts(mapped);
+      // then hydrate stacks
+      await hydrateStacks(mapped);
     } catch (e: any) {
       setErr(e?.message || "Failed to load hosts");
     } finally {
@@ -127,48 +131,78 @@ export default function App() {
     }
   }
 
+  async function hydrateStacks(hostList: Host[]) {
+    if (!hostList.length) return;
+    setStacksLoading(true);
+    try {
+      // fetch containers for all hosts in parallel
+      const pairs = await Promise.all(
+        hostList.map(async (h) => {
+          const res = await fetch(`/api/hosts/${encodeURIComponent(h.name)}/containers`, { credentials: "include" });
+          if (res.status === 401) { window.location.href = "/login"; return [h.name, []] as const; }
+          if (!res.ok) return [h.name, []] as const;
+          const data = await res.json();
+          const items: ApiContainer[] = Array.isArray(data.items) ? data.items : [];
+          const byStack = new Map<string, ApiContainer[]>();
+          for (const c of items) {
+            const key = (c.stack && c.stack.trim()) ? c.stack.trim() : "(none)";
+            if (!byStack.has(key)) byStack.set(key, []);
+            byStack.get(key)!.push(c);
+          }
+          const stacks = Array.from(byStack.entries()).map(([name, cs]) => ({
+            name,
+            containers: cs.map(c => ({
+              name: c.name,
+              image: c.image,
+              state: c.state,
+              status: c.status,
+            })),
+          }));
+          return [h.name, stacks] as const;
+        })
+      );
+
+      const map: Record<string, Host["stacks"]> = {};
+      for (const [host, stacks] of pairs) {
+        map[host] = stacks;
+      }
+      // merge back into hosts
+      setHosts(prev =>
+        prev.map(h => ({ ...h, stacks: map[h.name] ?? h.stacks ?? [] }))
+      );
+    } finally {
+      setStacksLoading(false);
+    }
+  }
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
-      if (!cancelled) {
-        await fetchHosts();
-      }
+      if (!cancelled) await fetchHosts();
     })();
     return () => { cancelled = true; };
   }, []);
 
-  // ---- SCAN handlers
-
+  // ---- SCAN handlers (unchanged) ----
   async function handleScanAll() {
     if (scanning) return;
     setScanning(true);
     setScanErr(null);
     setScanSummary(null);
     try {
-      const res = await fetch("/api/scan/all", {
-        method: "POST",
-        credentials: "include"
-      });
+      const res = await fetch("/api/scan/all", { method: "POST", credentials: "include" });
       if (res.status === 401) { window.location.href = "/login"; return; }
       if (!res.ok) throw new Error(`HTTP ${res.status}`);
       const data: ScanAllResponse = await res.json();
       setScanSummary(data);
-
-      // build host -> status map
       const map: Record<string, { kind: "ok" | "skipped" | "error"; saved?: number; reason?: string; err?: string }> = {};
       for (const r of data.results) {
-        if (r.skipped) {
-          map[r.host] = { kind: "skipped", reason: r.reason };
-        } else if (r.err) {
-          map[r.host] = { kind: "error", err: r.err };
-        } else {
-          map[r.host] = { kind: "ok", saved: r.saved ?? 0 };
-        }
+        if (r.skipped) map[r.host] = { kind: "skipped", reason: r.reason };
+        else if (r.err) map[r.host] = { kind: "error", err: r.err };
+        else map[r.host] = { kind: "ok", saved: r.saved ?? 0 };
       }
       setHostScanState(prev => ({ ...prev, ...map }));
-
-      // refresh hosts after scan
-      await fetchHosts();
+      await fetchHosts(); // refresh stacks after scan
     } catch (e: any) {
       setScanErr(e?.message || "Scan failed");
     } finally {
@@ -177,18 +211,13 @@ export default function App() {
   }
 
   async function handleScanHost(name: string) {
-    if (scanning) return; // keep it simple; could do per-row locking later
+    if (scanning) return;
     setScanning(true);
     setScanErr(null);
     try {
-      const res = await fetch(`/api/scan/host/${encodeURIComponent(name)}`, {
-        method: "POST",
-        credentials: "include"
-      });
+      const res = await fetch(`/api/scan/host/${encodeURIComponent(name)}`, { method: "POST", credentials: "include" });
       if (res.status === 401) { window.location.href = "/login"; return; }
-
       const payload = await res.json() as ScanHostResult | { error?: string };
-      // The API returns {status:"skipped"} on intentional skips.
       if ("status" in payload && payload.status === "skipped") {
         setHostScanState(prev => ({ ...prev, [name]: { kind: "skipped" } }));
       } else if ("err" in payload) {
@@ -197,8 +226,8 @@ export default function App() {
         const saved = (payload as any).saved ?? 0;
         setHostScanState(prev => ({ ...prev, [name]: { kind: "ok", saved } }));
       }
-
-      await fetchHosts();
+      // refresh just this host’s stacks
+      await hydrateStacks([{ name } as Host]);
     } catch (e: any) {
       setScanErr(e?.message || "Host scan failed");
       setHostScanState(prev => ({ ...prev, [name]: { kind: "error", err: String(e?.message || e) } }));
@@ -207,6 +236,7 @@ export default function App() {
     }
   }
 
+  // ---- filters/metrics ----
   const filteredHosts = useMemo(() => {
     const q = query.trim().toLowerCase();
     if (!q) return hosts;
@@ -216,17 +246,17 @@ export default function App() {
     });
   }, [hosts, query]);
 
-  const flatStacks = useMemo(
-    () => filteredHosts.flatMap(h => h.stacks || []),
+  const allStacks = useMemo(
+    () => filteredHosts.flatMap(h => (h.stacks || []).map(s => ({ host: h.name, ...s }))),
     [filteredHosts]
   );
   const metrics = useMemo(() => {
-    const stacks = flatStacks.length;
-    const containers = flatStacks.reduce((acc, s) => acc + (s.containers?.length || 0), 0);
-    const drift = flatStacks.filter(s => s.status === "drift").length;
-    const errors = flatStacks.filter(s => s.status === "error").length;
+    const stacks = allStacks.length;
+    const containers = allStacks.reduce((acc, s) => acc + (s.containers?.length || 0), 0);
+    const drift = 0;  // placeholder until you compute drift
+    const errors = 0; // placeholder until you track stack errors
     return { stacks, containers, drift, errors };
-  }, [flatStacks]);
+  }, [allStacks]);
 
   return (
     <div className="min-h-screen">
@@ -262,6 +292,11 @@ export default function App() {
         {loading && (
           <div className="text-sm px-3 py-2 rounded-lg border border-slate-800 bg-slate-900/60 text-slate-300">
             Loading hosts…
+          </div>
+        )}
+        {stacksLoading && !loading && (
+          <div className="text-sm px-3 py-2 rounded-lg border border-slate-800 bg-slate-900/60 text-slate-300">
+            Loading stacks…
           </div>
         )}
         {err && (
@@ -331,10 +366,11 @@ export default function App() {
         <Tabs defaultValue="manifest" className="mt-2">
           <TabsList className="bg-slate-900/60 border border-slate-800">
             <TabsTrigger value="manifest">Manifest View</TabsTrigger>
+            <TabsTrigger value="stacks">Stacks</TabsTrigger>
             <TabsTrigger value="cards">Cards View</TabsTrigger>
           </TabsList>
 
-          {/* Manifest: host table with scan actions */}
+          {/* Manifest: host table with stacks count + scan actions */}
           <TabsContent value="manifest" className="mt-4">
             <div className="overflow-hidden rounded-xl border border-slate-800">
               <table className="w-full text-sm">
@@ -343,6 +379,7 @@ export default function App() {
                     <th className="p-3 text-left">Host</th>
                     <th className="p-3 text-left">Address</th>
                     <th className="p-3 text-left">Groups</th>
+                    <th className="p-3 text-left">Stacks</th>
                     <th className="p-3 text-left">Scan</th>
                     <th className="p-3 text-left">Status</th>
                   </tr>
@@ -353,6 +390,7 @@ export default function App() {
                       <td className="p-3 font-medium text-slate-200">{h.name}</td>
                       <td className="p-3 text-slate-300">{h.address || "—"}</td>
                       <td className="p-3 text-slate-300">{(h.groups || []).length ? (h.groups || []).join(", ") : "—"}</td>
+                      <td className="p-3 text-slate-300">{h.stacks?.length ?? 0}</td>
                       <td className="p-3">
                         <Button
                           size="sm"
@@ -372,7 +410,7 @@ export default function App() {
                   ))}
                   {!loading && !err && filteredHosts.length === 0 && (
                     <tr>
-                      <td className="p-6 text-center text-slate-500" colSpan={5}>No hosts.</td>
+                      <td className="p-6 text-center text-slate-500" colSpan={6}>No hosts.</td>
                     </tr>
                   )}
                 </tbody>
@@ -380,7 +418,41 @@ export default function App() {
             </div>
           </TabsContent>
 
-          {/* Cards: minimal host tiles */}
+          {/* Stacks tab: rows of host/stack with container counts */}
+          <TabsContent value="stacks" className="mt-4">
+            <div className="overflow-hidden rounded-xl border border-slate-800">
+              <table className="w-full text-sm">
+                <thead className="bg-slate-900/70 text-slate-300">
+                  <tr>
+                    <th className="p-3 text-left">Host</th>
+                    <th className="p-3 text-left">Stack</th>
+                    <th className="p-3 text-left">Containers</th>
+                    <th className="p-3 text-left">Running</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {allStacks.map((s, i) => {
+                    const running = s.containers.filter((c:any) => c.state === "running").length;
+                    return (
+                      <tr key={`${s.host}:${s.name}:${i}`} className="border-t border-slate-800 hover:bg-slate-900/40">
+                        <td className="p-3 font-medium text-slate-200">{s.host}</td>
+                        <td className="p-3 text-slate-300">{s.name}</td>
+                        <td className="p-3 text-slate-300">{s.containers.length}</td>
+                        <td className="p-3 text-slate-300">{running}</td>
+                      </tr>
+                    );
+                  })}
+                  {!loading && !stacksLoading && allStacks.length === 0 && (
+                    <tr>
+                      <td className="p-6 text-center text-slate-500" colSpan={4}>No stacks yet. Try Sync.</td>
+                    </tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+          </TabsContent>
+
+          {/* Cards: per-host tiles with stacks count */}
           <TabsContent value="cards" className="mt-4">
             <div className="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 2xl:grid-cols-4 gap-4">
               {filteredHosts.map(h => (
@@ -391,6 +463,7 @@ export default function App() {
                   </CardHeader>
                   <CardContent className="text-sm text-slate-300 space-y-2">
                     <div><span className="text-slate-400">Groups:</span> {(h.groups || []).length ? (h.groups || []).join(", ") : "—"}</div>
+                    <div><span className="text-slate-400">Stacks:</span> {h.stacks?.length ?? 0}</div>
                     <div className="flex items-center gap-2">
                       <Button
                         size="sm"

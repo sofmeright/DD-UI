@@ -26,32 +26,26 @@ func (h *HostRow) normalize() {
 
 func UpsertHosts(ctx context.Context, items []Host) error {
 	for _, h := range items {
-		// prefer explicit Host.Owner; fallback to var "owner"; then env default
-		owner := h.Owner
-		if owner == "" && h.Vars != nil {
-			if v, ok := h.Vars["owner"]; ok {
-				owner = v
-			}
+		// ensure non-nil maps/slices
+		if h.Vars == nil {
+			h.Vars = map[string]string{}
 		}
-		if owner == "" {
-			owner = env("DDUI_DEFAULT_OWNER", "")
+		g := h.Groups
+		if g == nil {
+			g = []string{}
 		}
 
 		varsJSON, _ := json.Marshal(h.Vars)
-		labelsJSON, _ := json.Marshal(map[string]string{}) // reserved for later
-
-		_, err := db.Exec(ctx, `
-			INSERT INTO hosts (name, addr, vars, "groups", labels, owner, updated_at)
-			VALUES ($1, $2, $3::jsonb, $4, $5::jsonb, $6, now())
-			ON CONFLICT (name) DO UPDATE SET
-				addr      = EXCLUDED.addr,
-				vars      = EXCLUDED.vars,
-				"groups"  = EXCLUDED."groups",
-				labels    = EXCLUDED.labels,
-				owner     = EXCLUDED.owner,
-				updated_at = now()
-		`, h.Name, h.Addr, string(varsJSON), h.Groups, string(labelsJSON), owner)
-		if err != nil {
+		if _, err := db.Exec(ctx, `
+			INSERT INTO hosts (name, addr, vars, "groups", owner, updated_at)
+			VALUES ($1, $2, $3::jsonb, $4, NULLIF($5,''), now())
+			ON CONFLICT (name) DO UPDATE
+			SET addr      = EXCLUDED.addr,
+			    vars      = EXCLUDED.vars,
+			    "groups"  = EXCLUDED."groups",
+			    owner     = COALESCE(EXCLUDED.owner, hosts.owner),
+			    updated_at= now()
+		`, h.Name, h.Addr, string(varsJSON), g, h.Owner); err != nil {
 			return err
 		}
 	}

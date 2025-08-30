@@ -3,8 +3,9 @@ package main
 
 import (
 	"context"
+    "errors"
 	"fmt"
-	"log" // <- needed for debug logging
+	"log"
 	"os"
 	"strings"
 	"sync"
@@ -14,6 +15,9 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 )
+
+// sentinel to mark intentional skips (not an error)
+var ErrSkipScan = errors.New("skip scan")
 
 var sshEnvMu sync.Mutex
 
@@ -124,9 +128,10 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 
 	// HARD GUARD: local-sock may only be used for the explicitly “local” host
 	if isUnixSock(url) && !localHostAllowed(h) {
-		msg := fmt.Errorf("refusing local docker.sock for non-local host %q (set DDUI_LOCAL_HOST=%s or hosts.%s.vars.docker_local=true)", h.Name, h.Name, h.Name)
-		scanLog(ctx, h.ID, "warn", "skip local sock for non-local host", map[string]any{"url": url, "reason": msg.Error()})
-		return 0, msg
+		// log as info, not error — and return ErrSkipScan
+		scanLog(ctx, h.ID, "info", "skip local sock for non-local host",
+			map[string]any{"url": url, "host": h.Name})
+		return 0, ErrSkipScan
 	}
 
 	// optional debug

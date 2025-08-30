@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+    "errors"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -134,31 +135,64 @@ func makeRouter() http.Handler {
 				}
 
 				perHostTO := parseDurationDefault(r.URL.Query().Get("timeout"), 30*time.Second)
+
 				type result struct {
-					Host  string `json:"host"`
-					Saved int    `json:"saved"`
-					Err   string `json:"err,omitempty"`
+					Host    string `json:"host"`
+					Saved   int    `json:"saved,omitempty"`
+					Err     string `json:"err,omitempty"`
+					Skipped bool   `json:"skipped,omitempty"`
+					Reason  string `json:"reason,omitempty"`
 				}
-				var results []result
-				var total int
+
+				var (
+					results []result
+					total   int
+					scanned int
+					skipped int
+					failed  int
+				)
 
 				for _, h := range hostRows {
+					// Pre-filter: if this host would use a local unix sock but isn't the designated local host, skip it.
+					url, _ := dockerURLFor(h)
+					if isUnixSock(url) && !localHostAllowed(h) {
+						results = append(results, result{
+							Host:    h.Name,
+							Skipped: true,
+							Reason:  "local docker.sock only allowed for the designated local host",
+						})
+						skipped++
+						continue
+					}
+
 					ctx, cancel := context.WithTimeout(r.Context(), perHostTO)
 					n, err := ScanHostContainers(ctx, h.Name)
 					cancel()
+
 					if err != nil {
+						if errors.Is(err, ErrSkipScan) {
+							results = append(results, result{Host: h.Name, Skipped: true})
+							skipped++
+							continue
+						}
 						results = append(results, result{Host: h.Name, Err: err.Error()})
+						failed++
 						continue
 					}
+
 					total += n
+					scanned++
 					results = append(results, result{Host: h.Name, Saved: n})
 				}
 
 				writeJSON(w, http.StatusOK, map[string]any{
-					"scanned": len(hostRows),
-					"saved":   total,
-					"results": results,
-					"status":  "ok",
+					"hosts_total": len(hostRows),
+					"scanned":     scanned,
+					"skipped":     skipped,
+					"errors":      failed,
+					"saved":       total,
+					"results":     results,
+					"status":      "ok",
 				})
 			})
 

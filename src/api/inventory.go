@@ -151,6 +151,14 @@ func mapYamlToHosts(y yamlInventory) []Host {
 			}
 			h.Vars[k] = stringify(v)
 		}
+
+		// --- NEW: owner from vars["owner"] or DDUI_DEFAULT_OWNER
+		if o, ok := h.Vars["owner"]; ok && o != "" {
+			h.Owner = o
+		} else if def := env("DDUI_DEFAULT_OWNER", ""); def != "" {
+			h.Owner = def
+		}
+
 		out = append(out, h)
 	}
 	return out
@@ -182,6 +190,14 @@ func parseINIInventory(b []byte) ([]Host, error) {
 				h.Vars[k] = v
 			}
 		}
+
+		// --- NEW: owner from vars["owner"] or DDUI_DEFAULT_OWNER
+		if o, ok := h.Vars["owner"]; ok && o != "" {
+			h.Owner = o
+		} else if def := env("DDUI_DEFAULT_OWNER", ""); def != "" {
+			h.Owner = def
+		}
+
 		out = append(out, h)
 	}
 	if len(out) == 0 {

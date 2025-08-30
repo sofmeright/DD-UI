@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 	"time"
 
@@ -14,18 +15,39 @@ import (
 
 var sshEnvMu sync.Mutex
 
+func isUnixSock(url string) bool {
+	return strings.HasPrefix(url, "unix://")
+}
+
+func localHostAllowed(h HostRow) bool {
+	// 1) per-host opt-in
+	if v := strings.ToLower(strings.TrimSpace(h.Vars["docker_local"])); v == "true" || v == "1" || v == "yes" {
+		return true
+	}
+	// 2) env-mapped inventory name
+	if lh := strings.TrimSpace(env("DDUI_LOCAL_HOST", "")); lh != "" && strings.EqualFold(lh, h.Name) {
+		return true
+	}
+	// 3) obvious localhost addresses
+	switch strings.ToLower(strings.TrimSpace(h.Addr)) {
+	case "127.0.0.1", "::1", "localhost":
+		return true
+	}
+	return false
+}
+
 func dockerURLFor(h HostRow) (string, string) {
-	// Prefer explicit var from inventory: docker_host: ssh://user@host or tcp://...
 	if v := h.Vars["docker_host"]; v != "" {
 		return v, h.Vars["docker_ssh_cmd"]
 	}
 
-	kind := env("DDUI_SCAN_KIND", "ssh") // "ssh" | "tcp" | "local"
+	kind := env("DDUI_SCAN_KIND", "local") // ssh|tcp|local
 	switch kind {
 	case "local":
-		return "unix:///var/run/docker.sock", ""
+		// Only valid for the one “local” host (we’ll enforce in ScanHostContainers)
+		sock := env("DDUI_LOCAL_SOCK", "/var/run/docker.sock")
+		return "unix://" + sock, ""
 	case "tcp":
-		// requires dockerd to listen on TCP (optionally with TLS)
 		host := h.Addr
 		if host == "" { host = h.Name }
 		port := env("DDUI_DOCKER_TCP_PORT", "2375")
@@ -90,9 +112,25 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	cli, done, err := dockerClientFor(ctx, h)
+
+	// Resolve docker URL first
+	url, sshCmd := dockerURLFor(h)
+
+	// HARD GUARD: local-sock may only be used for the explicitly “local” host
+	if isUnixSock(url) && !localHostAllowed(h) {
+		msg := fmt.Errorf("refusing local docker.sock for non-local host %q (set DDUI_LOCAL_HOST=%s or hosts.%s.vars.docker_local=true)", h.Name, h.Name, h.Name)
+		scanLog(ctx, h.ID, "warn", "skip local sock for non-local host", map[string]any{"url": url, "reason": msg.Error()})
+		return 0, msg
+	}
+
+	// (optional) debug log of the URL we’re about to dial
+	if strings.EqualFold(env("DDUI_SCAN_DEBUG", ""), "true") {
+		log.Printf("scan: host=%s docker_url=%s", h.Name, url)
+	}
+
+	cli, done, err := dockerClientForURL(ctx, url, sshCmd)
 	if err != nil {
-		scanLog(ctx, h.ID, "error", "docker connect failed", map[string]any{"error": err.Error()})
+		scanLog(ctx, h.ID, "error", "docker connect failed", map[string]any{"error": err.Error(), "url": url})
 		return 0, err
 	}
 	defer done()

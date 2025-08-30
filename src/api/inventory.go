@@ -19,6 +19,7 @@ type Host struct {
 	Addr   string            `json:"addr"`           // from ansible_host
 	Vars   map[string]string `json:"vars,omitempty"` // extra vars (stored as JSONB)
 	Groups []string          `json:"groups,omitempty"`
+	Owner  string            `json:"owner,omitempty"`
 }
 
 var (

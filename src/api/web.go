@@ -43,6 +43,7 @@ func makeRouter() http.Handler {
 		api.Group(func(priv chi.Router) {
 			priv.Use(RequireAuth)
 	
+			// list hosts
 			priv.Get("/hosts", func(w http.ResponseWriter, r *http.Request) {
 				items, err := ListHosts(r.Context())
 				if err != nil {
@@ -50,6 +51,32 @@ func makeRouter() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, map[string]any{"items": items})
+			})
+
+			// list containers by host
+			priv.Get("/hosts/{name}/containers", func(w http.ResponseWriter, r *http.Request) {
+				name := chi.URLParam(r, "name")
+				items, err := listContainersByHost(r.Context(), name)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"items": items})
+			})
+	
+			// trigger on-demand scan for a host
+			priv.Post("/scan/host/{name}", func(w http.ResponseWriter, r *http.Request) {
+				name := chi.URLParam(r, "name")
+				n, err := ScanHostContainers(r.Context(), name)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{
+					"host":   name,
+					"saved":  n,
+					"status": "ok",
+				})
 			})
 	
 			// POST /api/inventory/reload  (optional body: {"path":"/new/path"})

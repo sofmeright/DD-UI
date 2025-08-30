@@ -1,3 +1,4 @@
+-- src/api/migrations/001_init.sql
 -- hosts discovered/imported from inventory
 CREATE TABLE IF NOT EXISTS hosts (
   id          bigserial PRIMARY KEY,

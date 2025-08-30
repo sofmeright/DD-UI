@@ -1,4 +1,4 @@
--- 003_hosts_labels_default.sql
+-- src/api/migrations/003_hosts_labels_default.sql
 BEGIN;
 
 -- create the column if it doesn't exist

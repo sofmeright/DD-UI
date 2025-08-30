@@ -51,7 +51,6 @@ func UpsertHosts(ctx context.Context, items []Host) error {
 			g = []string{}
 		}
 
-		// Normalize owner in Go (env default or "unassigned")
 		owner := strings.TrimSpace(h.Owner)
 		if owner == "" {
 			if def := env("DDUI_DEFAULT_OWNER", ""); def != "" {
@@ -63,10 +62,10 @@ func UpsertHosts(ctx context.Context, items []Host) error {
 
 		varsJSON, _ := json.Marshal(h.Vars)
 
-		// Double-guard in SQL to avoid NULL/empty owner.
+		// NOTE: labels is set to '{}'::jsonb directly (no column reference in VALUES).
 		if _, err := db.Exec(ctx, `
 			INSERT INTO hosts (name, addr, vars, "groups", labels, owner, updated_at)
-			VALUES ($1, $2, $3::jsonb, $4, COALESCE(labels,'{}'::jsonb), COALESCE(NULLIF($5,''), 'unassigned'), now())
+			VALUES ($1, $2, $3::jsonb, $4, '{}'::jsonb, COALESCE(NULLIF($5,''), 'unassigned'), now())
 			ON CONFLICT (name) DO UPDATE
 			SET addr       = EXCLUDED.addr,
 			    vars       = EXCLUDED.vars,

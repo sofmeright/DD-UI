@@ -1,3 +1,4 @@
+-- src/api/migrations/002_hosts_groups_default.sql
 -- Default [] for text[] column
 ALTER TABLE hosts
   ALTER COLUMN "groups" SET DEFAULT ARRAY[]::text[];

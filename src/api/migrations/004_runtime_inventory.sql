@@ -1,4 +1,4 @@
--- 004_runtime_inventory.sql
+-- src/api/migrations/004_runtime_inventory.sql
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS stacks (

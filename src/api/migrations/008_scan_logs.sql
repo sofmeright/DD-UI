@@ -1,3 +1,4 @@
+-- src/api/migrations/008_scan_logs.sql
 BEGIN;
 
 CREATE TABLE IF NOT EXISTS scan_logs (

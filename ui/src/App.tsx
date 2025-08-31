@@ -46,11 +46,12 @@ type ApiContainer = {
   image: string;
   state: string;
   status: string;
-  stack?: string | null;        // SELECT s.project as stack
+  compose_project?: string | null;
   labels?: Record<string,string>;
-  ports?: any;                  // JSONB (we store c.Ports from Docker API)
+  ports?: any;
   owner?: string;
-  updated_at?: string;
+  created_ts?: string | null;      // ISO timestamp from DB
+  ip_addr?: string | null;         // IP from inspect
 };
 
 type ScanHostResult = { host: string; saved?: number; status?: "ok"|"skipped"; err?: string; reason?: string; };
@@ -180,10 +181,14 @@ export default function App() {
           const j = await res.json();
           const items: ApiContainer[] = Array.isArray(j.items) ? j.items : [];
 
-          // group by stack/project
+          // group by compose project (backend key), then fallback to labels if you ever return them raw
+          const keyFrom = (c: ApiContainer) =>
+            (c.compose_project && c.compose_project.trim()) ||
+            (c as any)?.stack || "(none)";
+
           const byStack = new Map<string, ApiContainer[]>();
           for (const c of items) {
-            const key = (c.stack && c.stack.trim()) ? c.stack.trim() : "(none)";
+            const key = keyFrom(c);
             if (!byStack.has(key)) byStack.set(key, []);
             byStack.get(key)!.push(c);
           }
@@ -196,16 +201,17 @@ export default function App() {
                 image: c.image,
                 state: c.state,
                 status: c.status,
-                owner: c.owner,
-                ip,
+                owner: c.owner || "",
+                ip: c.ip_addr || ip || "",
                 portsText,
-                stack: c.stack || "(none)",
+                stack: c.compose_project || name,
+                created: c.created_ts ? new Date(c.created_ts).toLocaleString() : "—",
               };
             });
             return {
               name,
-              drift: "unknown",          // until IaC check exists
-              iacEnabled: true,          // default UI state
+              drift: "unknown",
+              iacEnabled: true,
               pullPolicy: "if_not_present",
               sops: false,
               deployKind: name === "(none)" ? "unmanaged" : "compose",
@@ -458,7 +464,11 @@ export default function App() {
                                 <td className="p-3 font-medium text-slate-200">{c.name}</td>
                                 <td className="p-3 text-slate-300">{c.state}</td>
                                 <td className="p-3 text-slate-300">{c.stack || s.name}</td>
-                                <td className="p-3 text-slate-300">{c.image}</td>
+                                <td className="p-3 text-slate-300">
+                                  <div className="max-w-[36ch] whitespace-nowrap overflow-hidden text-ellipsis">
+                                    {c.image}
+                                  </div>
+                                </td>
                                 <td className="p-3 text-slate-300">{c.created || "—"}</td>
                                 <td className="p-3 text-slate-300">{c.ip || "—"}</td>
                                 <td className="p-3 text-slate-300">{c.portsText || "—"}</td>

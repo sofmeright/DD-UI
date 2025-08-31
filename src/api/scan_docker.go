@@ -9,17 +9,16 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync
+	"sync"
 	"time"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/client"
 	"github.com/docker/go-connections/nat"
 )
 
-// ===== helpers (previously “unchanged”) =====
+// ===== helpers =====
 
 var (
 	ErrSkipScan = errors.New("skip scan") // sentinel for intentional skip
@@ -37,7 +36,7 @@ func localHostAllowed(h HostRow) bool {
 	if lh := strings.TrimSpace(env("DDUI_LOCAL_HOST", "")); lh != "" && strings.EqualFold(lh, h.Name) {
 		return true
 	}
-	// 3) obvious
+	// 3) obvious localhost addresses
 	switch strings.ToLower(strings.TrimSpace(h.Addr)) {
 	case "127.0.0.1", "::1", "localhost":
 		return true
@@ -57,14 +56,20 @@ func dockerURLFor(h HostRow) (string, string) {
 		return "unix://" + sock, ""
 	case "tcp":
 		host := h.Addr
-		if host == "" { host = h.Name }
+		if host == "" {
+			host = h.Name
+		}
 		port := env("DDUI_DOCKER_TCP_PORT", "2375")
 		return fmt.Sprintf("tcp://%s:%s", host, port), ""
 	default: // ssh
 		user := h.Vars["ansible_user"]
-		if user == "" { user = env("DDUI_SSH_USER", "root") }
+		if user == "" {
+			user = env("DDUI_SSH_USER", "root")
+		}
 		addr := h.Addr
-		if addr == "" { addr = h.Name }
+		if addr == "" {
+			addr = h.Name
+		}
 		return fmt.Sprintf("ssh://%s@%s", user, addr), os.Getenv("DOCKER_SSH_CMD")
 	}
 }
@@ -73,9 +78,15 @@ func withSSHEnv(cmd string, fn func() error) error {
 	sshEnvMu.Lock()
 	defer sshEnvMu.Unlock()
 	prev, had := os.LookupEnv("DOCKER_SSH_CMD")
-	if cmd != "" { _ = os.Setenv("DOCKER_SSH_CMD", cmd) }
+	if cmd != "" {
+		_ = os.Setenv("DOCKER_SSH_CMD", cmd)
+	}
 	defer func() {
-		if had { _ = os.Setenv("DOCKER_SSH_CMD", prev) } else { _ = os.Unsetenv("DOCKER_SSH_CMD") }
+		if had {
+			_ = os.Setenv("DOCKER_SSH_CMD", prev)
+		} else {
+			_ = os.Unsetenv("DOCKER_SSH_CMD")
+		}
 	}()
 	return fn()
 }
@@ -88,7 +99,9 @@ func dockerClientForURL(ctx context.Context, url, sshCmd string) (*client.Client
 			client.WithHost(url),
 			client.WithAPIVersionNegotiation(),
 		)
-		if err != nil { return err }
+		if err != nil {
+			return err
+		}
 		pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 		defer cancel()
 		_, err = cli.Ping(pctx)

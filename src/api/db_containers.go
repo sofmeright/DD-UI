@@ -136,17 +136,17 @@ func listContainersByHost(ctx context.Context, hostName string) ([]ContainerRow,
 
 		// Derive compose metadata
 		if projectFromStack != nil && *projectFromStack != "" {
-			cr.ComposeProj = *projectFromStack
-		} else if v, ok := cr.Labels["com.docker.compose.project"]; ok && v != "" {
-			cr.ComposeProj = v
-		} else if v, ok := cr.LabelS["com.docker.stack.namespace"]; ok && v != "" {
-			cr.ComposeProj = v
-		}
-		if v, ok := cr.Labels["com.docker.compose.service"]; ok && v != "" {
-			cr.ComposeSvc = v
-		} else if v, ok := cr.Labels["com.docker.service.name"]; ok && v != "" {
-			cr.ComposeSvc = v
-		}
+            cr.ComposeProj = *projectFromStack
+        } else if v, ok := cr.Labels["com.docker.compose.project"]; ok && v != "" {
+            cr.ComposeProj = v
+        } else if v, ok := cr.Labels["com.docker.stack.namespace"]; ok && v != "" {
+            cr.ComposeProj = v
+        }
+        if v, ok := cr.Labels["com.docker.compose.service"]; ok && v != "" {
+            cr.ComposeSvc = v
+        } else if v, ok := cr.Labels["com.docker.service.name"]; ok && v != "" {
+            cr.ComposeSvc = v
+        }
 
 		out = append(out, cr)
 	}

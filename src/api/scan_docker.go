@@ -9,7 +9,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
-	"sync"
+	"sync
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -19,9 +19,89 @@ import (
 	"github.com/docker/go-connections/nat"
 )
 
-// ... ErrSkipScan, guards, dockerURLFor, withSSHEnv, dockerClientForURL unchanged ...
+// ===== helpers (previously “unchanged”) =====
 
-// flatten nat.PortMap -> []{IP,PublicPort,PrivatePort,Type} for UI
+var (
+	ErrSkipScan = errors.New("skip scan") // sentinel for intentional skip
+	sshEnvMu    sync.Mutex
+)
+
+func isUnixSock(url string) bool { return strings.HasPrefix(url, "unix://") }
+
+func localHostAllowed(h HostRow) bool {
+	// 1) per-host opt-in (inventory var)
+	if v := strings.ToLower(strings.TrimSpace(h.Vars["docker_local"])); v == "true" || v == "1" || v == "yes" {
+		return true
+	}
+	// 2) env mapping
+	if lh := strings.TrimSpace(env("DDUI_LOCAL_HOST", "")); lh != "" && strings.EqualFold(lh, h.Name) {
+		return true
+	}
+	// 3) obvious
+	switch strings.ToLower(strings.TrimSpace(h.Addr)) {
+	case "127.0.0.1", "::1", "localhost":
+		return true
+	}
+	return false
+}
+
+func dockerURLFor(h HostRow) (string, string) {
+	// per-host override
+	if v := h.Vars["docker_host"]; v != "" {
+		return v, h.Vars["docker_ssh_cmd"]
+	}
+	kind := env("DDUI_SCAN_KIND", "ssh") // ssh|tcp|local
+	switch kind {
+	case "local":
+		sock := env("DDUI_LOCAL_SOCK", "/var/run/docker.sock")
+		return "unix://" + sock, ""
+	case "tcp":
+		host := h.Addr
+		if host == "" { host = h.Name }
+		port := env("DDUI_DOCKER_TCP_PORT", "2375")
+		return fmt.Sprintf("tcp://%s:%s", host, port), ""
+	default: // ssh
+		user := h.Vars["ansible_user"]
+		if user == "" { user = env("DDUI_SSH_USER", "root") }
+		addr := h.Addr
+		if addr == "" { addr = h.Name }
+		return fmt.Sprintf("ssh://%s@%s", user, addr), os.Getenv("DOCKER_SSH_CMD")
+	}
+}
+
+func withSSHEnv(cmd string, fn func() error) error {
+	sshEnvMu.Lock()
+	defer sshEnvMu.Unlock()
+	prev, had := os.LookupEnv("DOCKER_SSH_CMD")
+	if cmd != "" { _ = os.Setenv("DOCKER_SSH_CMD", cmd) }
+	defer func() {
+		if had { _ = os.Setenv("DOCKER_SSH_CMD", prev) } else { _ = os.Unsetenv("DOCKER_SSH_CMD") }
+	}()
+	return fn()
+}
+
+func dockerClientForURL(ctx context.Context, url, sshCmd string) (*client.Client, func(), error) {
+	var cli *client.Client
+	err := withSSHEnv(sshCmd, func() error {
+		var err error
+		cli, err = client.NewClientWithOpts(
+			client.WithHost(url),
+			client.WithAPIVersionNegotiation(),
+		)
+		if err != nil { return err }
+		pctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		_, err = cli.Ping(pctx)
+		return err
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return cli, func() { _ = cli.Close() }, nil
+}
+
+// ===== small utils =====
+
 func flattenPorts(pm nat.PortMap) []map[string]any {
 	out := make([]map[string]any, 0, len(pm))
 	for port, binds := range pm {
@@ -44,21 +124,8 @@ func flattenPorts(pm nat.PortMap) []map[string]any {
 	return out
 }
 
-func firstIPFromNetworks(nws map[string]*types.NetworkSettings) string {
-	// NB: in inspect it's map[string]*types.EndpointSettings (older) / types.NetworkSettings? Adjust:
-	// We only need IP string robustly.
-	for _, v := range nws {
-		if v != nil {
-			// docker/types has .IPAddress directly for endpoint settings
-			if ip := v.IPAddress; ip != "" {
-				return ip
-			}
-		}
-	}
-	return ""
-}
+// ===== main scan =====
 
-// ScanHostContainers connects to Docker for a host, persists containers, and prunes deletions.
 func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 	h, err := GetHostByName(ctx, hostName)
 	if err != nil {
@@ -66,6 +133,7 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 	}
 	url, sshCmd := dockerURLFor(h)
 
+	// refuse scanning many hosts through a single local sock
 	if isUnixSock(url) && !localHostAllowed(h) {
 		scanLog(ctx, h.ID, "info", "skip local sock for non-local host",
 			map[string]any{"url": url, "host": h.Name})
@@ -94,7 +162,6 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 	for _, c := range list {
 		seen = append(seen, c.ID)
 
-		// Inspect for richer data
 		ci, err := cli.ContainerInspect(ctx, c.ID)
 		if err != nil {
 			scanLog(ctx, h.ID, "warn", "inspect failed", map[string]any{"id": c.ID, "error": err.Error()})
@@ -106,7 +173,6 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 			labels = ci.Config.Labels
 		}
 
-		// project/stack
 		project := labels["com.docker.compose.project"]
 		if project == "" {
 			project = labels["com.docker.stack.namespace"]
@@ -121,19 +187,14 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 			}
 		}
 
-		// ports from inspect
+		// ports/IP/env/networks/mounts/created
 		var portsOut []map[string]any
-		if ci.NetworkSettings != nil {
-			portsOut = flattenPorts(ci.NetworkSettings.Ports)
-		}
-
-		// IP address
 		ip := ""
 		if ci.NetworkSettings != nil {
+			portsOut = flattenPorts(ci.NetworkSettings.Ports)
 			if ci.NetworkSettings.IPAddress != "" {
 				ip = ci.NetworkSettings.IPAddress
 			} else if ci.NetworkSettings.Networks != nil {
-				// older/newer SDKs: iterate endpoint settings
 				for _, ep := range ci.NetworkSettings.Networks {
 					if ep != nil && ep.IPAddress != "" {
 						ip = ep.IPAddress
@@ -142,21 +203,16 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 				}
 			}
 		}
-
-		// env as original docker []"KEY=VAL"
 		var envOut []string
 		if ci.Config != nil && ci.Config.Env != nil {
 			envOut = ci.Config.Env
 		}
-
-		// networks+mounts raw for completeness
 		var networksOut any = map[string]any{}
 		if ci.NetworkSettings != nil && ci.NetworkSettings.Networks != nil {
 			networksOut = ci.NetworkSettings.Networks
 		}
 		mountsOut := any(ci.Mounts)
 
-		// created timestamp
 		var createdPtr *time.Time
 		if ci.Created != "" {
 			if t, err := time.Parse(time.RFC3339Nano, ci.Created); err == nil {
@@ -168,11 +224,11 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 			createdPtr = &t
 		}
 
-		// container name
 		name := ""
-		if len(c.Names) > 0 { name = strings.TrimPrefix(c.Names[0], "/") }
+		if len(c.Names) > 0 {
+			name = strings.TrimPrefix(c.Names[0], "/")
+		}
 
-		// upsert
 		if err := upsertContainer(
 			ctx, h.ID, stackIDPtr, c.ID, name, c.Image, c.State, c.Status, h.Owner,
 			createdPtr, ip, portsOut, labels, envOut, networksOut, mountsOut,
@@ -180,12 +236,13 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 			scanLog(ctx, h.ID, "error", "upsert container failed", map[string]any{"name": name, "id": c.ID, "error": err.Error()})
 			continue
 		}
+
 		saved++
 		scanLog(ctx, h.ID, "info", "container discovered",
 			map[string]any{"name": name, "image": c.Image, "state": c.State, "project": project})
 	}
 
-	// prune stale rows
+	// prune gone containers
 	if pruned, err := pruneMissingContainers(ctx, h.ID, seen); err == nil && pruned > 0 {
 		scanLog(ctx, h.ID, "info", "pruned missing containers", map[string]any{"count": pruned})
 	}

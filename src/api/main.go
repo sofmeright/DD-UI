@@ -83,15 +83,6 @@ func scanAllOnce(ctx context.Context, perHostTO time.Duration, conc int) {
 			defer wg.Done()
 			defer func() { <-sem }()
 
-			// Pre-filter: skip non-local hosts when URL is unix:// and they aren’t the designated local host
-			url, _ := dockerURLFor(h)
-			if isUnixSock(url) && !localHostAllowed(h) {
-				mu.Lock()
-				skipped++
-				mu.Unlock()
-				return
-			}
-
 			hctx, cancel := context.WithTimeout(ctx, perHostTO)
 			n, err := ScanHostContainers(hctx, h.Name)
 			cancel()
@@ -99,6 +90,7 @@ func scanAllOnce(ctx context.Context, perHostTO time.Duration, conc int) {
 			mu.Lock()
 			defer mu.Unlock()
 			if err != nil {
+				// treat intentional skips distinctly
 				if errors.Is(err, ErrSkipScan) {
 					skipped++
 					return

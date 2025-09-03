@@ -10,40 +10,6 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 
-/* ==================== Login / Auth Hardening ==================== */
-
-// Optional: set VITE_API_BASE (e.g. "http://localhost:8080") in dev.
-// In prod (served by the API), this can be empty so paths are same-origin.
-const API_BASE = (import.meta.env.VITE_API_BASE ?? "").toString().trim();
-
-function joinURL(base: string, path: string) {
-  if (!base) return path;
-  const b = base.replace(/\/+$/, "");
-  const p = path.startsWith("/") ? path : `/${path}`;
-  return `${b}${p}`;
-}
-
-const AUTH_LOGIN_URL = joinURL(API_BASE, "/auth/login");
-const AUTH_LOGOUT_URL = joinURL(API_BASE, "/auth/logout");
-
-function redirectToLogin() {
-  try {
-    window.location.assign(AUTH_LOGIN_URL);
-  } catch {
-    window.location.href = AUTH_LOGIN_URL;
-  }
-}
-
-/** Fetch helper: always include credentials; if 401 → redirect to login */
-async function safeFetch(input: RequestInfo | URL, init?: RequestInit) {
-  const res = await fetch(input, { credentials: "include", ...(init || {}) });
-  if (res.status === 401) {
-    redirectToLogin();
-    throw new Error("unauthorized");
-  }
-  return res;
-}
-
 /* ==================== Types ==================== */
 
 type Host = {
@@ -96,6 +62,15 @@ type IacStack = {
   rel_path: string;
   compose?: string;
   services: IacService[];
+};
+
+type SessionResp = {
+  user: null | {
+    sub: string;
+    email: string;
+    name: string;
+    picture?: string;
+  };
 };
 
 /* ==================== Small UI bits ==================== */
@@ -170,7 +145,7 @@ function formatPortsLines(ports: any): string[] {
 
 /* ==================== Layout: Left Nav ==================== */
 
-function LeftNav({ page, onGoDeployments, onLogout }: { page: string; onGoDeployments: () => void; onLogout: () => void }) {
+function LeftNav({ page, onGoDeployments }: { page: string; onGoDeployments: () => void }) {
   return (
     <div className="hidden md:flex md:flex-col w-60 shrink-0 border-r border-slate-800 bg-slate-950/60">
       {/* Brand moved into the side nav */}
@@ -202,9 +177,9 @@ function LeftNav({ page, onGoDeployments, onLogout }: { page: string; onGoDeploy
         <div className="px-3 py-2 text-slate-300 text-sm">Settings</div>
         <div className="px-3 py-2 text-slate-300 text-sm">About</div>
         <div className="px-3 py-2 text-slate-300 text-sm">Help</div>
-        <Button type="button" variant="ghost" className="px-3 text-slate-300 hover:bg-slate-900/60" onClick={onLogout}>
-          Logout
-        </Button>
+        <form method="post" action="/logout">
+          <Button type="submit" variant="ghost" className="px-3 text-slate-300 hover:bg-slate-900/60">Logout</Button>
+        </form>
       </nav>
     </div>
   );
@@ -255,9 +230,10 @@ function HostStacksView({ host, onBack, onSync }: { host: Host; onBack: () => vo
       setLoading(true); setErr(null);
       try {
         const [rc, ri] = await Promise.all([
-          safeFetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`),
-          safeFetch(`/api/hosts/${encodeURIComponent(host.name)}/iac`),
+          fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`, { credentials: "include" }),
+          fetch(`/api/hosts/${encodeURIComponent(host.name)}/iac`, { credentials: "include" }),
         ]);
+        if (rc.status === 401 || ri.status === 401) { window.location.replace("/auth/login"); return; }
         const contJson = await rc.json();
         const iacJson = await ri.json();
         const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
@@ -472,6 +448,40 @@ function HostStacksView({ host, onBack, onSync }: { host: Host; onBack: () => vo
   );
 }
 
+/* ==================== Login Gate (unauthenticated) ==================== */
+
+function LoginGate() {
+  return (
+    <div className="min-h-screen flex items-center justify-center bg-slate-950">
+      <Card className="w-full max-w-sm bg-slate-900/60 border-slate-800">
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <span className="font-black uppercase tracking-tight leading-none text-slate-200 select-none">
+              <span className="bg-clip-text text-transparent bg-gradient-to-r from-brand to-sky-400">DDUI</span>
+            </span>
+            <Badge variant="outline">Community</Badge>
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          <p className="text-slate-300 text-sm">
+            You’re signed out. Continue to your identity provider to sign in.
+          </p>
+          <Button
+            className="w-full bg-[#310937] hover:bg-[#2a0830] text-white"
+            onClick={() => { window.location.replace("/auth/login"); }}
+          >
+            Continue to Sign in
+          </Button>
+          <p className="text-xs text-slate-500">
+            If you get stuck, ensure your OIDC <code>RedirectURL</code> points back to
+            <code> /auth/callback</code> and that cookies aren’t blocked.
+          </p>
+        </CardContent>
+      </Card>
+    </div>
+  );
+}
+
 /* ==================== Main App ==================== */
 
 export default function App() {
@@ -492,19 +502,40 @@ export default function App() {
   const [page, setPage] = useState<"deployments" | "host">("deployments");
   const [activeHost, setActiveHost] = useState<Host | null>(null);
 
-  // If someone navigates to /login on the SPA origin (dev), bounce to the API login URL
-  useEffect(() => {
-    if (window.location.pathname === "/login") {
-      redirectToLogin();
-    }
-  }, []);
+  // Session gate
+  const [sessionChecked, setSessionChecked] = useState(false);
+  const [authed, setAuthed] = useState<boolean>(false);
 
   useEffect(() => {
     let cancel = false;
     (async () => {
+      try {
+        const r = await fetch("/api/session", { credentials: "include" });
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const data = (await r.json()) as SessionResp;
+        if (!cancel) {
+          setAuthed(!!data.user);
+        }
+      } catch {
+        // if session probe fails, force login
+        window.location.replace("/auth/login");
+        return;
+      } finally {
+        if (!cancel) setSessionChecked(true);
+      }
+    })();
+    return () => { cancel = true; };
+  }, []);
+
+  useEffect(() => {
+    if (!authed) return;
+    let cancel = false;
+    (async () => {
       setLoading(true); setErr(null);
       try {
-        const r = await safeFetch("/api/hosts");
+        const r = await fetch("/api/hosts", { credentials: "include" });
+        if (r.status === 401) { window.location.replace("/auth/login"); return; }
+        if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = await r.json();
         const items = Array.isArray(data.items) ? data.items : [];
         const mapped: Host[] = items.map((h: any) => ({
@@ -518,7 +549,7 @@ export default function App() {
       }
     })();
     return () => { cancel = true; };
-  }, []);
+  }, [authed]);
 
   const filteredHosts = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -601,9 +632,10 @@ export default function App() {
         const name = hostNames[i];
         try {
           const [rc, ri] = await Promise.all([
-            safeFetch(`/api/hosts/${encodeURIComponent(name)}/containers`),
-            safeFetch(`/api/hosts/${encodeURIComponent(name)}/iac`),
+            fetch(`/api/hosts/${encodeURIComponent(name)}/containers`, { credentials: "include" }),
+            fetch(`/api/hosts/${encodeURIComponent(name)}/iac`, { credentials: "include" }),
           ]);
+          if (rc.status === 401 || ri.status === 401) { window.location.replace("/auth/login"); return; }
           const contJson = await rc.json();
           const iacJson = await ri.json();
           const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
@@ -619,10 +651,10 @@ export default function App() {
   }
 
   useEffect(() => {
-    if (!hosts.length) return;
+    if (!authed || !hosts.length) return;
     refreshMetricsForHosts(hosts.map(h => h.name));
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [hosts]);
+  }, [authed, hosts]);
 
   const metrics = useMemo(() => {
     let stacks = 0, containers = 0, drift = 0, errors = 0;
@@ -641,11 +673,12 @@ export default function App() {
     if (scanning) return;
     setScanning(true);
     try {
-      await safeFetch("/api/iac/scan", { method: "POST" }).catch(()=>{});
-      const res = await safeFetch("/api/scan/all", { method: "POST" });
+      await fetch("/api/iac/scan", { method: "POST", credentials: "include" }).catch(()=>{});
+      const res = await fetch("/api/scan/all", { method: "POST", credentials: "include" });
+      if (res.status === 401) { window.location.replace("/auth/login"); return; }
       const data = await res.json();
       const map: Record<string, { kind: "ok" | "skipped" | "error"; saved?: number; reason?: string; err?: string }> = {};
-      for (const r of (data.results || []) as any[]) {
+      for (const r of data.results || []) {
         if (r.skipped) map[r.host] = { kind: "skipped", reason: r.reason };
         else if (r.err) map[r.host] = { kind: "error", err: r.err };
         else map[r.host] = { kind: "ok", saved: r.saved ?? 0 };
@@ -664,14 +697,19 @@ export default function App() {
     refreshMetricsForHosts([name]);
   }
 
-  async function handleLogout() {
-    try { await fetch(AUTH_LOGOUT_URL, { method: "POST", credentials: "include" }); } catch {}
-    redirectToLogin();
+  // Show login gate if not authenticated
+  if (sessionChecked && !authed) {
+    return <LoginGate />;
+  }
+
+  // Optionally show nothing while probing session on first paint (fast)
+  if (!sessionChecked) {
+    return <div className="min-h-screen bg-slate-950" />;
   }
 
   return (
     <div className="min-h-screen flex">
-      <LeftNav page={page} onGoDeployments={() => setPage("deployments")} onLogout={handleLogout} />
+      <LeftNav page={page} onGoDeployments={() => setPage("deployments")} />
 
       {/* Full-width main content (no right-side top bar) */}
       <div className="flex-1 min-w-0">
@@ -745,7 +783,7 @@ export default function App() {
                               if (scanning) return;
                               setScanning(true);
                               try {
-                                await safeFetch(`/api/scan/host/${encodeURIComponent(h.name)}`, { method: "POST" });
+                                await fetch(`/api/scan/host/${encodeURIComponent(h.name)}`, { method: "POST", credentials: "include" });
                                 setHostScanState(prev => ({ ...prev, [h.name]: { kind: "ok" } }));
                                 await refreshMetricsForHosts([h.name]);
                               } finally {

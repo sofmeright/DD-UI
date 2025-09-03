@@ -237,33 +237,40 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func LogoutHandler(w http.ResponseWriter, r *http.Request) {
-	sess, _ := store.Get(r, sessionName)
-	// get id_token before clearing (optional, recommended)
-	var idTokenHint string
-	if v, ok := sess.Values["id_token"].(string); ok {
-		idTokenHint = v
-	}
-	// expire session cookie
-	sess.Options.MaxAge = -1
-	_ = sess.Save(r, w)
+    // expire main session
+    sess, _ := store.Get(r, sessionName)
+    for k := range sess.Values {
+        delete(sess.Values, k)
+    }
+    sess.Options = &sessions.Options{
+        Path:     "/",
+        MaxAge:   -1,
+        HttpOnly: true,
+        Secure:   cfg.SecureCookies,
+        SameSite: http.SameSiteLaxMode,
+        Domain:   cfg.CookieDomain,
+    }
+    _ = sess.Save(r, w)
 
-	// If we know end_session + have a post-logout redirect, go to the IdP
-	if endSessionEndpoint != "" && cfg.PostLogoutRedirectURL != "" {
-		u, _ := url.Parse(endSessionEndpoint)
-		q := u.Query()
-		q.Set("post_logout_redirect_uri", cfg.PostLogoutRedirectURL)
-		if idTokenHint != "" {
-			q.Set("id_token_hint", idTokenHint)
-		}
-		// optional, some IdPs like it
-		q.Set("client_id", cfg.ClientID)
-		u.RawQuery = q.Encode()
-		http.Redirect(w, r, u.String(), http.StatusFound)
-		return
-	}
+    // expire oauth temp cookie too
+    tmp, _ := store.Get(r, oauthTmpName)
+    tmp.Options = &sessions.Options{
+        Path:     "/",
+        MaxAge:   -1,
+        HttpOnly: true,
+        Secure:   cfg.SecureCookies,
+        SameSite: http.SameSiteLaxMode,
+        Domain:   cfg.CookieDomain,
+    }
+    _ = tmp.Save(r, w)
 
-	// Fallback: just land at /login
-	http.Redirect(w, r, "/login", http.StatusFound)
+    // If the UI calls this via fetch, 204 is fine.
+    // If it's a <form>, do a redirect so user sees the app again.
+    if r.Header.Get("Accept") == "application/json" {
+        w.WriteHeader(http.StatusNoContent)
+        return
+    }
+    http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func SessionHandler(w http.ResponseWriter, r *http.Request) {

@@ -33,6 +33,7 @@ func main() {
 
 	// kick off background auto-scanner (Portainer-ish cadence)
 	startAutoScanner(ctx)
+	startIacScanner(ctx)
 
 	log.Printf("DDUI API on %s (ui=/home/ddui/ui/dist)", addr)
 	if err := http.ListenAndServe(addr, makeRouter()); err != nil {
@@ -134,6 +135,46 @@ func startAutoScanner(ctx context.Context) {
 				scanAllOnce(ctx, perHostTO, conc)
 			case <-ctx.Done():
 				log.Printf("scan: auto scanner stopping: %v", ctx.Err())
+				return
+			}
+		}
+	}()
+}
+
+// ---- IaC auto-scan (local for now) ----
+
+func startIacScanner(ctx context.Context) {
+	if !envBool("DDUI_IAC_AUTO", "true") {
+		log.Printf("iac: auto disabled (DDUI_IAC_AUTO=false)")
+		return
+	}
+	interval := envDur("DDUI_IAC_INTERVAL", "90s") // 1m30s default
+	log.Printf("iac: auto enabled interval=%s", interval)
+
+	// optional boot IaC scan
+	if envBool("DDUI_IAC_SCAN_ON_START", "true") {
+		go func() {
+			if nStacks, nSvcs, err := ScanIacLocal(ctx); err != nil {
+				log.Printf("iac: initial scan error: %v", err)
+			} else {
+				log.Printf("iac: initial scan ok stacks=%d services=%d", nStacks, nSvcs)
+			}
+		}()
+	}
+
+	t := time.NewTicker(interval)
+	go func() {
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				if nStacks, nSvcs, err := ScanIacLocal(ctx); err != nil {
+					log.Printf("iac: auto scan error: %v", err)
+				} else {
+					log.Printf("iac: auto scan ok stacks=%d services=%d", nStacks, nSvcs)
+				}
+			case <-ctx.Done():
+				log.Printf("iac: auto scanner stopping: %v", ctx.Err())
 				return
 			}
 		}

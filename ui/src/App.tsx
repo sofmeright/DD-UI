@@ -382,9 +382,8 @@ function HostStacksView({ host, onBack, onSync }: { host: Host; onBack: () => vo
               <table className="w-full text-sm table-fixed">
                 <thead className="bg-slate-900/70 text-slate-300">
                   <tr>
-                    <th className="p-3 text-left w-56">Name</th>
-                    <th className="p-3 text-left w-24">State</th>
-                    <th className="p-3 text-left w-48">Stack</th>
+                    <th className="p-3 text-left w-64">Name</th>
+                    <th className="p-3 text-left w-28">State</th>
                     <th className="p-3 text-left w-[28rem]">Image</th>
                     <th className="p-3 text-left w-44">Created</th>
                     <th className="p-3 text-left w-40">IP Address</th>
@@ -397,7 +396,6 @@ function HostStacksView({ host, onBack, onSync }: { host: Host; onBack: () => vo
                     <tr key={i} className="border-t border-slate-800 hover:bg-slate-900/40">
                       <td className="p-3 font-medium text-slate-200 truncate">{r.name}</td>
                       <td className="p-3 text-slate-300">{r.state}</td>
-                      <td className="p-3 text-slate-300 truncate">{r.stack}</td>
                       <td className="p-3 text-slate-300">
                         <div className="flex items-center gap-2">
                           <div className="max-w-[28rem] truncate" title={r.imageRun || ""}>{r.imageRun || "—"}</div>
@@ -425,7 +423,7 @@ function HostStacksView({ host, onBack, onSync }: { host: Host; onBack: () => vo
                     </tr>
                   ))}
                   {(!s.rows || s.rows.filter(r => matchRow(r, hostQuery)).length === 0) && (
-                    <tr><td className="p-4 text-slate-500" colSpan={8}>No containers or services.</td></tr>
+                    <tr><td className="p-4 text-slate-500" colSpan={7}>No containers or services.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -556,6 +554,16 @@ export default function App() {
     if (!q) return hosts;
     return hosts.filter(h => [h.name, h.address || "", ...(h.groups || [])].join(" ").toLowerCase().includes(q));
   }, [hosts, query]);
+
+  // --- reset metrics cache when host list changes (avoid stale totals)
+  const hostKey = useMemo(
+    () => hosts.map(h => h.name).sort().join("|"),
+    [hosts]
+  );
+
+  useEffect(() => {
+    setMetricsCache({});
+  }, [hostKey]);
 
   // "healthy" states; everything else counts as error for the top card
   const OK_STATES = new Set(["running", "created", "restarting", "healthy", "up"]);

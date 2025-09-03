@@ -10,7 +10,6 @@ import (
 	"errors"
 	"log"
 	"net/http"
-	"net/url"   // <-- add
 	"os"
 	"strings"
 	"time"

@@ -219,6 +219,33 @@ func makeRouter() http.Handler {
 				}
 				writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
 			})
+
+			// IaC: force scan (local)
+			priv.Post("/iac/scan", func(w http.ResponseWriter, r *http.Request) {
+				ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+				defer cancel()
+				stacks, services, err := ScanIacLocal(ctx)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{
+					"status":   "ok",
+					"stacks":   stacks,
+					"services": services,
+				})
+			})
+	
+			// IaC: fetch desired stacks/services for a host (host + groups)
+			priv.Get("/hosts/{name}/iac", func(w http.ResponseWriter, r *http.Request) {
+				name := chi.URLParam(r, "name")
+				items, err := listIacStacksForHost(r.Context(), name)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"stacks": items})
+			})
 		})
 	})
 

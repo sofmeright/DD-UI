@@ -9,7 +9,16 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { Separator } from "@/components/ui/separator";
+
+/* ==================== Login Hardening ==================== */
+// Always use the server OIDC entry (SPA must not try to render /auth/* itself)
+const redirectToLogin = () => {
+  try {
+    window.location.replace("/auth/login");
+  } catch {
+    window.location.href = "/auth/login";
+  }
+};
 
 /* ==================== Types ==================== */
 
@@ -225,7 +234,7 @@ function HostStacksView({ host, onBack, onSync }: { host: Host; onBack: () => vo
           fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`, { credentials: "include" }),
           fetch(`/api/hosts/${encodeURIComponent(host.name)}/iac`, { credentials: "include" }),
         ]);
-        if (rc.status === 401 || ri.status === 401) { window.location.href = "/login"; return; }
+        if (rc.status === 401 || ri.status === 401) { redirectToLogin(); return; }
         const contJson = await rc.json();
         const iacJson = await ri.json();
         const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
@@ -466,7 +475,7 @@ export default function App() {
       setLoading(true); setErr(null);
       try {
         const r = await fetch("/api/hosts", { credentials: "include" });
-        if (r.status === 401) { window.location.href = "/login"; return; }
+        if (r.status === 401) { redirectToLogin(); return; }
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = await r.json();
         const items = Array.isArray(data.items) ? data.items : [];
@@ -567,7 +576,7 @@ export default function App() {
             fetch(`/api/hosts/${encodeURIComponent(name)}/containers`, { credentials: "include" }),
             fetch(`/api/hosts/${encodeURIComponent(name)}/iac`, { credentials: "include" }),
           ]);
-          if (rc.status === 401 || ri.status === 401) { window.location.href = "/login"; return; }
+          if (rc.status === 401 || ri.status === 401) { redirectToLogin(); return; }
           const contJson = await rc.json();
           const iacJson = await ri.json();
           const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
@@ -607,10 +616,10 @@ export default function App() {
     try {
       await fetch("/api/iac/scan", { method: "POST", credentials: "include" }).catch(()=>{});
       const res = await fetch("/api/scan/all", { method: "POST", credentials: "include" });
-      if (res.status === 401) { window.location.href = "/login"; return; }
+      if (res.status === 401) { redirectToLogin(); return; }
       const data = await res.json();
       const map: Record<string, { kind: "ok" | "skipped" | "error"; saved?: number; reason?: string; err?: string }> = {};
-      for (const r of data.results || []) {
+      for (const r of (data.results || []) as any[]) {
         if (r.skipped) map[r.host] = { kind: "skipped", reason: r.reason };
         else if (r.err) map[r.host] = { kind: "error", err: r.err };
         else map[r.host] = { kind: "ok", saved: r.saved ?? 0 };

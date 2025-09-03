@@ -1,3 +1,4 @@
+// src/api/db_iac.go
 package main
 
 import (
@@ -174,7 +175,7 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 			var s IacServiceRow
 			var lb, ek, ef, pp, vv, dp []byte
 			if err := rs.Scan(&s.ID, &s.StackID, &s.ServiceName, &s.ContainerName, &s.Image, &lb, &ek, &ef, &pp, &vv, &dp); err != nil {
-				_ = rs.Close()
+				rs.Close()
 				return nil, err
 			}
 			_ = json.Unmarshal(lb, &s.Labels)
@@ -185,7 +186,7 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 			_ = json.Unmarshal(dp, &s.Deploy)
 			svcs = append(svcs, s)
 		}
-		_ = rs.Close()
+		rs.Close()
 		stacks[i].Services = svcs
 	}
 

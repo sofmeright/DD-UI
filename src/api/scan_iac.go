@@ -1,3 +1,4 @@
+// src/api/scan_iac.go
 package main
 
 import (
@@ -10,7 +11,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"time"
 
 	"gopkg.in/yaml.v3"
 )
@@ -243,6 +243,17 @@ func sha256File(p string) (hexsum string, size int64) {
 }
 
 // ---- normalizers ----
+
+func toString(v any) string {
+    switch x := v.(type) {
+    case string:
+        return x
+    case fmt.Stringer:
+        return x.String()
+    default:
+        return fmt.Sprint(v)
+    }
+}
 
 func normLabels(v any) map[string]string {
 	out := map[string]string{}

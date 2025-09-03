@@ -10,15 +10,39 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 
-/* ==================== Login Hardening ==================== */
-// Always use the server OIDC entry (SPA must not try to render /auth/* itself)
-const redirectToLogin = () => {
+/* ==================== Login / Auth Hardening ==================== */
+
+// Optional: set VITE_API_BASE (e.g. "http://localhost:8080") in dev.
+// In prod (served by the API), this can be empty so paths are same-origin.
+const API_BASE = (import.meta.env.VITE_API_BASE ?? "").toString().trim();
+
+function joinURL(base: string, path: string) {
+  if (!base) return path;
+  const b = base.replace(/\/+$/, "");
+  const p = path.startsWith("/") ? path : `/${path}`;
+  return `${b}${p}`;
+}
+
+const AUTH_LOGIN_URL = joinURL(API_BASE, "/auth/login");
+const AUTH_LOGOUT_URL = joinURL(API_BASE, "/auth/logout");
+
+function redirectToLogin() {
   try {
-    window.location.replace("/auth/login");
+    window.location.assign(AUTH_LOGIN_URL);
   } catch {
-    window.location.href = "/auth/login";
+    window.location.href = AUTH_LOGIN_URL;
   }
-};
+}
+
+/** Fetch helper: always include credentials; if 401 → redirect to login */
+async function safeFetch(input: RequestInfo | URL, init?: RequestInit) {
+  const res = await fetch(input, { credentials: "include", ...(init || {}) });
+  if (res.status === 401) {
+    redirectToLogin();
+    throw new Error("unauthorized");
+  }
+  return res;
+}
 
 /* ==================== Types ==================== */
 
@@ -133,7 +157,7 @@ function formatPortsLines(ports: any): string[] {
   const lines: string[] = [];
   for (const p of arr) {
     const ip = p.IP || p.Ip || p.ip || "";
-    const pub = p.PublicPort ?? p.publicPort;
+    the const pub = p.PublicPort ?? p.publicPort;
     const priv = p.PrivatePort ?? p.privatePort;
     const typ = (p.Type ?? p.type ?? "").toString().toLowerCase() || "tcp";
     if (priv) {
@@ -146,7 +170,7 @@ function formatPortsLines(ports: any): string[] {
 
 /* ==================== Layout: Left Nav ==================== */
 
-function LeftNav({ page, onGoDeployments }: { page: string; onGoDeployments: () => void }) {
+function LeftNav({ page, onGoDeployments, onLogout }: { page: string; onGoDeployments: () => void; onLogout: () => void }) {
   return (
     <div className="hidden md:flex md:flex-col w-60 shrink-0 border-r border-slate-800 bg-slate-950/60">
       {/* Brand moved into the side nav */}
@@ -178,9 +202,9 @@ function LeftNav({ page, onGoDeployments }: { page: string; onGoDeployments: () 
         <div className="px-3 py-2 text-slate-300 text-sm">Settings</div>
         <div className="px-3 py-2 text-slate-300 text-sm">About</div>
         <div className="px-3 py-2 text-slate-300 text-sm">Help</div>
-        <form method="post" action="/logout">
-          <Button type="submit" variant="ghost" className="px-3 text-slate-300 hover:bg-slate-900/60">Logout</Button>
-        </form>
+        <Button type="button" variant="ghost" className="px-3 text-slate-300 hover:bg-slate-900/60" onClick={onLogout}>
+          Logout
+        </Button>
       </nav>
     </div>
   );
@@ -231,10 +255,9 @@ function HostStacksView({ host, onBack, onSync }: { host: Host; onBack: () => vo
       setLoading(true); setErr(null);
       try {
         const [rc, ri] = await Promise.all([
-          fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`, { credentials: "include" }),
-          fetch(`/api/hosts/${encodeURIComponent(host.name)}/iac`, { credentials: "include" }),
+          safeFetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`),
+          safeFetch(`/api/hosts/${encodeURIComponent(host.name)}/iac`),
         ]);
-        if (rc.status === 401 || ri.status === 401) { redirectToLogin(); return; }
         const contJson = await rc.json();
         const iacJson = await ri.json();
         const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
@@ -469,14 +492,19 @@ export default function App() {
   const [page, setPage] = useState<"deployments" | "host">("deployments");
   const [activeHost, setActiveHost] = useState<Host | null>(null);
 
+  // If someone navigates to /login on the SPA origin (dev), bounce to the API login URL
+  useEffect(() => {
+    if (window.location.pathname === "/login") {
+      redirectToLogin();
+    }
+  }, []);
+
   useEffect(() => {
     let cancel = false;
     (async () => {
       setLoading(true); setErr(null);
       try {
-        const r = await fetch("/api/hosts", { credentials: "include" });
-        if (r.status === 401) { redirectToLogin(); return; }
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
+        const r = await safeFetch("/api/hosts");
         const data = await r.json();
         const items = Array.isArray(data.items) ? data.items : [];
         const mapped: Host[] = items.map((h: any) => ({
@@ -573,10 +601,9 @@ export default function App() {
         const name = hostNames[i];
         try {
           const [rc, ri] = await Promise.all([
-            fetch(`/api/hosts/${encodeURIComponent(name)}/containers`, { credentials: "include" }),
-            fetch(`/api/hosts/${encodeURIComponent(name)}/iac`, { credentials: "include" }),
+            safeFetch(`/api/hosts/${encodeURIComponent(name)}/containers`),
+            safeFetch(`/api/hosts/${encodeURIComponent(name)}/iac`),
           ]);
-          if (rc.status === 401 || ri.status === 401) { redirectToLogin(); return; }
           const contJson = await rc.json();
           const iacJson = await ri.json();
           const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
@@ -614,9 +641,8 @@ export default function App() {
     if (scanning) return;
     setScanning(true);
     try {
-      await fetch("/api/iac/scan", { method: "POST", credentials: "include" }).catch(()=>{});
-      const res = await fetch("/api/scan/all", { method: "POST", credentials: "include" });
-      if (res.status === 401) { redirectToLogin(); return; }
+      await safeFetch("/api/iac/scan", { method: "POST" }).catch(()=>{});
+      const res = await safeFetch("/api/scan/all", { method: "POST" });
       const data = await res.json();
       const map: Record<string, { kind: "ok" | "skipped" | "error"; saved?: number; reason?: string; err?: string }> = {};
       for (const r of (data.results || []) as any[]) {
@@ -638,9 +664,14 @@ export default function App() {
     refreshMetricsForHosts([name]);
   }
 
+  async function handleLogout() {
+    try { await fetch(AUTH_LOGOUT_URL, { method: "POST", credentials: "include" }); } catch {}
+    redirectToLogin();
+  }
+
   return (
     <div className="min-h-screen flex">
-      <LeftNav page={page} onGoDeployments={() => setPage("deployments")} />
+      <LeftNav page={page} onGoDeployments={() => setPage("deployments")} onLogout={handleLogout} />
 
       {/* Full-width main content (no right-side top bar) */}
       <div className="flex-1 min-w-0">
@@ -714,7 +745,7 @@ export default function App() {
                               if (scanning) return;
                               setScanning(true);
                               try {
-                                await fetch(`/api/scan/host/${encodeURIComponent(h.name)}`, { method: "POST", credentials: "include" });
+                                await safeFetch(`/api/scan/host/${encodeURIComponent(h.name)}`, { method: "POST" });
                                 setHostScanState(prev => ({ ...prev, [h.name]: { kind: "ok" } }));
                                 await refreshMetricsForHosts([h.name]);
                               } finally {

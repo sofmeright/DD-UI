@@ -157,7 +157,7 @@ function formatPortsLines(ports: any): string[] {
   const lines: string[] = [];
   for (const p of arr) {
     const ip = p.IP || p.Ip || p.ip || "";
-    the const pub = p.PublicPort ?? p.publicPort;
+    const pub = p.PublicPort ?? p.publicPort;
     const priv = p.PrivatePort ?? p.privatePort;
     const typ = (p.Type ?? p.type ?? "").toString().toLowerCase() || "tcp";
     if (priv) {

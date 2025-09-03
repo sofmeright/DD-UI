@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -131,9 +132,14 @@ func makeRouter() http.Handler {
 				})
 			})
 
-			// Trigger scan for all known hosts, then IaC as part of the same Sync
+			// Trigger scan for all known hosts (sequential, simple summary) + IaC scan (non-fatal)
 			//   POST /api/scan/all?timeout=30s
 			priv.Post("/scan/all", func(w http.ResponseWriter, r *http.Request) {
+				// Always try IaC scan as part of Sync; log-only on error
+				if _, _, err := ScanIacLocal(r.Context()); err != nil {
+					log.Printf("iac: sync scan failed: %v", err)
+				}
+
 				hostRows, err := ListHosts(r.Context())
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -191,10 +197,7 @@ func makeRouter() http.Handler {
 					results = append(results, result{Host: h.Name, Saved: n})
 				}
 
-				// Also run IaC scan as part of Sync (non-fatal)
-				iacStacks, iacServices, iacErr := ScanIacLocal(r.Context())
-
-				resp := map[string]any{
+				writeJSON(w, http.StatusOK, map[string]any{
 					"hosts_total": len(hostRows),
 					"scanned":     scanned,
 					"skipped":     skipped,
@@ -202,16 +205,7 @@ func makeRouter() http.Handler {
 					"saved":       total,
 					"results":     results,
 					"status":      "ok",
-					"iac": map[string]any{
-						"stacks":   iacStacks,
-						"services": iacServices,
-					},
-				}
-				if iacErr != nil {
-					resp["iac"].(map[string]any)["error"] = iacErr.Error()
-				}
-
-				writeJSON(w, http.StatusOK, resp)
+				})
 			})
 
 			// POST /api/inventory/reload  (optional body: {"path":"/new/path"})

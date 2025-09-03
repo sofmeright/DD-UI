@@ -139,6 +139,10 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 
 	// gather group names from host row (assuming stored in DB; fallback empty)
 	groups := h.Groups
+	
+	if groups == nil {
+		groups = []string{}
+	}
 
 	rows, err := db.Query(ctx, `
 	  SELECT id, repo_id, scope_kind, scope_name, stack_name, rel_path, compose_file, deploy_kind, pull_policy, sops_status, iac_enabled

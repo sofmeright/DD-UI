@@ -143,37 +143,33 @@ func startAutoScanner(ctx context.Context) {
 
 // ---- IaC auto-scan (local for now) ----
 
-func startIacScanner(ctx context.Context) {
-	if !envBool("DDUI_IAC_AUTO", "true") {
-		log.Printf("iac: auto disabled (DDUI_IAC_AUTO=false)")
+func startIacAutoScanner(ctx context.Context) {
+	if !envBool("DDUI_IAC_SCAN_AUTO", "true") {
+		log.Printf("iac: auto disabled (DDUI_IAC_SCAN_AUTO=false)")
 		return
 	}
-	interval := envDur("DDUI_IAC_INTERVAL", "90s") // 1m30s default
+	interval := envDur("DDUI_IAC_SCAN_INTERVAL", "90s") // default 1m30s
 	log.Printf("iac: auto enabled interval=%s", interval)
-
-	// optional boot IaC scan
-	if envBool("DDUI_IAC_SCAN_ON_START", "true") {
-		go func() {
-			if nStacks, nSvcs, err := ScanIacLocal(ctx); err != nil {
-				log.Printf("iac: initial scan error: %v", err)
-			} else {
-				log.Printf("iac: initial scan ok stacks=%d services=%d", nStacks, nSvcs)
-			}
-		}()
+	
+	
+	// initial scan on boot (optional but helpful)
+	go func() {
+		if _, _, err := ScanIacLocal(ctx); err != nil {
+		log.Printf("iac: initial scan failed: %v", err)
 	}
-
+	}()
+	
+	
 	t := time.NewTicker(interval)
 	go func() {
 		defer t.Stop()
 		for {
 			select {
-			case <-t.C:
-				if nStacks, nSvcs, err := ScanIacLocal(ctx); err != nil {
-					log.Printf("iac: auto scan error: %v", err)
-				} else {
-					log.Printf("iac: auto scan ok stacks=%d services=%d", nStacks, nSvcs)
+				case <-t.C:
+				if _, _, err := ScanIacLocal(ctx); err != nil {
+					log.Printf("iac: periodic scan failed: %v", err)
 				}
-			case <-ctx.Done():
+				case <-ctx.Done():
 				log.Printf("iac: auto scanner stopping: %v", ctx.Err())
 				return
 			}

@@ -17,16 +17,17 @@ import (
 )
 
 var (
-	iacDefaultRootEnv   = "DDUI_IAC_ROOT"
-	iacDirNameEnv       = "DDUI_IAC_DIRNAME"
-	iacDefaultRoot      = "/data"          // mount your repo at /data
-	iacDefaultDirName   = "docker-compose" // per your layout
+	iacDefaultRootEnv = "DDUI_IAC_ROOT"
+	iacDirNameEnv     = "DDUI_IAC_DIRNAME"
+	iacDefaultRoot    = "/data"          // mount your repo at /data
+	iacDefaultDirName = "docker-compose" // per your layout
 )
 
 type composeDoc struct {
 	Services map[string]*composeSvc `yaml:"services"`
 	XPull    string                 `yaml:"x-pull-policy"`
 }
+
 type composeSvc struct {
 	Image         string         `yaml:"image"`
 	ContainerName string         `yaml:"container_name"`
@@ -45,24 +46,48 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 	base := filepath.Join(root, dirname)
 
 	repoID, err := upsertIacRepoLocal(ctx, root)
-	if err != nil { return 0, 0, err }
+	if err != nil {
+		return 0, 0, err
+	}
 
 	// Discover: docker-compose/<scopeName>/<stackName>
 	var keepStackIDs []int64
 	stacksFound := 0
 	servicesSaved := 0
 
-	_ = filepath.WalkDir(base, func(p string, d fs.DirEntry, _ error) error {
-		if d == nil || !d.IsDir() { return nil }
+	// If the base doesn't exist or isn't a dir, treat as "nothing to scan".
+	if fi, err := os.Stat(base); err != nil {
+		if os.IsNotExist(err) {
+			// still mark the repo as scanned so the UI stays calm
+			_, _ = db.Exec(ctx, `UPDATE iac_repos SET last_scan_at=now() WHERE id=$1`, repoID)
+			return 0, 0, nil
+		}
+		return 0, 0, err
+	} else if !fi.IsDir() {
+		return 0, 0, fmt.Errorf("%s is not a directory", base)
+	}
+
+	walkFn := func(p string, d fs.DirEntry, _ error) error {
+		if d == nil || !d.IsDir() {
+			return nil
+		}
+
+		// Rel path from root so we can read segments
 		rel, _ := filepath.Rel(root, p)
 		parts := strings.Split(filepath.ToSlash(rel), "/")
-		// want: <root>/docker-compose/<scope>/<stack>
-		if len(parts) < 3 { return nil }
-		if parts[0] != dirname { return nil }
 
+		// We only process *stack directories*: docker-compose/<scope>/<stack>
+		if len(parts) < 3 || parts[0] != dirname {
+			// not deep enough yet, keep walking
+			return nil
+		}
+
+		// At this point we're at: docker-compose/<scope>/<stack>
 		scopeName := parts[1]
 		stackName := parts[2]
-		if scopeName == "" || stackName == "" { return nil }
+		if scopeName == "" || stackName == "" {
+			return nil
+		}
 
 		// Determine scope_kind by checking if scopeName is a known host
 		scopeKind := "group"
@@ -70,10 +95,14 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 			scopeKind = "host"
 		}
 
-		composeFile := findOne(p, []string{"docker-compose.yml","docker-compose.yaml","compose.yml","compose.yaml"})
+		composeFile := findOne(p, []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"})
 		deployKind := "unmanaged"
-		if composeFile != "" { deployKind = "compose" }
-		if existsAny(p, []string{"deploy.sh","pre.sh","post.sh"}) { deployKind = "script" } // if both exist we keep compose
+		if composeFile != "" {
+			deployKind = "compose"
+		}
+		if existsAny(p, []string{"deploy.sh", "pre.sh", "post.sh"}) {
+			deployKind = "script" // if both exist we keep compose
+		}
 
 		// env files (record + sops detection)
 		envFiles := listEnvFiles(p)
@@ -83,7 +112,10 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 		stackID, err := upsertIacStack(ctx, repoID, scopeKind, scopeName, stackName,
 			filepath.ToSlash(filepath.Join(dirname, scopeName, stackName)),
 			composeFile, deployKind, "", sopsStatus, true)
-		if err != nil { return nil }
+		if err != nil {
+			// don't blow up the walk; just stop descending this subtree
+			return fs.SkipDir
+		}
 		keepStackIDs = append(keepStackIDs, stackID)
 		stacksFound++
 
@@ -96,7 +128,7 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 			sum, sz := sha256File(filepath.Join(p, composeFile))
 			_ = upsertIacFile(ctx, stackID, "compose", filepath.ToSlash(filepath.Join(dirname, scopeName, stackName, composeFile)), false, sum, sz)
 		}
-		for _, s := range []string{"deploy.sh","pre.sh","post.sh"} {
+		for _, s := range []string{"deploy.sh", "pre.sh", "post.sh"} {
 			full := filepath.Join(p, s)
 			if fi, err := os.Stat(full); err == nil && !fi.IsDir() {
 				sum, sz := sha256File(full)
@@ -111,15 +143,18 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 			_ = yaml.Unmarshal(b, cdoc)
 			pullPolicy := strings.TrimSpace(cdoc.XPull)
 
-			// services
-			// normalize deterministic order for stable testing
+			// services in deterministic order
 			names := make([]string, 0, len(cdoc.Services))
-			for k := range cdoc.Services { names = append(names, k) }
+			for k := range cdoc.Services {
+				names = append(names, k)
+			}
 			sort.Strings(names)
 
 			for _, svcName := range names {
 				svc := cdoc.Services[svcName]
-				if svc == nil { continue }
+				if svc == nil {
+					continue
+				}
 
 				lbls := normLabels(svc.Labels)
 				envKeys, envF := normEnv(svc.Environment, svc.EnvFile, p, envFiles)
@@ -147,8 +182,16 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 			}
 		}
 
-		return fs.SkipDir // don’t recurse further than stack dir
-	})
+		// We are *at* a stack directory; don't descend further into it.
+		return fs.SkipDir
+	}
+
+	if err := filepath.WalkDir(base, walkFn); err != nil {
+		// If the tree disappears between Stat and Walk (e.g., unmounted), don't hard fail.
+		if !os.IsNotExist(err) {
+			return 0, 0, err
+		}
+	}
 
 	// prune removed stacks for this repo
 	_, _ = pruneIacStacksNotIn(ctx, repoID, keepStackIDs)
@@ -170,7 +213,9 @@ func listEnvFiles(dir string) []envFileMeta {
 	var out []envFileMeta
 	entries, _ := os.ReadDir(dir)
 	for _, e := range entries {
-		if e.IsDir() { continue }
+		if e.IsDir() {
+			continue
+		}
 		name := e.Name()
 		if !strings.HasSuffix(name, ".env") && !strings.Contains(name, ".env.") && !strings.HasSuffix(name, "_secret.env") && !strings.HasSuffix(name, "_private.env") && !strings.HasSuffix(name, "_secure.env") && name != ".env" {
 			continue
@@ -187,15 +232,23 @@ func listEnvFiles(dir string) []envFileMeta {
 }
 
 func summarizeSops(envs []envFileMeta) string {
-	if len(envs) == 0 { return "none" }
+	if len(envs) == 0 {
+		return "none"
+	}
 	total := 0
 	enc := 0
 	for _, e := range envs {
 		total++
-		if e.sops { enc++ }
+		if e.sops {
+			enc++
+		}
 	}
-	if enc == 0 { return "none" }
-	if enc == total { return "all" }
+	if enc == 0 {
+		return "none"
+	}
+	if enc == total {
+		return "all"
+	}
 	return "partial"
 }
 
@@ -226,13 +279,17 @@ var sopsMarker = regexp.MustCompile(`(?i)\bsops\s*:\b|ENC\[|AGE-ENCRYPTED`)
 
 func looksSops(b []byte) bool {
 	peek := b
-	if len(b) > 4096 { peek = b[:4096] }
+	if len(b) > 4096 {
+		peek = b[:4096]
+	}
 	return sopsMarker.Match(peek)
 }
 
 func sha256File(p string) (hexsum string, size int64) {
 	f, err := os.Open(p)
-	if err != nil { return "", 0 }
+	if err != nil {
+		return "", 0
+	}
 	defer f.Close()
 	fi, _ := f.Stat()
 	h := sha256.New()
@@ -246,21 +303,23 @@ func sha256File(p string) (hexsum string, size int64) {
 // ---- normalizers ----
 
 func toString(v any) string {
-    switch x := v.(type) {
-    case string:
-        return x
-    case fmt.Stringer:
-        return x.String()
-    default:
-        return fmt.Sprint(v)
-    }
+	switch x := v.(type) {
+	case string:
+		return x
+	case fmt.Stringer:
+		return x.String()
+	default:
+		return fmt.Sprint(v)
+	}
 }
 
 func normLabels(v any) map[string]string {
 	out := map[string]string{}
 	switch t := v.(type) {
 	case map[string]any:
-		for k, val := range t { out[k] = toString(val) }
+		for k, val := range t {
+			out[k] = toString(val)
+		}
 	case map[string]string:
 		return t
 	case []any:
@@ -268,7 +327,9 @@ func normLabels(v any) map[string]string {
 		for _, it := range t {
 			if s, ok := it.(string); ok {
 				kv := strings.SplitN(s, "=", 2)
-				if len(kv) == 2 { out[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1]) }
+				if len(kv) == 2 {
+					out[strings.TrimSpace(kv[0])] = strings.TrimSpace(kv[1])
+				}
 			}
 		}
 	}
@@ -279,12 +340,16 @@ func normEnv(env any, envFile any, stackDir string, discovered []envFileMeta) ([
 	keys := map[string]struct{}{}
 	switch t := env.(type) {
 	case map[string]any:
-		for k := range t { keys[k] = struct{}{} }
+		for k := range t {
+			keys[k] = struct{}{}
+		}
 	case []any:
 		for _, it := range t {
 			if s, ok := it.(string); ok {
 				k := s
-				if i := strings.IndexByte(s, '='); i > 0 { k = s[:i] }
+				if i := strings.IndexByte(s, '='); i > 0 {
+					k = s[:i]
+				}
 				keys[strings.TrimSpace(k)] = struct{}{}
 			}
 		}
@@ -308,14 +373,19 @@ func normEnv(env any, envFile any, stackDir string, discovered []envFileMeta) ([
 		// try match to discovered in this stack dir
 		sops := false
 		for _, d := range discovered {
-			if d.rel == base { sops = d.sops; break }
+			if d.rel == base {
+				sops = d.sops
+				break
+			}
 		}
 		files = append(files, IacEnvFile{Path: filepath.ToSlash(filepath.Join(filepath.Base(filepath.Dir(stackDir)), filepath.Base(stackDir), base)), Sops: sops})
 	}
 
 	// return sorted keys
 	out := make([]string, 0, len(keys))
-	for k := range keys { out = append(out, k) }
+	for k := range keys {
+		out = append(out, k)
+	}
 	sort.Strings(out)
 	return out, files
 }
@@ -332,7 +402,9 @@ func normPorts(v any) []map[string]any {
 				out = append(out, map[string]any{"published": host, "target": cont, "protocol": proto})
 			case map[string]any:
 				m := map[string]any{}
-				for k, v := range p { m[strings.ToLower(k)] = v }
+				for k, v := range p {
+					m[strings.ToLower(k)] = v
+				}
 				// docker compose uses target/published/protocol
 				out = append(out, map[string]any{
 					"published": m["published"],
@@ -369,7 +441,9 @@ func normVolumes(v any) []map[string]any {
 				out = append(out, map[string]any{"source": src, "target": dst, "mode": mode})
 			case map[string]any:
 				m := map[string]any{}
-				for k, v := range vv { m[strings.ToLower(k)] = v }
+				for k, v := range vv {
+					m[strings.ToLower(k)] = v
+				}
 				out = append(out, map[string]any{
 					"source": m["source"],
 					"target": m["target"],

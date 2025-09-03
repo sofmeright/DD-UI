@@ -83,42 +83,63 @@ func readSecretMaybeFile(v string) (string, error) {
 
 func InitAuthFromEnv() error {
 	var err error
+
+	// Secrets can be given inline or as "@/path/to/file"
 	cs, err := readSecretMaybeFile(env("OIDC_CLIENT_SECRET", ""))
 	if err != nil {
 		return err
 	}
-
 	sec, err := readSecretMaybeFile(env("SESSION_SECRET", ""))
 	if err != nil {
 		return err
 	}
 	if sec == "" {
-		sec = randHex(64)
+		sec = randHex(64) // generate one if not provided
+	}
+
+	redirect := env("OIDC_REDIRECT_URL", "")
+
+	// Derive SecureCookies if COOKIE_SECURE is unset.
+	// - If redirect URI is https, use secure cookies.
+	// - If it's http (dev), allow non-secure cookies so the session works locally.
+	secureStr := strings.TrimSpace(env("COOKIE_SECURE", ""))
+	var secure bool
+	if secureStr == "" {
+		secure = strings.HasPrefix(strings.ToLower(redirect), "https://")
+	} else {
+		switch strings.ToLower(secureStr) {
+		case "1", "true", "yes", "on":
+			secure = true
+		default:
+			secure = false
+		}
 	}
 
 	cfg = AuthConfig{
 		Issuer:        env("OIDC_ISSUER_URL", ""),
 		ClientID:      env("OIDC_CLIENT_ID", ""),
 		ClientSecret:  cs,
-		RedirectURL:   env("OIDC_REDIRECT_URL", ""),
+		RedirectURL:   redirect,
 		Scopes:        scopes(env("OIDC_SCOPES", "openid email profile")),
 		SessionSecret: []byte(sec),
 		AllowedDomain: strings.ToLower(env("OIDC_ALLOWED_EMAIL_DOMAIN", "")),
-		SecureCookies: strings.ToLower(env("COOKIE_SECURE", "true")) == "true",
+		SecureCookies: secure,
 		CookieDomain:  env("COOKIE_DOMAIN", ""),
-
-		PostLogoutRedirectURL: env("OIDC_POST_LOGOUT_REDIRECT_URL", ""), // <-- add
+		PostLogoutRedirectURL: env("OIDC_POST_LOGOUT_REDIRECT_URL", ""),
 	}
+
 	if cfg.Issuer == "" || cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURL == "" {
 		return errors.New("OIDC_ISSUER_URL, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_REDIRECT_URL are required")
 	}
 
+	// ---- OIDC wiring
 	ctx := context.Background()
 	oidcProv, err = oidc.NewProvider(ctx, cfg.Issuer)
 	if err != nil {
 		return err
 	}
-	// discover end_session_endpoint
+
+	// Try to discover end_session_endpoint (not all providers expose it)
 	var disc struct {
 		EndSessionEndpoint string `json:"end_session_endpoint"`
 	}
@@ -138,6 +159,7 @@ func InitAuthFromEnv() error {
 		Scopes:       cfg.Scopes,
 	}
 
+	// ---- Session cookie store (picks up derived Secure flag)
 	store = sessions.NewCookieStore(cfg.SessionSecret)
 	store.Options = &sessions.Options{
 		Path:     "/",
@@ -147,13 +169,42 @@ func InitAuthFromEnv() error {
 		SameSite: http.SameSiteLaxMode,
 		Domain:   cfg.CookieDomain,
 	}
+
 	return nil
 }
 
 func scopes(s string) []string { /* unchanged */ return strings.Fields(s) }
 func randHex(n int) string     { /* unchanged */ b := make([]byte, n/2); _, _ = rand.Read(b); return hex.EncodeToString(b) }
 
-func LoginHandler(w http.ResponseWriter, r *http.Request) { /* unchanged */ }
+func LoginHandler(w http.ResponseWriter, r *http.Request) {
+	if oauthCfg == nil || oidcProv == nil {
+		http.Error(w, "auth not initialized", http.StatusInternalServerError)
+		return
+	}
+
+	// CSRF + replay protection
+	state := randHex(32)
+	nonce := randHex(32)
+
+	// Short-lived temp cookie just for OAuth flow data
+	tmp, _ := store.Get(r, oauthTmpName)
+	tmp.Values["state"] = state
+	tmp.Values["nonce"] = nonce
+	tmp.Options = &sessions.Options{
+		Path:     "/",
+		MaxAge:   300, // 5 minutes
+		HttpOnly: true,
+		Secure:   cfg.SecureCookies,
+		SameSite: http.SameSiteLaxMode, // works for top-level GET redirects
+		Domain:   cfg.CookieDomain,
+	}
+	_ = tmp.Save(r, w)
+
+	// Build OP authorize URL with nonce
+	authURL := oauthCfg.AuthCodeURL(state, oidc.Nonce(nonce))
+	http.Redirect(w, r, authURL, http.StatusFound)
+}
+
 
 func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	// Read and immediately expire the temporary oauth cookie

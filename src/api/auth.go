@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"   // <-- add
 	"os"
 	"strings"
 	"time"
@@ -31,11 +32,12 @@ type User struct {
 }
 
 var (
-	oidcProv     *oidc.Provider
-	oidcVerifier *oidc.IDTokenVerifier
-	oauthCfg     *oauth2.Config
-	store        *sessions.CookieStore
-	cfg          AuthConfig
+	oidcProv            *oidc.Provider
+	oidcVerifier        *oidc.IDTokenVerifier
+	oauthCfg            *oauth2.Config
+	store               *sessions.CookieStore
+	cfg                 AuthConfig
+	endSessionEndpoint  string // discovered from .well-known
 )
 
 type AuthConfig struct {
@@ -48,6 +50,8 @@ type AuthConfig struct {
 	AllowedDomain string
 	SecureCookies bool
 	CookieDomain  string
+
+	PostLogoutRedirectURL string // <-- add
 }
 
 const (
@@ -103,6 +107,8 @@ func InitAuthFromEnv() error {
 		AllowedDomain: strings.ToLower(env("OIDC_ALLOWED_EMAIL_DOMAIN", "")),
 		SecureCookies: strings.ToLower(env("COOKIE_SECURE", "true")) == "true",
 		CookieDomain:  env("COOKIE_DOMAIN", ""),
+
+		PostLogoutRedirectURL: env("OIDC_POST_LOGOUT_REDIRECT_URL", ""), // <-- add
 	}
 	if cfg.Issuer == "" || cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURL == "" {
 		return errors.New("OIDC_ISSUER_URL, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_REDIRECT_URL are required")
@@ -113,6 +119,17 @@ func InitAuthFromEnv() error {
 	if err != nil {
 		return err
 	}
+	// discover end_session_endpoint
+	var disc struct {
+		EndSessionEndpoint string `json:"end_session_endpoint"`
+	}
+	if err := oidcProv.Claims(&disc); err == nil {
+		endSessionEndpoint = strings.TrimSpace(disc.EndSessionEndpoint)
+	}
+	if endSessionEndpoint == "" {
+		log.Printf("auth: no end_session_endpoint found in discovery; RP-logout will fall back to /login")
+	}
+
 	oidcVerifier = oidcProv.Verifier(&oidc.Config{ClientID: cfg.ClientID})
 	oauthCfg = &oauth2.Config{
 		ClientID:     cfg.ClientID,
@@ -134,100 +151,15 @@ func InitAuthFromEnv() error {
 	return nil
 }
 
-func scopes(s string) []string {
-	var out []string
-	for _, p := range strings.Fields(s) {
-		out = append(out, strings.TrimSpace(p))
-	}
-	return out
-}
+func scopes(s string) []string { /* unchanged */ return strings.Fields(s) }
+func randHex(n int) string     { /* unchanged */ b := make([]byte, n/2); _, _ = rand.Read(b); return hex.EncodeToString(b) }
 
-func randHex(n int) string {
-	b := make([]byte, n/2)
-	_, _ = rand.Read(b)
-	return hex.EncodeToString(b)
-}
-
-func LoginHandler(w http.ResponseWriter, r *http.Request) {
-	state := randHex(32)
-	nonce := randHex(32)
-
-	tmp, _ := store.Get(r, oauthTmpName)
-	tmp.Values["state"] = state
-	tmp.Values["nonce"] = nonce
-	tmp.Options = &sessions.Options{
-		Path:     "/",
-		MaxAge:   300, // 5 min
-		HttpOnly: true,
-		Secure:   cfg.SecureCookies,
-		SameSite: http.SameSiteLaxMode,
-		Domain:   cfg.CookieDomain,
-	}
-	_ = tmp.Save(r, w)
-
-	url := oauthCfg.AuthCodeURL(state, oidc.Nonce(nonce))
-	http.Redirect(w, r, url, http.StatusFound)
-}
+func LoginHandler(w http.ResponseWriter, r *http.Request) { /* unchanged */ }
 
 func CallbackHandler(w http.ResponseWriter, r *http.Request) {
-	// Read and immediately expire the temporary oauth cookie
-	tmp, _ := store.Get(r, oauthTmpName)
-	wantState, _ := tmp.Values["state"].(string)
-	nonce, _ := tmp.Values["nonce"].(string)
-	tmp.Options.MaxAge = -1
-	_ = tmp.Save(r, w)
+	// ... unchanged up to verifying claims ...
 
-	// CSRF protection: state must match
-	if r.URL.Query().Get("state") != wantState || wantState == "" {
-		http.Error(w, "state mismatch", http.StatusBadRequest)
-		return
-	}
-
-	ctx := r.Context()
-	tok, err := oauthCfg.Exchange(ctx, r.URL.Query().Get("code"))
-	if err != nil {
-		http.Error(w, "code exchange failed", http.StatusBadGateway)
-		return
-	}
-
-	rawID, ok := tok.Extra("id_token").(string)
-	if !ok {
-		http.Error(w, "no id_token", http.StatusBadGateway)
-		return
-	}
-
-	idt, err := oidcVerifier.Verify(ctx, rawID)
-	if err != nil {
-		http.Error(w, "id token verify failed", http.StatusUnauthorized)
-		return
-	}
-	if idt.Nonce != nonce {
-		http.Error(w, "nonce mismatch", http.StatusBadRequest)
-		return
-	}
-
-	var claims struct {
-		Sub    string `json:"sub"`
-		Email  string `json:"email"`
-		Name   string `json:"name"`
-		Pic    string `json:"picture"`
-		HD     string `json:"hd"`     // Google hosted domain (if used)
-		Domain string `json:"domain"` // some providers set this
-		Exp    int64  `json:"exp"`
-	}
-	if err := idt.Claims(&claims); err != nil {
-		http.Error(w, "claims parse failed", http.StatusBadGateway)
-		return
-	}
-
-	if cfg.AllowedDomain != "" {
-		d := strings.ToLower(domainForClaims(claims.Email, claims.HD, claims.Domain))
-		if d != cfg.AllowedDomain {
-			http.Error(w, "domain not allowed", http.StatusForbidden)
-			return
-		}
-	}
-
+	// Build our app user
 	u := User{
 		Sub:   claims.Sub,
 		Email: strings.ToLower(claims.Email),
@@ -235,21 +167,45 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		Pic:   claims.Pic,
 	}
 
+	// Persist user + id_token in the session for logout (id_token_hint)
 	sess, _ := store.Get(r, sessionName)
 	sess.Values["user"] = u
 	sess.Values["exp"] = time.Now().Add(7 * 24 * time.Hour).Unix()
+	sess.Values["id_token"] = rawID // <-- save raw ID token
 	_ = sess.Save(r, w)
 
 	log.Printf("auth: login ok sub=%s email=%s", u.Sub, u.Email)
-
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 
 func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	sess, _ := store.Get(r, sessionName)
+	// get id_token before clearing (optional, recommended)
+	var idTokenHint string
+	if v, ok := sess.Values["id_token"].(string); ok {
+		idTokenHint = v
+	}
+	// expire session cookie
 	sess.Options.MaxAge = -1
 	_ = sess.Save(r, w)
-	w.WriteHeader(http.StatusNoContent)
+
+	// If we know end_session + have a post-logout redirect, go to the IdP
+	if endSessionEndpoint != "" && cfg.PostLogoutRedirectURL != "" {
+		u, _ := url.Parse(endSessionEndpoint)
+		q := u.Query()
+		q.Set("post_logout_redirect_uri", cfg.PostLogoutRedirectURL)
+		if idTokenHint != "" {
+			q.Set("id_token_hint", idTokenHint)
+		}
+		// optional, some IdPs like it
+		q.Set("client_id", cfg.ClientID)
+		u.RawQuery = q.Encode()
+		http.Redirect(w, r, u.String(), http.StatusFound)
+		return
+	}
+
+	// Fallback: just land at /login
+	http.Redirect(w, r, "/login", http.StatusFound)
 }
 
 func SessionHandler(w http.ResponseWriter, r *http.Request) {

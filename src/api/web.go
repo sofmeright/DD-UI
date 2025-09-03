@@ -264,6 +264,8 @@ func makeRouter() http.Handler {
 	r.Get("/login", LoginHandler)
 	r.Get("/auth/login", LoginHandler) // alias
 	r.Get("/auth/callback", CallbackHandler)
+	r.Get("/logout", LogoutHandler)            // <-- add
+	r.Get("/auth/logout", LogoutHandler)       // <-- add
 	r.Post("/logout", LogoutHandler)
 	r.Post("/auth/logout", LogoutHandler) // alias
 

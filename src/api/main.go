@@ -33,7 +33,7 @@ func main() {
 
 	// kick off background auto-scanner (Portainer-ish cadence)
 	startAutoScanner(ctx)
-	startIacScanner(ctx)
+	startIacAutoScanner(ctx) // <-- was startIacScanner(ctx)
 
 	log.Printf("DDUI API on %s (ui=/home/ddui/ui/dist)", addr)
 	if err := http.ListenAndServe(addr, makeRouter()); err != nil {

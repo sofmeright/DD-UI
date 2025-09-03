@@ -157,9 +157,64 @@ func randHex(n int) string     { /* unchanged */ b := make([]byte, n/2); _, _ = 
 func LoginHandler(w http.ResponseWriter, r *http.Request) { /* unchanged */ }
 
 func CallbackHandler(w http.ResponseWriter, r *http.Request) {
-	// ... unchanged up to verifying claims ...
+	// Read and immediately expire the temporary oauth cookie
+	tmp, _ := store.Get(r, oauthTmpName)
+	wantState, _ := tmp.Values["state"].(string)
+	nonce, _ := tmp.Values["nonce"].(string)
+	tmp.Options.MaxAge = -1
+	_ = tmp.Save(r, w)
 
-	// Build our app user
+	// CSRF protection: state must match
+	if r.URL.Query().Get("state") != wantState || wantState == "" {
+		http.Error(w, "state mismatch", http.StatusBadRequest)
+		return
+	}
+
+	ctx := r.Context()
+	tok, err := oauthCfg.Exchange(ctx, r.URL.Query().Get("code"))
+	if err != nil {
+		http.Error(w, "code exchange failed", http.StatusBadGateway)
+		return
+	}
+
+	rawID, ok := tok.Extra("id_token").(string)
+	if !ok || rawID == "" {
+		http.Error(w, "no id_token", http.StatusBadGateway)
+		return
+	}
+
+	idt, err := oidcVerifier.Verify(ctx, rawID)
+	if err != nil {
+		http.Error(w, "id token verify failed", http.StatusUnauthorized)
+		return
+	}
+	if idt.Nonce != nonce {
+		http.Error(w, "nonce mismatch", http.StatusBadRequest)
+		return
+	}
+
+	var claims struct {
+		Sub    string `json:"sub"`
+		Email  string `json:"email"`
+		Name   string `json:"name"`
+		Pic    string `json:"picture"`
+		HD     string `json:"hd"`     // Google hosted domain (if used)
+		Domain string `json:"domain"` // some providers set this
+		Exp    int64  `json:"exp"`
+	}
+	if err := idt.Claims(&claims); err != nil {
+		http.Error(w, "claims parse failed", http.StatusBadGateway)
+		return
+	}
+
+	if cfg.AllowedDomain != "" {
+		d := strings.ToLower(domainForClaims(claims.Email, claims.HD, claims.Domain))
+		if d != cfg.AllowedDomain {
+			http.Error(w, "domain not allowed", http.StatusForbidden)
+			return
+		}
+	}
+
 	u := User{
 		Sub:   claims.Sub,
 		Email: strings.ToLower(claims.Email),
@@ -167,11 +222,11 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		Pic:   claims.Pic,
 	}
 
-	// Persist user + id_token in the session for logout (id_token_hint)
+	// persist user + id_token so LogoutHandler can send id_token_hint
 	sess, _ := store.Get(r, sessionName)
 	sess.Values["user"] = u
 	sess.Values["exp"] = time.Now().Add(7 * 24 * time.Hour).Unix()
-	sess.Values["id_token"] = rawID // <-- save raw ID token
+	sess.Values["id_token"] = rawID
 	_ = sess.Save(r, w)
 
 	log.Printf("auth: login ok sub=%s email=%s", u.Sub, u.Email)

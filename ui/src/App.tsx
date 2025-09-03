@@ -440,6 +440,11 @@ export default function App() {
     kind: "ok" | "skipped" | "error"; saved?: number; reason?: string; err?: string
   }>>({});
 
+  // Host -> { stacks, containers, drift, errors }
+  const [metricsCache, setMetricsCache] = useState<
+    Record<string, { stacks: number; containers: number; drift: number; errors: number }>
+  >({});
+
   const [page, setPage] = useState<"deployments" | "host">("deployments");
   const [activeHost, setActiveHost] = useState<Host | null>(null);
 
@@ -472,15 +477,132 @@ export default function App() {
     return hosts.filter(h => [h.name, h.address || "", ...(h.groups || [])].join(" ").toLowerCase().includes(q));
   }, [hosts, query]);
 
-  /* Metrics (Hosts real; others can be filled later when we aggregate) */
+  /* ---------- Metrics helpers & aggregation ---------- */
+
+  // "healthy" states; everything else counts as error for the top card
+  const OK_STATES = new Set(["running", "created", "restarting", "healthy", "up"]);
+  function isBadState(state?: string) {
+    const s = (state || "").toLowerCase();
+    if (!s) return false;
+    for (const ok of OK_STATES) if (s.includes(ok)) return false; // e.g. "Up 5 minutes"
+    return true;
+    }
+
+  // Compute metrics for a single host from runtime + IaC
+  function computeHostMetrics(runtime: ApiContainer[], iac: IacStack[]) {
+    const rtByStack = new Map<string, ApiContainer[]>();
+    for (const c of runtime) {
+      const key = (c.compose_project || c.stack || "(none)").trim() || "(none)";
+      if (!rtByStack.has(key)) rtByStack.set(key, []);
+      rtByStack.get(key)!.push(c);
+    }
+
+    const iacByName = new Map<string, IacStack>();
+    for (const s of iac) iacByName.set(s.name, s);
+
+    const names = new Set<string>([...rtByStack.keys(), ...iacByName.keys()]);
+
+    let stacks = 0;
+    let containers = runtime.length;
+    let drift = 0;
+    let errors = 0;
+
+    for (const c of runtime) if (isBadState(c.state)) errors++;
+
+    for (const sname of names) {
+      stacks++;
+      const rcs = rtByStack.get(sname) || [];
+      const is = iacByName.get(sname);
+      let stackDrift = false;
+
+      const desiredImageFor = (c: ApiContainer): string | undefined => {
+        if (!is) return undefined;
+        const svc = is.services.find(x =>
+          (c.compose_service && x.service_name === c.compose_service) ||
+          (x.container_name && x.container_name === c.name)
+        );
+        return svc?.image || undefined;
+      };
+
+      // runtime image != desired image → drift
+      for (const c of rcs) {
+        const desired = desiredImageFor(c);
+        if (desired && desired.trim() && desired.trim() !== (c.image || "").trim()) {
+          stackDrift = true;
+          break;
+        }
+      }
+      // desired service missing at runtime → drift
+      if (!stackDrift && is) {
+        for (const svc of is.services) {
+          const match = rcs.some(c =>
+            (c.compose_service && svc.service_name === c.compose_service) ||
+            (svc.container_name && c.name === svc.container_name)
+          );
+          if (!match) { stackDrift = true; break; }
+        }
+      }
+      // IaC defines stack but no runtime containers → drift
+      if (!rcs.length && is && is.services.length > 0) {
+        stackDrift = true;
+      }
+      if (stackDrift) drift++;
+    }
+
+    return { stacks, containers, drift, errors };
+  }
+
+  // Fetch runtime+IaC for hosts and update metricsCache (concurrency-limited)
+  async function refreshMetricsForHosts(hostNames: string[]) {
+    if (!hostNames.length) return;
+    const limit = 4;
+    let idx = 0;
+
+    const workers = Array.from({ length: Math.min(limit, hostNames.length) }, () => (async () => {
+      while (true) {
+        const i = idx++; if (i >= hostNames.length) break;
+        const name = hostNames[i];
+        try {
+          const [rc, ri] = await Promise.all([
+            fetch(`/api/hosts/${encodeURIComponent(name)}/containers`, { credentials: "include" }),
+            fetch(`/api/hosts/${encodeURIComponent(name)}/iac`, { credentials: "include" }),
+          ]);
+          if (rc.status === 401 || ri.status === 401) { window.location.href = "/login"; return; }
+          const contJson = await rc.json();
+          const iacJson = await ri.json();
+          const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
+          const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
+          const m = computeHostMetrics(runtime, iacStacks);
+          setMetricsCache(prev => ({ ...prev, [name]: m }));
+        } catch {
+          // per-host failure ignored for metrics; keeps UI responsive
+        }
+      }
+    })());
+
+    await Promise.all(workers);
+  }
+
+  // Kick off metrics after hosts load
+  useEffect(() => {
+    if (!hosts.length) return;
+    refreshMetricsForHosts(hosts.map(h => h.name));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [hosts]);
+
+  // Aggregate metrics across filtered hosts
   const metrics = useMemo(() => {
-    const hosts = filteredHosts.length;
-    const stacks = 0;      // placeholder until aggregated
-    const containers = 0;  // placeholder until aggregated
-    const drift = 0;
-    const errors = 0;
-    return { hosts, stacks, containers, drift, errors };
-  }, [filteredHosts]);
+    let stacks = 0, containers = 0, drift = 0, errors = 0;
+    for (const h of filteredHosts) {
+      const m = metricsCache[h.name];
+      if (!m) continue;
+      stacks += m.stacks;
+      containers += m.containers;
+      drift += m.drift;
+      errors += m.errors;
+    }
+    return { hosts: filteredHosts.length, stacks, containers, drift, errors };
+  }, [filteredHosts, metricsCache]);
 
   async function handleScanAll() {
     if (scanning) return;
@@ -498,6 +620,9 @@ export default function App() {
         else map[r.host] = { kind: "ok", saved: r.saved ?? 0 };
       }
       setHostScanState(prev => ({ ...prev, ...map }));
+
+      // Refresh metrics after sync
+      await refreshMetricsForHosts(hosts.map(h => h.name));
     } finally {
       setScanning(false);
     }
@@ -507,6 +632,8 @@ export default function App() {
     const h = hosts.find(x => x.name === name) || { name };
     setActiveHost(h as Host);
     setPage("host");
+    // opportunistic metrics refresh for the opened host
+    refreshMetricsForHosts([name]);
   }
 
   return (
@@ -586,7 +713,7 @@ export default function App() {
                     {!loading && filteredHosts.map((h) => (
                       <tr key={h.name} className="border-t border-slate-800 hover:bg-slate-900/40">
                         <td className="p-3 font-medium text-slate-200">
-                          <button className="hover:underline" onClick={() => { setActiveHost(h); setPage("host"); }}>
+                          <button className="hover:underline" onClick={() => openHost(h.name)}>
                             {h.name}
                           </button>
                         </td>
@@ -603,6 +730,7 @@ export default function App() {
                               try {
                                 await fetch(`/api/scan/host/${encodeURIComponent(h.name)}`, { method: "POST", credentials: "include" });
                                 setHostScanState(prev => ({ ...prev, [h.name]: { kind: "ok" } }));
+                                await refreshMetricsForHosts([h.name]);
                               } finally {
                                 setScanning(false);
                               }

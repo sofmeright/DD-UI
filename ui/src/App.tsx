@@ -140,6 +140,14 @@ function formatPortsLines(ports: any): string[] {
 function LeftNav({ page, onGoDeployments }: { page: string; onGoDeployments: () => void }) {
   return (
     <div className="hidden md:flex md:flex-col w-60 shrink-0 border-r border-slate-800 bg-slate-950/60">
+      {/* Brand moved into the side nav */}
+      <div className="px-4 py-4 border-b border-slate-800">
+        <div className="font-black uppercase tracking-tight leading-none text-slate-200 select-none flex items-center gap-2">
+          <span className="bg-clip-text text-transparent bg-gradient-to-r from-brand to-sky-400">DDUI</span>
+          <Badge variant="outline">Community</Badge>
+        </div>
+      </div>
+
       <div className="px-4 py-3 text-xs tracking-wide uppercase text-slate-400">Resources</div>
       <nav className="px-2 pb-4 space-y-1">
         <button
@@ -194,13 +202,12 @@ type MergedStack = {
   rows: MergedRow[];
 };
 
-function HostStacksView({ host, onBack }: { host: Host; onBack: () => void }) {
+function HostStacksView({ host, onBack, onSync }: { host: Host; onBack: () => void; onSync: ()=>void }) {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [stacks, setStacks] = useState<MergedStack[]>([]);
   const [hostQuery, setHostQuery] = useState("");
 
-  /* helper filter */
   function matchRow(r: MergedRow, q: string) {
     if (!q) return true;
     const hay = [
@@ -224,7 +231,6 @@ function HostStacksView({ host, onBack }: { host: Host; onBack: () => void }) {
         const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
         const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
 
-        // Group runtime by stack name
         const rtByStack = new Map<string, ApiContainer[]>();
         for (const c of runtime) {
           const key = (c.compose_project || c.stack || "(none)").trim() || "(none)";
@@ -322,14 +328,20 @@ function HostStacksView({ host, onBack }: { host: Host; onBack: () => void }) {
         <div className="ml-2 text-lg font-semibold text-white">
           {host.name} <span className="text-slate-400 text-sm">{host.address || ""}</span>
         </div>
-        <div className="ml-auto relative w-72">
-          <Search className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
-          <Input
-            value={hostQuery}
-            onChange={(e) => setHostQuery(e.target.value)}
-            placeholder={`Search ${host.name}…`}
-            className="pl-9 bg-slate-900/50 border-slate-800 text-slate-200 placeholder:text-slate-500"
-          />
+        {/* Sync button directly left of the host search */}
+        <div className="ml-auto flex items-center gap-2">
+          <Button onClick={onSync} className="bg-[#310937] hover:bg-[#2a0830] text-white">
+            <RefreshCw className="h-4 w-4 mr-1" /> Sync
+          </Button>
+          <div className="relative w-72">
+            <Search className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
+            <Input
+              value={hostQuery}
+              onChange={(e) => setHostQuery(e.target.value)}
+              placeholder={`Search ${host.name}…`}
+              className="pl-9 bg-slate-900/50 border-slate-800 text-slate-200 placeholder:text-slate-500"
+            />
+          </div>
         </div>
       </div>
 
@@ -477,18 +489,15 @@ export default function App() {
     return hosts.filter(h => [h.name, h.address || "", ...(h.groups || [])].join(" ").toLowerCase().includes(q));
   }, [hosts, query]);
 
-  /* ---------- Metrics helpers & aggregation ---------- */
-
   // "healthy" states; everything else counts as error for the top card
   const OK_STATES = new Set(["running", "created", "restarting", "healthy", "up"]);
   function isBadState(state?: string) {
     const s = (state || "").toLowerCase();
     if (!s) return false;
-    for (const ok of OK_STATES) if (s.includes(ok)) return false; // e.g. "Up 5 minutes"
+    for (const ok of OK_STATES) if (s.includes(ok)) return false;
     return true;
-    }
+  }
 
-  // Compute metrics for a single host from runtime + IaC
   function computeHostMetrics(runtime: ApiContainer[], iac: IacStack[]) {
     const rtByStack = new Map<string, ApiContainer[]>();
     for (const c of runtime) {
@@ -496,7 +505,6 @@ export default function App() {
       if (!rtByStack.has(key)) rtByStack.set(key, []);
       rtByStack.get(key)!.push(c);
     }
-
     const iacByName = new Map<string, IacStack>();
     for (const s of iac) iacByName.set(s.name, s);
 
@@ -524,15 +532,12 @@ export default function App() {
         return svc?.image || undefined;
       };
 
-      // runtime image != desired image → drift
       for (const c of rcs) {
         const desired = desiredImageFor(c);
         if (desired && desired.trim() && desired.trim() !== (c.image || "").trim()) {
-          stackDrift = true;
-          break;
+          stackDrift = true; break;
         }
       }
-      // desired service missing at runtime → drift
       if (!stackDrift && is) {
         for (const svc of is.services) {
           const match = rcs.some(c =>
@@ -542,22 +547,17 @@ export default function App() {
           if (!match) { stackDrift = true; break; }
         }
       }
-      // IaC defines stack but no runtime containers → drift
-      if (!rcs.length && is && is.services.length > 0) {
-        stackDrift = true;
-      }
+      if (!rcs.length && is && is.services.length > 0) stackDrift = true;
       if (stackDrift) drift++;
     }
 
     return { stacks, containers, drift, errors };
   }
 
-  // Fetch runtime+IaC for hosts and update metricsCache (concurrency-limited)
   async function refreshMetricsForHosts(hostNames: string[]) {
     if (!hostNames.length) return;
     const limit = 4;
     let idx = 0;
-
     const workers = Array.from({ length: Math.min(limit, hostNames.length) }, () => (async () => {
       while (true) {
         const i = idx++; if (i >= hostNames.length) break;
@@ -575,22 +575,19 @@ export default function App() {
           const m = computeHostMetrics(runtime, iacStacks);
           setMetricsCache(prev => ({ ...prev, [name]: m }));
         } catch {
-          // per-host failure ignored for metrics; keeps UI responsive
+          // ignore per-host metrics errors
         }
       }
     })());
-
     await Promise.all(workers);
   }
 
-  // Kick off metrics after hosts load
   useEffect(() => {
     if (!hosts.length) return;
     refreshMetricsForHosts(hosts.map(h => h.name));
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [hosts]);
 
-  // Aggregate metrics across filtered hosts
   const metrics = useMemo(() => {
     let stacks = 0, containers = 0, drift = 0, errors = 0;
     for (const h of filteredHosts) {
@@ -608,7 +605,6 @@ export default function App() {
     if (scanning) return;
     setScanning(true);
     try {
-      // IaC first (non-fatal if it fails), then runtime
       await fetch("/api/iac/scan", { method: "POST", credentials: "include" }).catch(()=>{});
       const res = await fetch("/api/scan/all", { method: "POST", credentials: "include" });
       if (res.status === 401) { window.location.href = "/login"; return; }
@@ -620,8 +616,6 @@ export default function App() {
         else map[r.host] = { kind: "ok", saved: r.saved ?? 0 };
       }
       setHostScanState(prev => ({ ...prev, ...map }));
-
-      // Refresh metrics after sync
       await refreshMetricsForHosts(hosts.map(h => h.name));
     } finally {
       setScanning(false);
@@ -632,7 +626,6 @@ export default function App() {
     const h = hosts.find(x => x.name === name) || { name };
     setActiveHost(h as Host);
     setPage("host");
-    // opportunistic metrics refresh for the opened host
     refreshMetricsForHosts([name]);
   }
 
@@ -640,31 +633,10 @@ export default function App() {
     <div className="min-h-screen flex">
       <LeftNav page={page} onGoDeployments={() => setPage("deployments")} />
 
+      {/* Full-width main content (no right-side top bar) */}
       <div className="flex-1 min-w-0">
-        {/* Brand header (smash DDUI) */}
-        <div className="bg-slate-950 border-b border-slate-800">
-          <div className="max-w-7xl mx-auto px-4 py-3 flex items-center gap-3">
-            <div className="font-black uppercase tracking-tight leading-none text-slate-200 select-none flex items-center gap-2">
-              <span className="bg-clip-text text-transparent bg-gradient-to-r from-brand to-sky-400">DDUI</span>
-              <Badge variant="outline">Community</Badge>
-            </div>
-            <Separator orientation="vertical" className="mx-2 h-8 bg-slate-800" />
-            <div className="ml-auto flex items-center gap-2">
-              <Button onClick={handleScanAll} disabled={scanning} className="bg-[#310937] hover:bg-[#2a0830] text-white">
-                <RefreshCw className={`h-4 w-4 mr-1 ${scanning ? "animate-spin" : ""}`} />
-                {scanning ? "Scanning…" : "Sync"}
-              </Button>
-              <form method="post" action="/logout">
-                <Button type="submit" variant="outline" className="border-slate-700 text-slate-200 hover:bg-slate-800">
-                  Logout
-                </Button>
-              </form>
-            </div>
-          </div>
-        </div>
-
-        <main className="max-w-7xl mx-auto px-4 py-6 space-y-6">
-          {/* Metrics (5 cards incl. Hosts) */}
+        <main className="px-6 py-6 space-y-6">
+          {/* Metrics (full width grid) */}
           <div className="grid md:grid-cols-5 gap-4">
             <MetricCard title="Hosts" value={metrics.hosts} icon={Boxes} accent />
             <MetricCard title="Stacks" value={metrics.stacks} icon={Boxes} />
@@ -678,7 +650,12 @@ export default function App() {
             <div className="space-y-4">
               <Card className="bg-slate-900/40 border-slate-800">
                 <CardContent className="py-4">
-                  <div className="flex flex-col md:flex-row gap-3 md:items-center md:justify-between">
+                  {/* Sync button directly left of global search */}
+                  <div className="flex items-center gap-2">
+                    <Button onClick={handleScanAll} disabled={scanning} className="bg-[#310937] hover:bg-[#2a0830] text-white">
+                      <RefreshCw className={`h-4 w-4 mr-1 ${scanning ? "animate-spin" : ""}`} />
+                      {scanning ? "Scanning…" : "Sync"}
+                    </Button>
                     <div className="relative w-full md:w-96">
                       <Search className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
                       <Input
@@ -754,7 +731,7 @@ export default function App() {
           )}
 
           {page === 'host' && activeHost && (
-            <HostStacksView host={activeHost} onBack={() => setPage('deployments')} />
+            <HostStacksView host={activeHost} onBack={() => setPage('deployments')} onSync={handleScanAll} />
           )}
 
           <div className="pt-6 pb-10 text-center text-xs text-slate-500">

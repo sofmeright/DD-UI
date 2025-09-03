@@ -177,8 +177,9 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// --- define rawID here ---
 	rawID, ok := tok.Extra("id_token").(string)
-	if !ok || rawID == "" {
+	if !ok {
 		http.Error(w, "no id_token", http.StatusBadGateway)
 		return
 	}
@@ -193,6 +194,7 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// --- define claims here ---
 	var claims struct {
 		Sub    string `json:"sub"`
 		Email  string `json:"email"`
@@ -222,7 +224,7 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		Pic:   claims.Pic,
 	}
 
-	// persist user + id_token so LogoutHandler can send id_token_hint
+	// Save user + id_token for logout (id_token_hint)
 	sess, _ := store.Get(r, sessionName)
 	sess.Values["user"] = u
 	sess.Values["exp"] = time.Now().Add(7 * 24 * time.Hour).Unix()
@@ -230,6 +232,7 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	_ = sess.Save(r, w)
 
 	log.Printf("auth: login ok sub=%s email=%s", u.Sub, u.Email)
+
 	http.Redirect(w, r, "/", http.StatusFound)
 }
 

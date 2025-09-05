@@ -13,6 +13,11 @@ include:
       freight_docker_pass_1: "${QUAY_PASSWORD}"
       freight_docker_path_1: "prplanit/$CI_PROJECT_NAME"
       freight_docker_registry_1: "quay"
+      freight_docker_url_2: "docker.io"
+      freight_docker_user_2: "${DOCKER_HUB_USERNAME}"
+      freight_docker_pass_2: "${DOCKER_HUB_PASSWORD}"
+      freight_docker_path_2: "prplanit/$CI_PROJECT_NAME"
+      freight_docker_registry_2: "docker"
   - project: 'components/stagefreight'
     file: '/export-dependencies.yml'
     ref: main

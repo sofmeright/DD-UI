@@ -1,3 +1,4 @@
+-- src/api/migrations/010_iac.sql
 BEGIN;
 
 CREATE TYPE iac_source_kind AS ENUM ('local','git');

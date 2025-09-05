@@ -55,8 +55,8 @@ func upsertIacRepoLocal(ctx context.Context, root string) (int64, error) {
 	err := db.QueryRow(ctx, `
 		INSERT INTO iac_repos (kind, root_path, enabled)
 		VALUES ('local', $1, TRUE)
-		ON CONFLICT (root_path) WHERE kind='local'
-		DO UPDATE SET enabled=TRUE
+		ON CONFLICT (kind, root_path)
+		DO UPDATE SET enabled=TRUE, updated_at=now()
 		RETURNING id
 	`, root).Scan(&id)
 	return id, err

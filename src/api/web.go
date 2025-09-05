@@ -49,7 +49,7 @@ func makeRouter() http.Handler {
 		api.Group(func(priv chi.Router) {
 			priv.Use(RequireAuth)
 
-			// List hosts with optional filters
+			// List hosts with optional filters:
 			priv.Get("/hosts", func(w http.ResponseWriter, r *http.Request) {
 				items, err := ListHosts(r.Context())
 				if err != nil {
@@ -131,8 +131,9 @@ func makeRouter() http.Handler {
 				})
 			})
 
-			// Trigger scan for all known hosts + IaC scan
+			// Trigger scan for all known hosts (sequential, simple summary) + IaC scan (non-fatal)
 			priv.Post("/scan/all", func(w http.ResponseWriter, r *http.Request) {
+				// Always try IaC scan as part of Sync; log-only on error
 				if _, _, err := ScanIacLocal(r.Context()); err != nil {
 					log.Printf("iac: sync scan failed: %v", err)
 				}
@@ -162,6 +163,7 @@ func makeRouter() http.Handler {
 				)
 
 				for _, h := range hostRows {
+					// Pre-filter: if this host would use a local unix sock but isn't the designated local host, skip it.
 					url, _ := dockerURLFor(h)
 					if isUnixSock(url) && !localHostAllowed(h) {
 						results = append(results, result{
@@ -204,7 +206,7 @@ func makeRouter() http.Handler {
 				})
 			})
 
-			// Inventory reload
+			// POST /api/inventory/reload  (optional body: {"path":"/new/path"})
 			priv.Post("/inventory/reload", func(w http.ResponseWriter, r *http.Request) {
 				var body struct{ Path string `json:"path"` }
 				_ = json.NewDecoder(r.Body).Decode(&body)
@@ -335,7 +337,7 @@ func makeRouter() http.Handler {
 					http.Error(w, "bad json", http.StatusBadRequest)
 					return
 				}
-				if strings.TrimSpace(body.Path) == "") {
+				if strings.TrimSpace(body.Path) == "" { // <-- fixed extra ')'
 					http.Error(w, "path required", http.StatusBadRequest)
 					return
 				}
@@ -421,6 +423,7 @@ func makeRouter() http.Handler {
 
 func respondJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
+	// discourage caching of API responses
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(v)
 }

@@ -5,9 +5,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -252,6 +254,89 @@ func makeRouter() http.Handler {
 				}
 				writeJSON(w, http.StatusOK, map[string]any{"stacks": items})
 			})
+
+			// List all IaC files recorded for a stack
+			priv.Get("/iac/stacks/{id}/files", func(w http.ResponseWriter, r *http.Request) {
+				idStr := chi.URLParam(r, "id")
+				id, _ := strconv.ParseInt(idStr, 10, 64)
+				rows, err := db.Query(r.Context(), `
+				SELECT role, rel_path, sops, sha256_hex, size_bytes, updated_at
+				FROM iac_stack_files
+				WHERE stack_id=$1
+				ORDER BY role, rel_path
+				`, id)
+				if err != nil { http.Error(w, err.Error(), 500); return }
+				defer rows.Close()
+				type fileRow struct {
+					Role string `json:"role"`
+					Rel  string `json:"rel_path"`
+					Sops bool   `json:"sops"`
+					Sha  string `json:"sha256_hex"`
+					Size int64  `json:"size_bytes"`
+					UpdatedAt time.Time `json:"updated_at"`
+				}
+				var out []fileRow
+				for rows.Next() {
+					var fr fileRow
+					if err := rows.Scan(&fr.Role, &fr.Rel, &fr.Sops, &fr.Sha, &fr.Size, &fr.UpdatedAt); err != nil { http.Error(w, err.Error(), 500); return }
+					out = append(out, fr)
+				}
+				writeJSON(w, 200, map[string]any{"files": out})
+			})
+
+			// Read a file (optionally decrypt SOPS)
+			priv.Get("/iac/stacks/{id}/file", func(w http.ResponseWriter, r *http.Request) {
+				id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+				rel := strings.TrimSpace(r.URL.Query().Get("path"))
+				decrypt := r.URL.Query().Get("decrypt") == "1"
+
+				sp, err := getStackPaths(r.Context(), id)
+				if err != nil { http.Error(w, err.Error(), 400); return }
+				abs, err := safeJoin(filepath.Join(sp.Root, sp.Rel), rel)
+				if err != nil { http.Error(w, "invalid path", 400); return }
+
+				var b []byte
+				if decrypt {
+					// gated by env; default allowed=false
+					if !strings.EqualFold(env("DDUI_SOPS_DECRYPT_ENABLE", "0"), "1") {
+						http.Error(w, "SOPS decrypt disabled by server", 403); return
+					}
+					b, err = sopsDecryptFile(r.Context(), abs)
+				} else {
+					b, err = os.ReadFile(abs)
+				}
+				if err != nil { http.Error(w, err.Error(), 400); return }
+
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				w.Header().Set("Cache-Control", "no-store")
+				w.WriteHeader(200)
+				_, _ = w.Write(b)
+			})
+
+			// Save a file (edit/create). Disabled unless DDUI_IAC_WRITE=1
+			priv.Post("/iac/stacks/{id}/file", func(w http.ResponseWriter, r *http.Request) {
+				if !strings.EqualFold(env("DDUI_IAC_WRITE", "0"), "1") {
+					http.Error(w, "editing disabled by server", 403); return
+				}
+				id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+				rel := strings.TrimSpace(r.URL.Query().Get("path"))
+				sp, err := getStackPaths(r.Context(), id)
+				if err != nil { http.Error(w, err.Error(), 400); return }
+				abs, err := safeJoin(filepath.Join(sp.Root, sp.Rel), rel)
+				if err != nil { http.Error(w, "invalid path", 400); return }
+				b, _ := io.ReadAll(r.Body)
+
+				if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil { http.Error(w, err.Error(), 500); return }
+				if err := os.WriteFile(abs, b, 0o644); err != nil { http.Error(w, err.Error(), 500); return }
+
+				// refresh file table for this stack (cheap path: update hash)
+				sum, sz := sha256File(abs)
+				role := detectRoleByName(rel) // compose|env|script|other
+				sops := looksSops(b)
+				_ = upsertIacFile(r.Context(), id, role, rel, sops, sum, sz)
+
+				writeJSON(w, 200, map[string]any{"status":"saved"})
+			})
 		})
 	})
 
@@ -328,4 +413,25 @@ func parseDurationDefault(s string, def time.Duration) time.Duration {
 		return d
 	}
 	return def
+}
+
+// best-effort role guess
+func detectRoleByName(rel string) string {
+    name := strings.ToLower(filepath.Base(rel))
+    if strings.HasSuffix(name, ".env") || strings.Contains(name, ".env.") { return "env" }
+    if strings.Contains(name, "compose") && (strings.HasSuffix(name,".yml") || strings.HasSuffix(name,".yaml")) { return "compose" }
+    if strings.HasSuffix(name, ".sh") { return "script" }
+    return "other"
+}
+
+func sopsDecryptFile(ctx context.Context, abs string) ([]byte, error) {
+    // ephemeral decrypt; no persist
+    cmd := exec.CommandContext(ctx, "sops", "-d", abs)
+    // Optionally set env for age key path (tmpfs)
+    // cmd.Env = append(os.Environ(), "SOPS_AGE_KEY_FILE=/dev/shm/age.key")
+    out, err := cmd.CombinedOutput()
+    if err != nil {
+        return nil, fmt.Errorf("sops decrypt failed: %v: %s", err, string(out))
+    }
+    return out, nil
 }

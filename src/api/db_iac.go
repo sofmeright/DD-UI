@@ -196,3 +196,29 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 
 	return stacks, nil
 }
+
+type stackPathInfo struct {
+    Root string
+    Rel  string
+}
+
+func getStackPaths(ctx context.Context, stackID int64) (stackPathInfo, error) {
+    var out stackPathInfo
+    err := db.QueryRow(ctx, `
+      SELECT r.root_path, s.rel_path
+      FROM iac_stacks s
+      JOIN iac_repos r ON r.id = s.repo_id
+      WHERE s.id=$1
+    `, stackID).Scan(&out.Root, &out.Rel)
+    return out, err
+}
+
+func safeJoin(base, rel string) (string, error) {
+    p := filepath.Join(base, rel)
+    cleanBase, _ := filepath.Abs(base)
+    cleanP, _ := filepath.Abs(p)
+    if !strings.HasPrefix(cleanP, cleanBase+string(os.PathSeparator)) && cleanP != cleanBase {
+        return "", fmt.Errorf("invalid path")
+    }
+    return cleanP, nil
+}

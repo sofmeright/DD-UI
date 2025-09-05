@@ -75,6 +75,33 @@ type SessionResp = {
 
 /* ==================== Small UI bits ==================== */
 
+function deriveDisplayState(state?: string, status?: string) {
+  const s = (state || "").toLowerCase();
+  const st = (status || "").toLowerCase();
+  if (st.includes("healthy")) return "healthy";
+  if (st.includes("unhealthy")) return "unhealthy";
+  if (s.includes("running")) return "running";
+  if (s.includes("exited")) return "exited";
+  if (s) return s;
+  return "unknown";
+}
+
+function StateBadge({ state }: { state?: string }) {
+  const s = (state || "unknown").toLowerCase();
+  const cls = "inline-flex items-center px-2 py-0.5 rounded-full text-xs border";
+  if (s === "healthy")
+    return <span className={`${cls} border-emerald-700/60 text-emerald-200 bg-emerald-950/40`}>Healthy</span>;
+  if (s === "unhealthy")
+    return <span className={`${cls} border-rose-700/60 text-rose-200 bg-rose-950/40`}>Unhealthy</span>;
+  if (s === "running")
+    return <span className={`${cls} border-sky-700/60 text-sky-200 bg-sky-950/40`}>Running</span>;
+  if (s === "restarting" || s.includes("start"))
+    return <span className={`${cls} border-amber-700/60 text-amber-200 bg-amber-950/40`}>Restarting</span>;
+  if (s === "exited" || s.includes("dead"))
+    return <span className={`${cls} border-slate-700/60 text-slate-300 bg-slate-950/40`}>Exited</span>;
+  return <span className={`${cls} border-slate-700/60 text-slate-300 bg-slate-950/40 capitalize`}>{state || "unknown"}</span>;
+}
+
 function MetricCard({
   title, value, icon: Icon, accent = false,
 }: { title: string; value: React.ReactNode; icon: any; accent?: boolean }) {
@@ -395,7 +422,9 @@ function HostStacksView({ host, onBack, onSync }: { host: Host; onBack: () => vo
                   {(s.rows.filter(r => matchRow(r, hostQuery))).map((r, i) => (
                     <tr key={i} className="border-t border-slate-800 hover:bg-slate-900/40">
                       <td className="p-3 font-medium text-slate-200 truncate">{r.name}</td>
-                      <td className="p-3 text-slate-300">{r.state}</td>
+                      <td className="p-3 text-slate-300">
+                        <StateBadge state={deriveDisplayState(r.state, r.status)} />
+                      </td>
                       <td className="p-3 text-slate-300">
                         <div className="flex items-center gap-2">
                           <div className="max-w-[28rem] truncate" title={r.imageRun || ""}>{r.imageRun || "—"}</div>

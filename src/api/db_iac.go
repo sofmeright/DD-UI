@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"time"
 )
 
 type IacRepoRow struct {
@@ -37,17 +38,17 @@ type IacEnvFile struct {
 }
 
 type IacServiceRow struct {
-	ID            int64                    `json:"id"`
-	StackID       int64                    `json:"stack_id"`
-	ServiceName   string                   `json:"service_name"`
-	ContainerName string                   `json:"container_name,omitempty"`
-	Image         string                   `json:"image,omitempty"`
-	Labels        map[string]string        `json:"labels"`
-	EnvKeys       []string                 `json:"env_keys"`
-	EnvFiles      []IacEnvFile             `json:"env_files"`
-	Ports         []map[string]any         `json:"ports"`
-	Volumes       []map[string]any         `json:"volumes"`
-	Deploy        map[string]any           `json:"deploy"`
+	ID            int64             `json:"id"`
+	StackID       int64             `json:"stack_id"`
+	ServiceName   string            `json:"service_name"`
+	ContainerName string            `json:"container_name,omitempty"`
+	Image         string            `json:"image,omitempty"`
+	Labels        map[string]string `json:"labels"`
+	EnvKeys       []string          `json:"env_keys"`
+	EnvFiles      []IacEnvFile      `json:"env_files"`
+	Ports         []map[string]any  `json:"ports"`
+	Volumes       []map[string]any  `json:"volumes"`
+	Deploy        map[string]any    `json:"deploy"`
 }
 
 func upsertIacRepoLocal(ctx context.Context, root string) (int64, error) {
@@ -109,37 +110,41 @@ func pruneIacStacksNotIn(ctx context.Context, repoID int64, keepIDs []int64) (in
 	}
 	if len(keepIDs) == 0 {
 		cmd, err := db.Exec(ctx, `DELETE FROM iac_stacks WHERE repo_id=$1`, repoID)
-		if err != nil { return 0, err }
+		if err != nil {
+			return 0, err
+		}
 		return cmd.RowsAffected(), nil
 	}
 	cmd, err := db.Exec(ctx, `DELETE FROM iac_stacks WHERE repo_id=$1 AND id <> ALL($2)`, repoID, keepIDs)
-	if err != nil { return 0, err }
+	if err != nil {
+		return 0, err
+	}
 	return cmd.RowsAffected(), nil
 }
 
 // ---- Read for API
 
 type IacStackOut struct {
-	ID         int64             `json:"id"`
-	Name       string            `json:"name"`          // stack_name
-	ScopeKind  string            `json:"scope_kind"`
-	ScopeName  string            `json:"scope_name"`
-	DeployKind string            `json:"deploy_kind"`
-	PullPolicy string            `json:"pull_policy"`
-	SopsStatus string            `json:"sops_status"`
-	IacEnabled bool              `json:"iac_enabled"`
-	RelPath    string            `json:"rel_path"`
-	Compose    string            `json:"compose_file,omitempty"`
-	Services   []IacServiceRow   `json:"services"`
+	ID         int64           `json:"id"`
+	Name       string          `json:"name"` // stack_name
+	ScopeKind  string          `json:"scope_kind"`
+	ScopeName  string          `json:"scope_name"`
+	DeployKind string          `json:"deploy_kind"`
+	PullPolicy string          `json:"pull_policy"`
+	SopsStatus string          `json:"sops_status"`
+	IacEnabled bool            `json:"iac_enabled"`
+	RelPath    string          `json:"rel_path"`
+	Compose    string          `json:"compose_file,omitempty"`
+	Services   []IacServiceRow `json:"services"`
 }
 
 func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, error) {
 	h, err := GetHostByName(ctx, hostName)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 
-	// gather group names from host row (assuming stored in DB; fallback empty)
 	groups := h.Groups
-	
 	if groups == nil {
 		groups = []string{}
 	}
@@ -151,21 +156,23 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 	     OR (scope_kind='group' AND scope_name = ANY($2))
 	  ORDER BY scope_kind, scope_name, stack_name
 	`, hostName, groups)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	defer rows.Close()
 
 	var stacks []IacStackOut
-	var ids []int64
 	for rows.Next() {
 		var s IacStackOut
 		var repoID int64
 		if err := rows.Scan(&s.ID, &repoID, &s.ScopeKind, &s.ScopeName, &s.Name, &s.RelPath, &s.Compose, &s.DeployKind, &s.PullPolicy, &s.SopsStatus, &s.IacEnabled); err != nil {
 			return nil, err
 		}
-		ids = append(ids, s.ID)
 		stacks = append(stacks, s)
 	}
-	if err := rows.Err(); err != nil { return nil, err }
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 
 	// load services per stack
 	for i := range stacks {
@@ -173,7 +180,9 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 		 SELECT id, stack_id, service_name, container_name, image, labels, env_keys, env_files, ports, volumes, deploy
 		 FROM iac_services WHERE stack_id=$1 ORDER BY service_name
 		`, stacks[i].ID)
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 		var svcs []IacServiceRow
 		for rs.Next() {
 			var s IacServiceRow
@@ -197,28 +206,47 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 	return stacks, nil
 }
 
-type stackPathInfo struct {
-    Root string
-    Rel  string
+/* ===== New helpers for editor APIs ===== */
+
+type IacFileMetaRow struct {
+	Role      string    `json:"role"`
+	RelPath   string    `json:"rel_path"`
+	Sops      bool      `json:"sops"`
+	Sha256Hex string    `json:"sha256_hex"`
+	SizeBytes int64     `json:"size_bytes"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
-func getStackPaths(ctx context.Context, stackID int64) (stackPathInfo, error) {
-    var out stackPathInfo
-    err := db.QueryRow(ctx, `
-      SELECT r.root_path, s.rel_path
-      FROM iac_stacks s
-      JOIN iac_repos r ON r.id = s.repo_id
-      WHERE s.id=$1
-    `, stackID).Scan(&out.Root, &out.Rel)
-    return out, err
+func getRepoRootForStack(ctx context.Context, stackID int64) (string, error) {
+	var root string
+	err := db.QueryRow(ctx, `
+		SELECT r.root_path
+		FROM iac_stacks s
+		JOIN iac_repos r ON r.id = s.repo_id
+		WHERE s.id=$1
+	`, stackID).Scan(&root)
+	return root, err
 }
 
-func safeJoin(base, rel string) (string, error) {
-    p := filepath.Join(base, rel)
-    cleanBase, _ := filepath.Abs(base)
-    cleanP, _ := filepath.Abs(p)
-    if !strings.HasPrefix(cleanP, cleanBase+string(os.PathSeparator)) && cleanP != cleanBase {
-        return "", fmt.Errorf("invalid path")
-    }
-    return cleanP, nil
+func listFilesForStack(ctx context.Context, stackID int64) ([]IacFileMetaRow, error) {
+	rows, err := db.Query(ctx, `
+	  SELECT role, rel_path, sops, sha256_hex, size_bytes, updated_at
+	  FROM iac_stack_files
+	  WHERE stack_id=$1
+	  ORDER BY role, rel_path
+	`, stackID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []IacFileMetaRow
+	for rows.Next() {
+		var it IacFileMetaRow
+		if err := rows.Scan(&it.Role, &it.RelPath, &it.Sops, &it.Sha256Hex, &it.SizeBytes, &it.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
 }

@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"          // needed by toString + empty-dir error
+	"fmt"
 	"io/fs"
 	"log"
 	"os"
@@ -42,150 +42,184 @@ type composeSvc struct {
 
 // Entry point called by API
 func ScanIacLocal(ctx context.Context) (int, int, error) {
-    root := strings.TrimSpace(env(iacDefaultRootEnv, iacDefaultRoot))
-    dirname := strings.TrimSpace(env(iacDirNameEnv, iacDefaultDirName))
-    base := filepath.Join(root, dirname)
+	root := strings.TrimSpace(env(iacDefaultRootEnv, iacDefaultRoot))
+	dirname := strings.TrimSpace(env(iacDirNameEnv, iacDefaultDirName))
+	base := filepath.Join(root, dirname)
 
-    log.Printf("iac: scan start root=%q dir=%q base=%q", root, dirname, base)
+	log.Printf("iac: scan start root=%q base=%q", root, base)
 
-    repoID, err := upsertIacRepoLocal(ctx, root)
-    if err != nil {
-        log.Printf("iac: repo upsert failed root=%q err=%v", root, err)
-        return 0, 0, err
-    }
+	repoID, err := upsertIacRepoLocal(ctx, root)
+	if err != nil {
+		log.Printf("iac: repo upsert failed root=%q err=%v", root, err)
+		return 0, 0, err
+	}
 
-    // If base missing or not a dir
-    if fi, err := os.Stat(base); err != nil {
-        if os.IsNotExist(err) {
-            _, _ = db.Exec(ctx, `UPDATE iac_repos SET last_scan_at=now() WHERE id=$1`, repoID)
-            log.Printf("iac: base path not found; nothing to scan (base=%q)", base)
-            return 0, 0, nil
-        }
-        log.Printf("iac: stat base failed base=%q err=%v", base, err)
-        return 0, 0, err
-    } else if !fi.IsDir() {
-        log.Printf("iac: base is not a directory base=%q", base)
-        return 0, 0, fmt.Errorf("%s is not a directory", base)
-    }
+	// Discover: docker-compose/<scopeName>/<stackName>
+	var keepStackIDs []int64
+	stacksFound := 0
+	servicesSaved := 0
 
-    var keepStackIDs []int64
-    stacksFound := 0
-    servicesSaved := 0
+	// If the base doesn't exist or isn't a dir, treat as "nothing to scan".
+	if fi, err := os.Stat(base); err != nil {
+		if os.IsNotExist(err) {
+			log.Printf("iac: base dir %q missing; nothing to scan", base)
+			_, _ = db.Exec(ctx, `UPDATE iac_repos SET last_scan_at=now() WHERE id=$1`, repoID)
+			return 0, 0, nil
+		}
+		log.Printf("iac: stat base err=%v", err)
+		return 0, 0, err
+	} else if !fi.IsDir() {
+		err := fmt.Errorf("%s is not a directory", base)
+		log.Printf("iac: %v", err)
+		return 0, 0, err
+	}
 
-    walkFn := func(p string, d fs.DirEntry, _ error) error {
-        if d == nil || !d.IsDir() {
-            return nil
-        }
-        rel, _ := filepath.Rel(root, p)
-        parts := strings.Split(filepath.ToSlash(rel), "/")
-        if len(parts) < 3 || parts[0] != dirname {
-            return nil
-        }
+	walkFn := func(p string, d fs.DirEntry, _ error) error {
+		if d == nil || !d.IsDir() {
+			return nil
+		}
 
-        scopeName := parts[1]
-        stackName := parts[2]
-        if scopeName == "" || stackName == "" {
-            return nil
-        }
+		rel, _ := filepath.Rel(root, p)
+		parts := strings.Split(filepath.ToSlash(rel), "/")
 
-        scopeKind := "group"
-        if _, err := GetHostByName(ctx, scopeName); err == nil {
-            scopeKind = "host"
-        }
+		// We only process *stack directories*: docker-compose/<scope>/<stack>
+		if len(parts) < 3 || parts[0] != dirname {
+			return nil
+		}
 
-        composeFile := findOne(p, []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"})
-        deployKind := "unmanaged"
-        if composeFile != "" { deployKind = "compose" }
-        if existsAny(p, []string{"deploy.sh", "pre.sh", "post.sh"}) { deployKind = "script" }
+		scopeName := parts[1]
+		stackName := parts[2]
+		if scopeName == "" || stackName == "" {
+			return nil
+		}
 
-        envFiles := listEnvFiles(p)
-        sopsStatus := summarizeSops(envFiles)
+		// Determine scope_kind by checking if scopeName is a known host
+		scopeKind := "group"
+		if _, err := GetHostByName(ctx, scopeName); err == nil {
+			scopeKind = "host"
+		}
 
-        stackID, err := upsertIacStack(ctx, repoID, scopeKind, scopeName, stackName,
-            filepath.ToSlash(filepath.Join(dirname, scopeName, stackName)),
-            composeFile, deployKind, "", sopsStatus, true)
-        if err != nil {
-            log.Printf("iac: upsert stack failed scope=%s name=%s path=%q err=%v", scopeName, stackName, p, err)
-            return fs.SkipDir
-        }
-        keepStackIDs = append(keepStackIDs, stackID)
-        stacksFound++
+		composeFile := findOne(p, []string{"docker-compose.yml", "docker-compose.yaml", "compose.yml", "compose.yaml"})
+		deployKind := "unmanaged"
+		if composeFile != "" {
+			deployKind = "compose"
+		}
+		if existsAny(p, []string{"deploy.sh", "pre.sh", "post.sh"}) {
+			deployKind = "script" // if both exist we keep compose
+		}
 
-        log.Printf("iac: stack found scope_kind=%s scope=%s stack=%s deploy=%s compose=%q sops=%s",
-            scopeKind, scopeName, stackName, deployKind, composeFile, sopsStatus)
+		// env files (record + sops detection)
+		envFiles := listEnvFiles(p)
+		sopsStatus := summarizeSops(envFiles)
 
-        // track files
-        for _, ef := range envFiles {
-            sum, sz := sha256File(ef.fullPath)
-            _ = upsertIacFile(ctx, stackID, "env", relFrom(root, ef.fullPath), ef.sops, sum, sz)
-            log.Printf("iac: file env stack=%s/%s rel=%q sops=%v size=%d", scopeName, stackName, relFrom(root, ef.fullPath), ef.sops, sz)
-        }
-        if composeFile != "" {
-            full := filepath.Join(p, composeFile)
-            sum, sz := sha256File(full)
-            _ = upsertIacFile(ctx, stackID, "compose", filepath.ToSlash(filepath.Join(dirname, scopeName, stackName, composeFile)), false, sum, sz)
-            log.Printf("iac: file compose stack=%s/%s rel=%q size=%d", scopeName, stackName, filepath.ToSlash(filepath.Join(dirname, scopeName, stackName, composeFile)), sz)
-        }
-        for _, s := range []string{"deploy.sh", "pre.sh", "post.sh"} {
-            full := filepath.Join(p, s)
-            if fi, err := os.Stat(full); err == nil && !fi.IsDir() {
-                sum, sz := sha256File(full)
-                _ = upsertIacFile(ctx, stackID, "script", relFrom(root, full), false, sum, sz)
-                log.Printf("iac: file script stack=%s/%s rel=%q size=%d", scopeName, stackName, relFrom(root, full), sz)
-            }
-        }
+		stackID, err := upsertIacStack(ctx, repoID, scopeKind, scopeName, stackName,
+			filepath.ToSlash(filepath.Join(dirname, scopeName, stackName)),
+			composeFile, deployKind, "", sopsStatus, true)
+		if err != nil {
+			log.Printf("iac: stack upsert failed scope=%s stack=%s path=%s err=%v", scopeName, stackName, p, err)
+			return fs.SkipDir
+		}
+		log.Printf("iac: stack %s/%s id=%d deploy=%s compose=%q sops=%s", scopeName, stackName, stackID, deployKind, composeFile, sopsStatus)
 
-        // compose → services
-        if composeFile != "" {
-            b, _ := os.ReadFile(filepath.Join(p, composeFile))
-            cdoc := &composeDoc{}
-            _ = yaml.Unmarshal(b, cdoc)
-            pullPolicy := strings.TrimSpace(cdoc.XPull)
+		keepStackIDs = append(keepStackIDs, stackID)
+		stacksFound++
 
-            names := make([]string, 0, len(cdoc.Services))
-            for k := range cdoc.Services { names = append(names, k) }
-            sort.Strings(names)
+		// Track files
+		for _, ef := range envFiles {
+			sum, sz := sha256File(ef.fullPath)
+			if err := upsertIacFile(ctx, stackID, "env", relFrom(root, ef.fullPath), ef.sops, sum, sz); err != nil {
+				log.Printf("iac: upsert file(env) failed stack_id=%d file=%s err=%v", stackID, ef.fullPath, err)
+			}
+		}
+		if composeFile != "" {
+			full := filepath.Join(p, composeFile)
+			sum, sz := sha256File(full)
+			if err := upsertIacFile(ctx, stackID, "compose", filepath.ToSlash(filepath.Join(dirname, scopeName, stackName, composeFile)), false, sum, sz); err != nil {
+				log.Printf("iac: upsert file(compose) failed stack_id=%d file=%s err=%v", stackID, full, err)
+			}
+		}
+		for _, s := range []string{"deploy.sh", "pre.sh", "post.sh"} {
+			full := filepath.Join(p, s)
+			if fi, err := os.Stat(full); err == nil && !fi.IsDir() {
+				sum, sz := sha256File(full)
+				if err := upsertIacFile(ctx, stackID, "script", relFrom(root, full), false, sum, sz); err != nil {
+					log.Printf("iac: upsert file(script) failed stack_id=%d file=%s err=%v", stackID, full, err)
+				}
+			}
+		}
 
-            for _, svcName := range names {
-                svc := cdoc.Services[svcName]
-                if svc == nil { continue }
-                lbls := normLabels(svc.Labels)
-                envKeys, envF := normEnv(svc.Environment, svc.EnvFile, p, envFiles)
-                ports := normPorts(svc.Ports)
-                vols := normVolumes(svc.Volumes)
-                if err := upsertIacService(ctx, IacServiceRow{
-                    StackID: stackID, ServiceName: svcName, ContainerName: svc.ContainerName,
-                    Image: svc.Image, Labels: lbls, EnvKeys: envKeys, EnvFiles: envF,
-                    Ports: ports, Volumes: vols, Deploy: svc.Deploy,
-                }); err != nil {
-                    log.Printf("iac: upsert service failed stack=%s/%s svc=%s err=%v", scopeName, stackName, svcName, err)
-                } else {
-                    servicesSaved++
-                }
-            }
-            if pullPolicy != "" {
-                _, _ = db.Exec(ctx, `UPDATE iac_stacks SET pull_policy=$1 WHERE id=$2`, pullPolicy, stackID)
-            }
-        }
+		// Parse compose → services
+		if composeFile != "" {
+			b, _ := os.ReadFile(filepath.Join(p, composeFile))
+			cdoc := &composeDoc{}
+			_ = yaml.Unmarshal(b, cdoc)
+			pullPolicy := strings.TrimSpace(cdoc.XPull)
 
-        return fs.SkipDir
-    }
+			// services in deterministic order
+			names := make([]string, 0, len(cdoc.Services))
+			for k := range cdoc.Services {
+				names = append(names, k)
+			}
+			sort.Strings(names)
 
-    if err := filepath.WalkDir(base, walkFn); err != nil {
-        if !os.IsNotExist(err) {
-            log.Printf("iac: walk failed base=%q err=%v", base, err)
-            return 0, 0, err
-        }
-    }
+			for _, svcName := range names {
+				svc := cdoc.Services[svcName]
+				if svc == nil {
+					continue
+				}
 
-    _, _ = pruneIacStacksNotIn(ctx, repoID, keepStackIDs)
-    _, _ = db.Exec(ctx, `UPDATE iac_repos SET last_scan_at=now() WHERE id=$1`, repoID)
+				lbls := normLabels(svc.Labels)
+				envKeys, envF := normEnv(svc.Environment, svc.EnvFile, p, envFiles)
+				ports := normPorts(svc.Ports)
+				vols := normVolumes(svc.Volumes)
 
-    log.Printf("iac: scan done stacks=%d services=%d", stacksFound, servicesSaved)
-    return stacksFound, servicesSaved, nil
+				if err := upsertIacService(ctx, IacServiceRow{
+					StackID:       stackID,
+					ServiceName:   svcName,
+					ContainerName: svc.ContainerName,
+					Image:         svc.Image,
+					Labels:        lbls,
+					EnvKeys:       envKeys,
+					EnvFiles:      envF,
+					Ports:         ports,
+					Volumes:       vols,
+					Deploy:        svc.Deploy,
+				}); err != nil {
+					log.Printf("iac: upsert service failed stack_id=%d svc=%s err=%v", stackID, svcName, err)
+				} else {
+					servicesSaved++
+				}
+			}
+
+			// update pull_policy if present
+			if pullPolicy != "" {
+				_, _ = db.Exec(ctx, `UPDATE iac_stacks SET pull_policy=$1 WHERE id=$2`, pullPolicy, stackID)
+			}
+		}
+
+		// We are *at* a stack directory; don't descend further into it.
+		return fs.SkipDir
+	}
+
+	if err := filepath.WalkDir(base, walkFn); err != nil {
+		if !os.IsNotExist(err) {
+			log.Printf("iac: walk err=%v", err)
+			return 0, 0, err
+		}
+	}
+
+	// prune removed stacks for this repo
+	if n, err := pruneIacStacksNotIn(ctx, repoID, keepStackIDs); err == nil && n > 0 {
+		log.Printf("iac: pruned %d stacks no longer present in repo_id=%d", n, repoID)
+	}
+
+	_, _ = db.Exec(ctx, `UPDATE iac_repos SET last_scan_at=now() WHERE id=$1`, repoID)
+
+	log.Printf("iac: scan done repo_id=%d stacks=%d services=%d", repoID, stacksFound, servicesSaved)
+	return stacksFound, servicesSaved, nil
 }
 
-/* ---------- helpers ---------- */
+/* ---------- helpers [unchanged except imports] ---------- */
 
 type envFileMeta struct {
 	fullPath string
@@ -277,14 +311,12 @@ func sha256File(p string) (hexsum string, size int64) {
 	defer f.Close()
 	fi, _ := f.Stat()
 	h := sha256.New()
-	_, _ = h.Write([]byte{}) // no-op
-	// simple read
 	b, _ := os.ReadFile(p)
 	_, _ = h.Write(b)
 	return hex.EncodeToString(h.Sum(nil)), fi.Size()
 }
 
-// ---- normalizers ----
+// ---- normalizers (unchanged) ----
 
 func toString(v any) string {
 	switch x := v.(type) {
@@ -296,8 +328,7 @@ func toString(v any) string {
 		return fmt.Sprint(v)
 	}
 }
-
-func normLabels(v any) map[string]string {
+func normLabels(v any) map[string]string { /* unchanged */ 
 	out := map[string]string{}
 	switch t := v.(type) {
 	case map[string]any:
@@ -307,7 +338,6 @@ func normLabels(v any) map[string]string {
 	case map[string]string:
 		return t
 	case []any:
-		// ["k=v","x=y"]
 		for _, it := range t {
 			if s, ok := it.(string); ok {
 				kv := strings.SplitN(s, "=", 2)
@@ -319,8 +349,7 @@ func normLabels(v any) map[string]string {
 	}
 	return out
 }
-
-func normEnv(env any, envFile any, stackDir string, discovered []envFileMeta) ([]string, []IacEnvFile) {
+func normEnv(env any, envFile any, stackDir string, discovered []envFileMeta) ([]string, []IacEnvFile) { /* unchanged */ 
 	keys := map[string]struct{}{}
 	switch t := env.(type) {
 	case map[string]any:
@@ -338,8 +367,6 @@ func normEnv(env any, envFile any, stackDir string, discovered []envFileMeta) ([
 			}
 		}
 	}
-
-	// Map env_file → discovered meta
 	var files []IacEnvFile
 	paths := []string{}
 	switch t := envFile.(type) {
@@ -354,7 +381,6 @@ func normEnv(env any, envFile any, stackDir string, discovered []envFileMeta) ([
 	}
 	for _, p := range paths {
 		base := filepath.Base(p)
-		// try match to discovered in this stack dir
 		sops := false
 		for _, d := range discovered {
 			if d.rel == base {
@@ -364,8 +390,6 @@ func normEnv(env any, envFile any, stackDir string, discovered []envFileMeta) ([
 		}
 		files = append(files, IacEnvFile{Path: filepath.ToSlash(filepath.Join(filepath.Base(filepath.Dir(stackDir)), filepath.Base(stackDir), base)), Sops: sops})
 	}
-
-	// return sorted keys
 	out := make([]string, 0, len(keys))
 	for k := range keys {
 		out = append(out, k)
@@ -373,15 +397,13 @@ func normEnv(env any, envFile any, stackDir string, discovered []envFileMeta) ([
 	sort.Strings(out)
 	return out, files
 }
-
-func normPorts(v any) []map[string]any {
+func normPorts(v any) []map[string]any { /* unchanged */ 
 	out := []map[string]any{}
 	switch t := v.(type) {
 	case []any:
 		for _, it := range t {
 			switch p := it.(type) {
 			case string:
-				// "80:8080/tcp" or "8080"
 				host, cont, proto := splitPortString(p)
 				out = append(out, map[string]any{"published": host, "target": cont, "protocol": proto})
 			case map[string]any:
@@ -389,7 +411,6 @@ func normPorts(v any) []map[string]any {
 				for k, v := range p {
 					m[strings.ToLower(k)] = v
 				}
-				// docker compose uses target/published/protocol
 				out = append(out, map[string]any{
 					"published": m["published"],
 					"target":    m["target"],
@@ -400,8 +421,7 @@ func normPorts(v any) []map[string]any {
 	}
 	return out
 }
-
-func splitPortString(s string) (host, cont, proto string) {
+func splitPortString(s string) (host, cont, proto string) { /* unchanged */ 
 	proto = "tcp"
 	if i := strings.IndexByte(s, '/'); i > 0 {
 		proto = strings.ToLower(strings.TrimSpace(s[i+1:]))
@@ -412,15 +432,13 @@ func splitPortString(s string) (host, cont, proto string) {
 	}
 	return "", strings.TrimSpace(s), proto
 }
-
-func normVolumes(v any) []map[string]any {
+func normVolumes(v any) []map[string]any { /* unchanged */ 
 	out := []map[string]any{}
 	switch t := v.(type) {
 	case []any:
 		for _, it := range t {
 			switch vv := it.(type) {
 			case string:
-				// "/host:/ctr:ro"
 				src, dst, mode := splitVolString(vv)
 				out = append(out, map[string]any{"source": src, "target": dst, "mode": mode})
 			case map[string]any:
@@ -438,8 +456,7 @@ func normVolumes(v any) []map[string]any {
 	}
 	return out
 }
-
-func splitVolString(s string) (src, dst, mode string) {
+func splitVolString(s string) (src, dst, mode string) { /* unchanged */ 
 	mode = ""
 	parts := strings.Split(s, ":")
 	if len(parts) == 3 {

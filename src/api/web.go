@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"io"
 	"log"
 	"net/http"
 	"os"
@@ -32,7 +31,7 @@ func makeRouter() http.Handler {
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Content-Type", "Authorization"},
+		AllowedHeaders:   []string{"Accept", "Content-Type", "Authorization", "X-Confirm-Reveal"},
 		AllowCredentials: true,
 		MaxAge:           300,
 	}))
@@ -50,8 +49,7 @@ func makeRouter() http.Handler {
 		api.Group(func(priv chi.Router) {
 			priv.Use(RequireAuth)
 
-			// List hosts with optional filters:
-			//   /api/hosts?owner=alice&q=anch&limit=50&offset=0
+			// List hosts with optional filters
 			priv.Get("/hosts", func(w http.ResponseWriter, r *http.Request) {
 				items, err := ListHosts(r.Context())
 				if err != nil {
@@ -64,7 +62,6 @@ func makeRouter() http.Handler {
 				limit := clamp(parseIntDefault(r.URL.Query().Get("limit"), 200), 1, 1000)
 				offset := parseIntDefault(r.URL.Query().Get("offset"), 0)
 
-				// in-process filter/paginate (DB-level can come later)
 				filtered := make([]HostRow, 0, len(items))
 				for _, h := range items {
 					if owner != "" && !strings.EqualFold(h.Owner, owner) {
@@ -134,10 +131,8 @@ func makeRouter() http.Handler {
 				})
 			})
 
-			// Trigger scan for all known hosts (sequential, simple summary) + IaC scan (non-fatal)
-			//   POST /api/scan/all?timeout=30s
+			// Trigger scan for all known hosts + IaC scan
 			priv.Post("/scan/all", func(w http.ResponseWriter, r *http.Request) {
-				// Always try IaC scan as part of Sync; log-only on error
 				if _, _, err := ScanIacLocal(r.Context()); err != nil {
 					log.Printf("iac: sync scan failed: %v", err)
 				}
@@ -167,7 +162,6 @@ func makeRouter() http.Handler {
 				)
 
 				for _, h := range hostRows {
-					// Pre-filter: if this host would use a local unix sock but isn't the designated local host, skip it.
 					url, _ := dockerURLFor(h)
 					if isUnixSock(url) && !localHostAllowed(h) {
 						results = append(results, result{
@@ -210,7 +204,7 @@ func makeRouter() http.Handler {
 				})
 			})
 
-			// POST /api/inventory/reload  (optional body: {"path":"/new/path"})
+			// Inventory reload
 			priv.Post("/inventory/reload", func(w http.ResponseWriter, r *http.Request) {
 				var body struct{ Path string `json:"path"` }
 				_ = json.NewDecoder(r.Body).Decode(&body)
@@ -255,87 +249,134 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"stacks": items})
 			})
 
-			// List all IaC files recorded for a stack
+			// ===== IaC Editor APIs =====
+
+			// List files tracked for a stack
 			priv.Get("/iac/stacks/{id}/files", func(w http.ResponseWriter, r *http.Request) {
 				idStr := chi.URLParam(r, "id")
 				id, _ := strconv.ParseInt(idStr, 10, 64)
-				rows, err := db.Query(r.Context(), `
-				SELECT role, rel_path, sops, sha256_hex, size_bytes, updated_at
-				FROM iac_stack_files
-				WHERE stack_id=$1
-				ORDER BY role, rel_path
-				`, id)
-				if err != nil { http.Error(w, err.Error(), 500); return }
-				defer rows.Close()
-				type fileRow struct {
-					Role string `json:"role"`
-					Rel  string `json:"rel_path"`
-					Sops bool   `json:"sops"`
-					Sha  string `json:"sha256_hex"`
-					Size int64  `json:"size_bytes"`
-					UpdatedAt time.Time `json:"updated_at"`
+				items, err := listFilesForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
 				}
-				var out []fileRow
-				for rows.Next() {
-					var fr fileRow
-					if err := rows.Scan(&fr.Role, &fr.Rel, &fr.Sops, &fr.Sha, &fr.Size, &fr.UpdatedAt); err != nil { http.Error(w, err.Error(), 500); return }
-					out = append(out, fr)
-				}
-				writeJSON(w, 200, map[string]any{"files": out})
+				writeJSON(w, http.StatusOK, map[string]any{"files": items})
 			})
 
-			// Read a file (optionally decrypt SOPS)
+			// Read file content for a stack file
+			//   GET /api/iac/stacks/{id}/file?path=rel/path&decrypt=1
 			priv.Get("/iac/stacks/{id}/file", func(w http.ResponseWriter, r *http.Request) {
-				id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
+				idStr := chi.URLParam(r, "id")
+				id, _ := strconv.ParseInt(idStr, 10, 64)
 				rel := strings.TrimSpace(r.URL.Query().Get("path"))
-				decrypt := r.URL.Query().Get("decrypt") == "1"
-
-				sp, err := getStackPaths(r.Context(), id)
-				if err != nil { http.Error(w, err.Error(), 400); return }
-				abs, err := safeJoin(filepath.Join(sp.Root, sp.Rel), rel)
-				if err != nil { http.Error(w, "invalid path", 400); return }
-
-				var b []byte
-				if decrypt {
-					// gated by env; default allowed=false
-					if !strings.EqualFold(env("DDUI_SOPS_DECRYPT_ENABLE", "0"), "1") {
-						http.Error(w, "SOPS decrypt disabled by server", 403); return
-					}
-					b, err = sopsDecryptFile(r.Context(), abs)
-				} else {
-					b, err = os.ReadFile(abs)
+				if rel == "" {
+					http.Error(w, "missing path", http.StatusBadRequest)
+					return
 				}
-				if err != nil { http.Error(w, err.Error(), 400); return }
+				root, err := getRepoRootForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				full, err := joinUnder(root, rel)
+				if err != nil {
+					http.Error(w, "invalid path", http.StatusBadRequest)
+					return
+				}
+				decrypt := r.URL.Query().Get("decrypt") == "1" || r.URL.Query().Get("decrypt") == "true"
+
+				var data []byte
+				if decrypt {
+					// require explicit confirmation + server-side allow
+					if strings.ToLower(os.Getenv("DDUI_ALLOW_SOPS_DECRYPT")) != "1" {
+						http.Error(w, "decrypt disabled on server", http.StatusForbidden)
+						return
+					}
+					if strings.ToLower(r.Header.Get("X-Confirm-Reveal")) != "yes" {
+						http.Error(w, "confirmation required", http.StatusForbidden)
+						return
+					}
+					// run `sops -d`
+					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+					defer cancel()
+					cmd := exec.CommandContext(ctx, "sops", "-d", full)
+					out, err := cmd.CombinedOutput()
+					if err != nil {
+						http.Error(w, "sops decrypt failed: "+string(out), http.StatusNotImplemented)
+						return
+					}
+					data = out
+				} else {
+					b, err := os.ReadFile(full)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusNotFound)
+						return
+					}
+					data = b
+				}
 
 				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 				w.Header().Set("Cache-Control", "no-store")
-				w.WriteHeader(200)
-				_, _ = w.Write(b)
+				_, _ = w.Write(data)
 			})
 
-			// Save a file (edit/create). Disabled unless DDUI_IAC_WRITE=1
+			// Create/update file content
+			//   POST /api/iac/stacks/{id}/file  { "path": "docker-compose/host/stack/x.env", "content":"..." }
 			priv.Post("/iac/stacks/{id}/file", func(w http.ResponseWriter, r *http.Request) {
-				if !strings.EqualFold(env("DDUI_IAC_WRITE", "0"), "1") {
-					http.Error(w, "editing disabled by server", 403); return
+				idStr := chi.URLParam(r, "id")
+				id, _ := strconv.ParseInt(idStr, 10, 64)
+				var body struct {
+					Path    string `json:"path"`
+					Content string `json:"content"`
+					Sops    bool   `json:"sops,omitempty"`
+					Role    string `json:"role,omitempty"` // compose|env|script|other
 				}
-				id, _ := strconv.ParseInt(chi.URLParam(r, "id"), 10, 64)
-				rel := strings.TrimSpace(r.URL.Query().Get("path"))
-				sp, err := getStackPaths(r.Context(), id)
-				if err != nil { http.Error(w, err.Error(), 400); return }
-				abs, err := safeJoin(filepath.Join(sp.Root, sp.Rel), rel)
-				if err != nil { http.Error(w, "invalid path", 400); return }
-				b, _ := io.ReadAll(r.Body)
-
-				if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil { http.Error(w, err.Error(), 500); return }
-				if err := os.WriteFile(abs, b, 0o644); err != nil { http.Error(w, err.Error(), 500); return }
-
-				// refresh file table for this stack (cheap path: update hash)
-				sum, sz := sha256File(abs)
-				role := detectRoleByName(rel) // compose|env|script|other
-				sops := looksSops(b)
-				_ = upsertIacFile(r.Context(), id, role, rel, sops, sum, sz)
-
-				writeJSON(w, 200, map[string]any{"status":"saved"})
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				if strings.TrimSpace(body.Path) == "") {
+					http.Error(w, "path required", http.StatusBadRequest)
+					return
+				}
+				root, err := getRepoRootForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				full, err := joinUnder(root, body.Path)
+				if err != nil {
+					http.Error(w, "invalid path", http.StatusBadRequest)
+					return
+				}
+				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if err := os.WriteFile(full, []byte(body.Content), 0o644); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				sum, sz := sha256File(full)
+				if body.Role == "" {
+					low := strings.ToLower(full)
+					switch {
+					case strings.HasSuffix(low, ".yml"), strings.HasSuffix(low, ".yaml"):
+						body.Role = "compose"
+					case strings.HasSuffix(low, ".sh"):
+						body.Role = "script"
+					case strings.Contains(low, ".env") || strings.HasSuffix(low, ".env"):
+						body.Role = "env"
+					default:
+						body.Role = "other"
+					}
+				}
+				relFromRoot := filepath.ToSlash(strings.TrimPrefix(full, strings.TrimSuffix(root, "/")+"/"))
+				if err := upsertIacFile(r.Context(), id, body.Role, relFromRoot, body.Sops, sum, sz); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "size": sz, "sha256": sum})
 			})
 		})
 	})
@@ -380,7 +421,6 @@ func makeRouter() http.Handler {
 
 func respondJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	// discourage caching of API responses
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(v)
 }
@@ -415,23 +455,14 @@ func parseDurationDefault(s string, def time.Duration) time.Duration {
 	return def
 }
 
-// best-effort role guess
-func detectRoleByName(rel string) string {
-    name := strings.ToLower(filepath.Base(rel))
-    if strings.HasSuffix(name, ".env") || strings.Contains(name, ".env.") { return "env" }
-    if strings.Contains(name, "compose") && (strings.HasSuffix(name,".yml") || strings.HasSuffix(name,".yaml")) { return "compose" }
-    if strings.HasSuffix(name, ".sh") { return "script" }
-    return "other"
-}
-
-func sopsDecryptFile(ctx context.Context, abs string) ([]byte, error) {
-    // ephemeral decrypt; no persist
-    cmd := exec.CommandContext(ctx, "sops", "-d", abs)
-    // Optionally set env for age key path (tmpfs)
-    // cmd.Env = append(os.Environ(), "SOPS_AGE_KEY_FILE=/dev/shm/age.key")
-    out, err := cmd.CombinedOutput()
-    if err != nil {
-        return nil, fmt.Errorf("sops decrypt failed: %v: %s", err, string(out))
-    }
-    return out, nil
+// safe path join under repo root
+func joinUnder(root, rel string) (string, error) {
+	clean := filepath.Clean("/" + rel) // force absolute-clean then strip
+	clean = strings.TrimPrefix(clean, "/")
+	full := filepath.Join(root, clean)
+	r, err := filepath.Rel(root, full)
+	if err != nil || strings.HasPrefix(r, "..") {
+		return "", errors.New("outside root")
+	}
+	return full, nil
 }

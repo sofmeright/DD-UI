@@ -28,7 +28,7 @@ type IacStackRow struct {
 	Compose    string `json:"compose_file,omitempty"`
 	DeployKind string `json:"deploy_kind"`
 	PullPolicy string `json:"pull_policy,omitempty"`
-	SopsStatus string `json:"sops_status"` // all|partial|none
+	SopsStatus string `json:"sops_status"`
 	IacEnabled bool   `json:"iac_enabled"`
 }
 

@@ -61,7 +61,7 @@ type IacStack = {
   iac_enabled: boolean;
   rel_path: string;
   compose?: string;
-  services: IacService[] | null; // ⚠️ can be null from API on brand-new stacks
+  services: IacService[] | null; // can be null on brand-new stacks
 };
 
 type IacFileMeta = {
@@ -171,7 +171,7 @@ function formatPortsLines(ports: any): string[] {
   const lines: string[] = [];
   for (const p of arr) {
     const ip = p.IP || p.Ip || p.ip || "";
-    const pub = p.PublicPort ?? p.publicPort;
+    the const pub = p.PublicPort ?? p.publicPort;
     const priv = p.PrivatePort ?? p.privatePort;
     const typ = (p.Type ?? p.type ?? "").toString().toLowerCase() || "tcp";
     if (priv) {
@@ -190,6 +190,7 @@ function LeftNav({ page, onGoDeployments }: { page: string; onGoDeployments: () 
       {/* Brand moved into the side nav */}
       <div className="px-4 py-4 border-b border-slate-800">
         <div className="font-black uppercase tracking-tight leading-none text-slate-200 select-none flex items-center gap-2">
+          <img src="/DDUI-Logo.png" alt="DDUI" className="h-5 w-5 rounded-sm" />
           <span className="bg-clip-text text-transparent bg-gradient-to-r from-brand to-sky-400">DDUI</span>
           <Badge variant="outline">Community</Badge>
         </div>
@@ -380,6 +381,27 @@ function HostStacksView({
     return () => { cancel = true; };
   }, [host.name]);
 
+  async function createStack() {
+    const name = (window.prompt("New stack name (letters, numbers, dashes only):") || "").trim();
+    if (!name) return;
+    if (!/^[a-zA-Z0-9_-]+$/.test(name)) { window.alert("Invalid name."); return; }
+    if (stacks.some(s => s.name === name)) { window.alert("A stack with that name already exists."); return; }
+
+    try {
+      const r = await fetch(`/api/iac/stacks`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope_kind: "host", scope_name: host.name, stack_name: name }),
+      });
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      const j = await r.json();
+      onOpenStack(name, j.id);
+    } catch (e: any) {
+      window.alert(e?.message || "Failed to create stack");
+    }
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
@@ -392,6 +414,9 @@ function HostStacksView({
         <div className="ml-auto flex items-center gap-2">
           <Button onClick={onSync} className="bg-[#310937] hover:bg-[#2a0830] text-white">
             <RefreshCw className="h-4 w-4 mr-1" /> Sync
+          </Button>
+          <Button variant="outline" className="border-slate-700" onClick={createStack}>
+            <Plus className="h-4 w-4 mr-1" /> New Stack
           </Button>
           <div className="relative w-72">
             <Search className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
@@ -580,6 +605,15 @@ function MiniEditor({
   const [decryptView, setDecryptView] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
+  // ⬇️ allow switching between file presets while editor is open
+  useEffect(() => {
+    setPath(initialPath);
+    setContent("");
+    setSops(false);
+    setDecryptView(false);
+    setErr(null);
+  }, [initialPath]);
+
   async function loadFile(decrypt: boolean) {
     setLoading(true); setErr(null);
     try {
@@ -658,9 +692,13 @@ function StackDetailView({
   const [err, setErr] = useState<string | null>(null);
   const [editPath, setEditPath] = useState<string | null>(null);
 
+  // keep an internal id so we can create IaC without bouncing the page
+  const [localIacId, setLocalIacId] = useState<number | undefined>(iacId);
+  useEffect(() => { setLocalIacId(iacId); }, [iacId]);
+
   async function refreshFiles() {
-    if (!iacId) return;
-    const r = await fetch(`/api/iac/stacks/${iacId}/files`, { credentials: "include" });
+    if (!localIacId) return;
+    const r = await fetch(`/api/iac/stacks/${localIacId}/files`, { credentials: "include" });
     if (!r.ok) return;
     const j = await r.json();
     setFiles(j.files || []);
@@ -671,7 +709,6 @@ function StackDetailView({
     (async () => {
       setLoading(true); setErr(null);
       try {
-        // all runtime on host
         const rc = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`, { credentials: "include" });
         if (rc.status === 401) { window.location.replace("/auth/login"); return; }
         const contJson = await rc.json();
@@ -679,7 +716,6 @@ function StackDetailView({
         const my = runtimeAll.filter(c => (c.compose_project || c.stack || "(none)") === stackName);
         if (!cancel) setRuntime(my);
 
-        // inspect each container
         const ins: InspectOut[] = [];
         for (const c of my) {
           const r = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(c.name)}/inspect`, { credentials: "include" });
@@ -688,7 +724,7 @@ function StackDetailView({
         }
         if (!cancel) setContainers(ins);
 
-        if (iacId) await refreshFiles();
+        if (localIacId) await refreshFiles();
       } catch (e: any) {
         if (!cancel) setErr(e?.message || "Failed to load stack");
       } finally {
@@ -697,25 +733,30 @@ function StackDetailView({
     })();
     return () => { cancel = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [host.name, stackName, iacId]);
+  }, [host.name, stackName, localIacId]);
 
   async function ensureIacStack() {
-    if (iacId) return;
-    const r = await fetch(`/api/iac/stacks`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scope_kind: "host", scope_name: host.name, stack_name: stackName }),
-    });
-    if (!r.ok) return;
-    const j = await r.json();
-    (j.id) && await refreshFiles();
-    window.location.reload();
+    if (localIacId) return;
+    try {
+      const r = await fetch(`/api/iac/stacks`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope_kind: "host", scope_name: host.name, stack_name: stackName }),
+      });
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      const j = await r.json();
+      setLocalIacId(j.id);
+      setEditPath(`docker-compose/${host.name}/${stackName}/compose.yaml`);
+      await refreshFiles();
+    } catch (e: any) {
+      setErr(e?.message || "Failed to create IaC stack");
+    }
   }
 
   async function deleteFile(path: string) {
-    if (!iacId) return;
-    const r = await fetch(`/api/iac/stacks/${iacId}/file?path=${encodeURIComponent(path)}`, {
+    if (!localIacId) return;
+    const r = await fetch(`/api/iac/stacks/${localIacId}/file?path=${encodeURIComponent(path)}`, {
       method: "DELETE",
       credentials: "include",
     });
@@ -732,7 +773,7 @@ function StackDetailView({
           Stack: {stackName}
         </div>
         <div className="ml-auto">
-          {!iacId ? (
+          {!localIacId ? (
             <Button onClick={ensureIacStack} className="bg-[#310937] hover:bg-[#2a0830] text-white">
               <Plus className="h-4 w-4 mr-1" /> Create in IaC
             </Button>
@@ -748,7 +789,7 @@ function StackDetailView({
       {err && <div className="text-sm px-3 py-2 rounded-lg border border-rose-800/50 bg-rose-950/50 text-rose-200">Error: {err}</div>}
 
       <div className="grid lg:grid-cols-2 gap-4">
-        {/* Left: Runtime detail per container */}
+        {/* Left: Runtime detail per container (scrolls) */}
         <div className="space-y-4">
           <Card className="bg-slate-900/50 border-slate-800">
             <CardHeader className="pb-2">
@@ -814,21 +855,21 @@ function StackDetailView({
           </Card>
         </div>
 
-        {/* Right: IaC Files / Editor */}
-        <div className="space-y-4">
+        {/* Right: IaC Files / Editor (sticky) */}
+        <div className="space-y-4 lg:sticky lg:top-4 self-start">
           <Card className="bg-slate-900/50 border-slate-800">
             <CardHeader className="pb-2">
               <CardTitle className="text-slate-200 text-lg">IaC Files</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
-              {!iacId && (
+              {!localIacId && (
                 <div className="text-sm text-amber-300">
                   This stack is not yet declared in IaC. Create it to start managing compose/env/scripts here.
                 </div>
               )}
-              {iacId && (
-                <>
-                  <div className="flex items-center justify-between">
+              {localIacId && (
+                <div className="max-h-[78vh] overflow-auto pr-1">
+                  <div className="flex items-center justify-between mb-3">
                     <div className="text-slate-300 text-sm">{files.length} file(s)</div>
                     <div className="flex items-center gap-2">
                       <Button
@@ -897,13 +938,14 @@ function StackDetailView({
 
                   {editPath && (
                     <MiniEditor
+                      key={editPath} // ⬅️ re-mount when switching preset
                       id="stack-editor"
                       initialPath={editPath}
-                      stackId={iacId!}
+                      stackId={localIacId!}
                       refresh={() => { setEditPath(null); refreshFiles(); }}
                     />
                   )}
-                </>
+                </div>
               )}
             </CardContent>
           </Card>
@@ -911,7 +953,7 @@ function StackDetailView({
       </div>
 
       {/* Explain when nothing exists */}
-      {!loading && containers.length === 0 && !iacId && (
+      {!loading && containers.length === 0 && !localIacId && (
         <Card className="bg-slate-900/40 border-slate-800">
           <CardContent className="py-4 text-sm text-slate-300">
             This stack has no running containers on <b>{host.name}</b> and is not declared in IaC yet.
@@ -931,6 +973,7 @@ function LoginGate() {
       <Card className="w-full max-w-sm bg-slate-900/60 border-slate-800">
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
+            <img src="/DDUI-Logo.png" alt="DDUI" className="h-5 w-5 rounded-sm" />
             <span className="font-black uppercase tracking-tight leading-none text-slate-200 select-none">
               <span className="bg-clip-text text-transparent bg-gradient-to-r from-brand to-sky-400">DDUI</span>
             </span>
@@ -1068,7 +1111,7 @@ export default function App() {
 
       const desiredImageFor = (c: ApiContainer): string | undefined => {
         if (!is) return undefined;
-        const svcs = safeServices(is.services);
+        const svcs = Array.isArray(is.services) ? is.services! : [];
         const svc = svcs.find(x =>
           (c.compose_service && x.service_name === c.compose_service) ||
           (x.container_name && x.container_name === c.name)
@@ -1083,7 +1126,7 @@ export default function App() {
         }
       }
       if (!stackDrift && is) {
-        const svcs = safeServices(is.services);
+        const svcs = Array.isArray(is.services) ? is.services! : [];
         for (const svc of svcs) {
           const match = rcs.some(c =>
             (c.compose_service && svc.service_name === c.compose_service) ||
@@ -1092,7 +1135,7 @@ export default function App() {
           if (!match) { stackDrift = true; break; }
         }
       }
-      const svcs = safeServices(is?.services);
+      const svcs = Array.isArray(is?.services) ? is!.services! : [];
       if (!rcs.length && is && svcs.length > 0) stackDrift = true;
       if (stackDrift) drift++;
     }
@@ -1279,7 +1322,7 @@ export default function App() {
                           </Button>
                         </td>
                         <td className="p-3">
-                          {/* status result shown after Sync; pill per-host can be added later */}
+                          {/* per-host status could render here in a follow-up */}
                         </td>
                       </tr>
                     ))}

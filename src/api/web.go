@@ -30,6 +30,11 @@ type Health struct {
 	Edition   string    `json:"edition"`
 }
 
+func envBool(key string) bool {
+    v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+    return v == "1" || v == "true" || v == "yes" || v == "on"
+}
+
 func makeRouter() http.Handler {
 	r := chi.NewRouter()
 
@@ -583,7 +588,7 @@ func makeRouter() http.Handler {
 				var data []byte
 				if decrypt {
 					// require explicit confirmation + server-side allow
-					if strings.ToLower(os.Getenv("DDUI_ALLOW_SOPS_DECRYPT")) != "1" {
+					if !envBool("DDUI_ALLOW_SOPS_DECRYPT") {
 						http.Error(w, "decrypt disabled on server", http.StatusForbidden)
 						return
 					}

@@ -30,9 +30,10 @@ type Health struct {
 	Edition   string    `json:"edition"`
 }
 
+// truthy env helper: 1/true/yes/on
 func envBool(key string) bool {
-    v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
-    return v == "1" || v == "true" || v == "yes" || v == "on"
+	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
 func makeRouter() http.Handler {
@@ -673,15 +674,25 @@ func makeRouter() http.Handler {
 					}
 				}
 
-				// SOPS auto-encrypt if requested or filename matches
+				// SOPS auto-encrypt if requested or filename matches.
+				// Try when we have either a private key (decrypt capability) OR recipients (encrypt capability).
 				shouldSops := body.Sops || strings.HasSuffix(strings.ToLower(body.Path), "_private.env") || strings.HasSuffix(strings.ToLower(body.Path), "_secret.env")
-				if shouldSops && (os.Getenv("SOPS_AGE_KEY") != "" || os.Getenv("SOPS_AGE_KEY_FILE") != "") {
+				if shouldSops && (os.Getenv("SOPS_AGE_KEY") != "" || os.Getenv("SOPS_AGE_KEY_FILE") != "" || os.Getenv("SOPS_AGE_RECIPIENTS") != "") {
 					args := []string{"-e", "-i"}
 					// hint for dotenv
 					if strings.HasSuffix(strings.ToLower(body.Path), ".env") {
 						args = []string{"-e", "-i", "--input-type", "dotenv"}
 					}
+					// if recipients env is set, pass them explicitly so we don't rely on a sops config file
+					if rec := strings.TrimSpace(os.Getenv("SOPS_AGE_RECIPIENTS")); rec != "" {
+						for _, rcp := range strings.Fields(rec) {
+							if rcp != "" {
+								args = append(args, "--age", rcp)
+							}
+						}
+					}
 					args = append(args, full)
+
 					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 					defer cancel()
 					out, err := exec.CommandContext(ctx, "sops", args...).CombinedOutput()

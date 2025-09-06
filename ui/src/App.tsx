@@ -856,8 +856,10 @@ function MiniEditor({
         credentials: "include",
         headers: { "X-Confirm-Reveal": "yes" },
       });
-      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
       const txt = await r.text();
+      if (!r.ok) {
+        throw new Error(txt || `${r.status} ${r.statusText}`);
+      }
       setContent(txt);
     } catch (e: any) {
       setErr(e?.message || "Failed to decrypt");

@@ -3,7 +3,8 @@ import React, { useEffect, useMemo, useState } from "react";
 import {
   Boxes, Layers, AlertTriangle, XCircle, Search, RefreshCw, ArrowLeft,
   ChevronRight, ShieldCheck, Eye, EyeOff, FileText, Trash2, Plus, Save,
-  Play, Square, Pause, PlayCircle, RotateCw, ZapOff, Terminal, Activity, Bug
+  Play, Square, Pause, PlayCircle, RotateCw, ZapOff, Terminal, Activity, Bug,
+  Shield, ShieldOff, ChevronUp, ChevronDown
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -204,10 +205,12 @@ function LeftNav({
     <div className="hidden md:flex md:flex-col w-60 shrink-0 border-r border-slate-800 bg-slate-950/60">
       <div className="px-4 py-4 border-b border-slate-800">
         <div className="flex items-center gap-3">
-          <img src="/DDUI-Logo.png" alt="DDUI" className="h-10 w-10 rounded-md" />
-          <div className="font-black uppercase tracking-tight leading-none text-slate-200 select-none flex items-center gap-2">
-            <span className="bg-clip-text text-transparent bg-gradient-to-r from-brand to-sky-400">DDUI</span>
-            <Badge variant="outline">Community</Badge>
+          <img src="/DDUI-Logo.png" alt="DDUI" className="h-16 w-16 rounded-md" />
+          <div className="flex flex-col">
+            <div className="font-black uppercase tracking-tight leading-none text-slate-200 select-none text-lg">
+              <span className="bg-clip-text text-transparent bg-gradient-to-r from-brand to-sky-400">DDUI</span>
+            </div>
+            <Badge variant="outline" className="mt-1 w-fit">Community</Badge>
           </div>
         </div>
       </div>
@@ -258,14 +261,15 @@ type MergedStack = {
   rows: MergedRow[];
   iacId?: number;
   hasIac: boolean;
+  hasContent?: boolean; // NEW: Track if stack has any compose files or services
 };
 
 function ActionBtn({
   title, onClick, icon: Icon, disabled=false
 }: { title: string; onClick: ()=>void; icon: any; disabled?: boolean }) {
   return (
-    <Button size="icon" variant="ghost" className="h-8 w-8" title={title} onClick={onClick} disabled={disabled}>
-      <Icon className="h-4 w-4 text-slate-200" />
+    <Button size="icon" variant="ghost" className="h-7 w-7" title={title} onClick={onClick} disabled={disabled}>
+      <Icon className="h-3 w-3 text-slate-200" />
     </Button>
   );
 }
@@ -357,6 +361,9 @@ function HostStacksView({
           const is = iacByStack.get(sname);
           const services: IacService[] = Array.isArray(is?.services) ? (is!.services as IacService[]) : [];
           const hasIac = !!is && (services.length > 0 || !!is.compose);
+          
+          // NEW: Check if stack has actual content (compose file or services)
+          const hasContent = !!is && (!!is.compose || services.length > 0);
 
           const rows: MergedRow[] = [];
 
@@ -423,6 +430,7 @@ function HostStacksView({
             rows,
             iacId: is?.id,
             hasIac,
+            hasContent, // NEW
           });
         }
 
@@ -470,7 +478,12 @@ function HostStacksView({
 
   function handleToggleAuto(sIndex: number, enabled: boolean) {
     const s = stacks[sIndex];
-    if (!s.iacId) return;
+    if (!s.iacId || !s.hasContent) {
+      if (enabled) {
+        alert("This stack needs compose files or services before Auto DevOps can be enabled. Add content first.");
+      }
+      return;
+    }
     setStacks(prev => prev.map((row, i) => i === sIndex ? { ...row, iacEnabled: enabled } : row));
     setAutoDevOps(s.iacId!, enabled).catch(err => {
       alert(`Failed to update Auto DevOps: ${err?.message || err}`);
@@ -485,7 +498,7 @@ function HostStacksView({
     const r = await fetch(`/api/iac/stacks/${s.iacId}`, { method: "DELETE", credentials: "include" });
     if (!r.ok) { alert(`Failed to delete: ${r.status} ${r.statusText}`); return; }
     setStacks(prev => prev.map((row, i) => i === index
-      ? { ...row, iacId: undefined, hasIac: false, iacEnabled: false, pullPolicy: undefined, sops: false, drift: "unknown" }
+      ? { ...row, iacId: undefined, hasIac: false, iacEnabled: false, pullPolicy: undefined, sops: false, drift: "unknown", hasContent: false }
       : row
     ));
   }
@@ -565,7 +578,7 @@ function HostStacksView({
               <Switch
                 checked={!!s.iacEnabled}
                 onCheckedChange={(v) => handleToggleAuto(idx, !!v)}
-                disabled={!s.iacId}
+                disabled={!s.iacId || !s.hasContent}
               />
               {s.iacId && (
                 <Button
@@ -591,7 +604,7 @@ function HostStacksView({
                     <th className="p-3 text-left w-40">IP Address</th>
                     <th className="p-3 text-left w-64">Published Ports</th>
                     <th className="p-3 text-left w-40">Owner</th>
-                    <th className="p-3 text-left w-[22rem]">Actions</th>
+                    <th className="p-3 text-left w-[30rem]">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
@@ -624,7 +637,7 @@ function HostStacksView({
                       </td>
                       <td className="p-3 text-slate-300">{r.owner || "—"}</td>
                       <td className="p-2">
-                        <div className="flex items-center flex-wrap gap-1">
+                        <div className="grid grid-cols-4 gap-1 w-fit">
                           <ActionBtn title="Play" icon={Play} onClick={() => doCtrAction(r.name, "start")} />
                           <ActionBtn title="Stop" icon={Square} onClick={() => doCtrAction(r.name, "stop")} />
                           <ActionBtn title="Kill" icon={ZapOff} onClick={() => doCtrAction(r.name, "kill")} />
@@ -632,15 +645,19 @@ function HostStacksView({
                           <ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />
                           <ActionBtn title="Resume" icon={PlayCircle} onClick={() => doCtrAction(r.name, "unpause")} />
                           <ActionBtn title="Remove" icon={Trash2} onClick={() => doCtrAction(r.name, "remove")} />
-                          <div className="w-px h-5 bg-slate-700 mx-1" />
+                          <div className="col-span-1" />
                           <ActionBtn title="Logs" icon={FileText} onClick={() => openLogs(r.name)} />
                           <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
-                          <ActionBtn title="Stats (1-shot)" icon={Activity} onClick={async () => {
-                            const r2 = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(r.name)}/stats`, { credentials: "include" });
-                            const txt = await r2.text();
-                            setLogModal({ ctr: `${r.name} (stats)`, text: txt });
+                          <ActionBtn title="Stats" icon={Activity} onClick={async () => {
+                            try {
+                              const r2 = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(r.name)}/stats`, { credentials: "include" });
+                              const txt = await r2.text();
+                              setLogModal({ ctr: `${r.name} (stats)`, text: txt });
+                            } catch {
+                              setLogModal({ ctr: `${r.name} (stats)`, text: "(failed to load stats)" });
+                            }
                           }} />
-                          <ActionBtn title="Console (attach)" icon={Terminal} onClick={() => alert("Console attach: coming soon")} />
+                          <ActionBtn title="Console" icon={Terminal} onClick={() => alert("Console attach: coming soon")} disabled />
                         </div>
                       </td>
                     </tr>
@@ -813,6 +830,25 @@ function MiniEditor({
     }
   }
 
+  async function encryptSops() {
+    if (!stackId) { setErr("Create the stack by saving a file first."); return; }
+    if (sops) { setErr("File is already marked as SOPS."); return; }
+    if (!confirm("Encrypt this file with SOPS? This action cannot be undone locally.")) return;
+    
+    setLoading(true); setErr(null);
+    try {
+      setSops(true);
+      await saveFile(); // This will trigger SOPS encryption on the server
+    } catch (e: any) {
+      setSops(false);
+      setErr(e?.message || "Failed to encrypt");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const isSopsFile = path.toLowerCase().includes('_secret.env') || path.toLowerCase().includes('_private.env') || sops;
+
   return (
     <Card className="bg-slate-900/40 border-slate-800 h-full flex flex-col">
       <CardHeader className="pb-2 shrink-0">
@@ -820,8 +856,19 @@ function MiniEditor({
       </CardHeader>
       <CardContent className="flex-1 min-h-0 flex flex-col gap-3">
         <div className="flex gap-2 shrink-0">
-          <Input value={path} onChange={e => setPath(e.target.value)} placeholder="docker-compose/host/stack/compose.yaml" />
-          <Button onClick={revealSops} variant="outline" className="border-indigo-700 text-indigo-200">Reveal SOPS</Button>
+          <Input value={path} onChange={e => setPath(e.target.value)} placeholder="docker-compose/host/stack/compose.yaml" className="flex-1" />
+          <div className="flex gap-1">
+            {isSopsFile && (
+              <Button onClick={revealSops} variant="outline" className="border-indigo-700 text-indigo-200" title="Decrypt and reveal SOPS content">
+                <Shield className="h-4 w-4 mr-1" />SOPS Reveal
+              </Button>
+            )}
+            {!sops && !isSopsFile && (
+              <Button onClick={encryptSops} variant="outline" className="border-amber-700 text-amber-200" title="Encrypt this file with SOPS">
+                <ShieldOff className="h-4 w-4 mr-1" />SOPS Encrypt
+              </Button>
+            )}
+          </div>
         </div>
         {err && <div className="text-xs text-rose-300 shrink-0">Error: {err}</div>}
         {decryptView && <div className="text-xs text-amber-300 shrink-0">Warning: Decrypted secrets are visible in your browser until you navigate away.</div>}
@@ -858,7 +905,8 @@ function StackDetailView({
   const [editPath, setEditPath] = useState<string | null>(null);
   const [stackIacId, setStackIacId] = useState<number | undefined>(iacId);
   const [autoDevOps, setAutoDevOps] = useState<boolean>(false);
-  const [revealEnvAll, setRevealEnvAll] = useState<boolean>(false); // NEW
+  const [revealEnvAll, setRevealEnvAll] = useState<boolean>(false);
+  const [deploying, setDeploying] = useState<boolean>(false);
 
   useEffect(() => { setAutoDevOps(false); }, [stackName]);
 
@@ -941,6 +989,13 @@ function StackDetailView({
         return;
       }
     }
+    
+    // Check if stack has content before enabling
+    if (checked && files.length === 0) {
+      alert("This stack needs compose files or services before Auto DevOps can be enabled. Add content first.");
+      return;
+    }
+    
     setAutoDevOps(checked);
     const r = await fetch(`/api/iac/stacks/${stackIacId!}`, {
       method: "PATCH",
@@ -959,14 +1014,28 @@ function StackDetailView({
       alert("Create the stack (save a file) before deploying.");
       return;
     }
-    const r = await fetch(`/api/iac/stacks/${stackIacId}/deploy`, { method: "POST", credentials: "include" });
-    if (!r.ok) {
-      const txt = await r.text();
-      alert(`Deploy failed: ${r.status} ${txt}`);
+    if (files.length === 0) {
+      alert("This stack has no files to deploy. Add a compose file or scripts first.");
       return;
     }
-    alert("Deploy requested. Check host for activity.");
+    
+    setDeploying(true);
+    try {
+      const r = await fetch(`/api/iac/stacks/${stackIacId}/deploy`, { method: "POST", credentials: "include" });
+      if (!r.ok) {
+        const txt = await r.text();
+        alert(`Deploy failed: ${r.status} ${txt}`);
+        return;
+      }
+      alert("Deploy requested. Check host for activity.");
+    } catch (e: any) {
+      alert(`Deploy failed: ${e?.message || e}`);
+    } finally {
+      setDeploying(false);
+    }
   }
+
+  const hasContent = files.some(f => f.role === 'compose') || files.length > 0;
 
   return (
     <div className="space-y-4">
@@ -978,11 +1047,19 @@ function StackDetailView({
           Stack: {stackName}
         </div>
         <div className="ml-auto flex items-center gap-3">
-          <Button onClick={deployNow} className="bg-emerald-800 hover:bg-emerald-900 text-white">
-            <RotateCw className="h-4 w-4 mr-1" /> Deploy
+          <Button 
+            onClick={deployNow} 
+            disabled={deploying || !hasContent}
+            className="bg-emerald-800 hover:bg-emerald-900 text-white disabled:opacity-50"
+          >
+            <RotateCw className={`h-4 w-4 mr-1 ${deploying ? 'animate-spin' : ''}`} />
+            {deploying ? 'Deploying...' : 'Deploy'}
           </Button>
           <span className="text-sm text-slate-300">Auto DevOps</span>
-          <Switch checked={autoDevOps} onCheckedChange={(v) => toggleAutoDevOps(!!v)} />
+          <Switch 
+            checked={autoDevOps} 
+            onCheckedChange={(v) => toggleAutoDevOps(!!v)}
+          />
           {stackIacId ? (
             <>
               <Button onClick={refreshFiles} variant="outline" className="border-slate-700">
@@ -1074,11 +1151,22 @@ function StackDetailView({
           </Card>
         </div>
 
-        {/* Right: IaC Files / Editor (sticky, full height, elevated) */}
+        {/* Right: IaC Files / Editor */}
         <div className="space-y-4 lg:sticky lg:top-4 lg:h-[calc(100vh-140px)] lg:z-10">
           <Card className="bg-slate-900/50 border-slate-800 h-full flex flex-col">
-            <CardHeader className="pb-2 shrink-0">
+            <CardHeader className="pb-2 shrink-0 flex flex-row items-center justify-between">
               <CardTitle className="text-slate-200 text-lg">IaC Files</CardTitle>
+              {stackIacId && hasContent && (
+                <Button 
+                  onClick={deployNow} 
+                  disabled={deploying}
+                  size="sm"
+                  className="bg-emerald-800 hover:bg-emerald-900 text-white"
+                >
+                  <RotateCw className={`h-4 w-4 mr-1 ${deploying ? 'animate-spin' : ''}`} />
+                  Deploy
+                </Button>
+              )}
             </CardHeader>
             <CardContent className="flex-1 min-h-0 flex flex-col gap-3">
               {!stackIacId && (
@@ -1189,7 +1277,7 @@ function StackDetailView({
   );
 }
 
-/* ==================== Images/Networks/Volumes ==================== */
+/* ==================== Images/Networks/Volumes with Sorting ==================== */
 
 function HostPicker({
   hosts, activeHost, setActiveHost,
@@ -1208,10 +1296,43 @@ function HostPicker({
   );
 }
 
+function SortableHeader({ 
+  children, 
+  sortKey, 
+  currentSort, 
+  onSort 
+}: { 
+  children: React.ReactNode; 
+  sortKey: string; 
+  currentSort: { key: string; direction: 'asc' | 'desc' }; 
+  onSort: (key: string) => void;
+}) {
+  const isActive = currentSort.key === sortKey;
+  const direction = isActive ? currentSort.direction : 'asc';
+  
+  return (
+    <th className="p-2 text-left">
+      <button 
+        className="flex items-center gap-1 hover:text-white transition"
+        onClick={() => onSort(sortKey)}
+      >
+        {children}
+        {isActive ? (
+          direction === 'asc' ? <ChevronUp className="h-3 w-3" /> : <ChevronDown className="h-3 w-3" />
+        ) : (
+          <ChevronUp className="h-3 w-3 opacity-30" />
+        )}
+      </button>
+    </th>
+  );
+}
+
 function ImagesView({ hosts }: { hosts: Host[] }) {
   const [hostName, setHostName] = useState(hosts[0]?.name || "");
   const [rows, setRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [sort, setSort] = useState<{ key: string; direction: 'asc' | 'desc' }>({ key: 'repo', direction: 'asc' });
+
   useEffect(() => {
     if (!hostName) return;
     (async () => {
@@ -1222,6 +1343,23 @@ function ImagesView({ hosts }: { hosts: Host[] }) {
       setLoading(false);
     })();
   }, [hostName]);
+
+  const sortedRows = useMemo(() => {
+    return [...rows].sort((a, b) => {
+      const aVal = a[sort.key] || '';
+      const bVal = b[sort.key] || '';
+      const result = aVal.localeCompare(bVal);
+      return sort.direction === 'asc' ? result : -result;
+    });
+  }, [rows, sort]);
+
+  const handleSort = (key: string) => {
+    setSort(prev => ({
+      key,
+      direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc'
+    }));
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
@@ -1232,21 +1370,21 @@ function ImagesView({ hosts }: { hosts: Host[] }) {
         <table className="w-full text-sm">
           <thead className="bg-slate-900/70 text-slate-300">
             <tr>
-              <th className="p-2 text-left">Repository</th>
-              <th className="p-2 text-left">Tag</th>
-              <th className="p-2 text-left">ID</th>
-              <th className="p-2 text-left">Size</th>
-              <th className="p-2 text-left">Created</th>
+              <SortableHeader sortKey="repo" currentSort={sort} onSort={handleSort}>Repository</SortableHeader>
+              <SortableHeader sortKey="tag" currentSort={sort} onSort={handleSort}>Tag</SortableHeader>
+              <SortableHeader sortKey="id" currentSort={sort} onSort={handleSort}>ID</SortableHeader>
+              <SortableHeader sortKey="size" currentSort={sort} onSort={handleSort}>Size</SortableHeader>
+              <SortableHeader sortKey="created" currentSort={sort} onSort={handleSort}>Created</SortableHeader>
             </tr>
           </thead>
           <tbody>
             {loading && <tr><td className="p-3 text-slate-500" colSpan={5}>Loading…</td></tr>}
-            {(!loading && rows.length === 0) && <tr><td className="p-3 text-slate-500" colSpan={5}>No images.</td></tr>}
-            {rows.map((im, i) => (
-              <tr key={i} className="border-t border-slate-800">
+            {(!loading && sortedRows.length === 0) && <tr><td className="p-3 text-slate-500" colSpan={5}>No images.</td></tr>}
+            {sortedRows.map((im, i) => (
+              <tr key={i} className="border-t border-slate-800 hover:bg-slate-900/40">
                 <td className="p-2 text-slate-300">{im.repo || "—"}</td>
                 <td className="p-2 text-slate-300">{im.tag || "—"}</td>
-                <td className="p-2 text-slate-300">{im.id?.slice(7, 19) || "—"}</td>
+                <td className="p-2 text-slate-300 font-mono">{im.id?.slice(7, 19) || "—"}</td>
                 <td className="p-2 text-slate-300">{im.size || "—"}</td>
                 <td className="p-2 text-slate-300">{im.created || "—"}</td>
               </tr>
@@ -1262,6 +1400,8 @@ function NetworksView({ hosts }: { hosts: Host[] }) {
   const [hostName, setHostName] = useState(hosts[0]?.name || "");
   const [rows, setRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [sort, setSort] = useState<{ key: string; direction: 'asc' | 'desc' }>({ key: 'name', direction: 'asc' });
+
   useEffect(() => {
     if (!hostName) return;
     (async () => {
@@ -1272,6 +1412,23 @@ function NetworksView({ hosts }: { hosts: Host[] }) {
       setLoading(false);
     })();
   }, [hostName]);
+
+  const sortedRows = useMemo(() => {
+    return [...rows].sort((a, b) => {
+      const aVal = a[sort.key] || '';
+      const bVal = b[sort.key] || '';
+      const result = aVal.localeCompare(bVal);
+      return sort.direction === 'asc' ? result : -result;
+    });
+  }, [rows, sort]);
+
+  const handleSort = (key: string) => {
+    setSort(prev => ({
+      key,
+      direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc'
+    }));
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
@@ -1282,21 +1439,21 @@ function NetworksView({ hosts }: { hosts: Host[] }) {
         <table className="w-full text-sm">
           <thead className="bg-slate-900/70 text-slate-300">
             <tr>
-              <th className="p-2 text-left">Name</th>
-              <th className="p-2 text-left">Driver</th>
-              <th className="p-2 text-left">Scope</th>
-              <th className="p-2 text-left">ID</th>
+              <SortableHeader sortKey="name" currentSort={sort} onSort={handleSort}>Name</SortableHeader>
+              <SortableHeader sortKey="driver" currentSort={sort} onSort={handleSort}>Driver</SortableHeader>
+              <SortableHeader sortKey="scope" currentSort={sort} onSort={handleSort}>Scope</SortableHeader>
+              <SortableHeader sortKey="id" currentSort={sort} onSort={handleSort}>ID</SortableHeader>
             </tr>
           </thead>
           <tbody>
             {loading && <tr><td className="p-3 text-slate-500" colSpan={4}>Loading…</td></tr>}
-            {(!loading && rows.length === 0) && <tr><td className="p-3 text-slate-500" colSpan={4}>No networks.</td></tr>}
-            {rows.map((n, i) => (
-              <tr key={i} className="border-t border-slate-800">
+            {(!loading && sortedRows.length === 0) && <tr><td className="p-3 text-slate-500" colSpan={4}>No networks.</td></tr>}
+            {sortedRows.map((n, i) => (
+              <tr key={i} className="border-t border-slate-800 hover:bg-slate-900/40">
                 <td className="p-2 text-slate-300">{n.name}</td>
                 <td className="p-2 text-slate-300">{n.driver}</td>
                 <td className="p-2 text-slate-300">{n.scope}</td>
-                <td className="p-2 text-slate-300">{n.id?.slice(0,12)}</td>
+                <td className="p-2 text-slate-300 font-mono">{n.id?.slice(0,12)}</td>
               </tr>
             ))}
           </tbody>
@@ -1310,6 +1467,8 @@ function VolumesView({ hosts }: { hosts: Host[] }) {
   const [hostName, setHostName] = useState(hosts[0]?.name || "");
   const [rows, setRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
+  const [sort, setSort] = useState<{ key: string; direction: 'asc' | 'desc' }>({ key: 'name', direction: 'asc' });
+
   useEffect(() => {
     if (!hostName) return;
     (async () => {
@@ -1320,6 +1479,23 @@ function VolumesView({ hosts }: { hosts: Host[] }) {
       setLoading(false);
     })();
   }, [hostName]);
+
+  const sortedRows = useMemo(() => {
+    return [...rows].sort((a, b) => {
+      const aVal = a[sort.key] || '';
+      const bVal = b[sort.key] || '';
+      const result = aVal.localeCompare(bVal);
+      return sort.direction === 'asc' ? result : -result;
+    });
+  }, [rows, sort]);
+
+  const handleSort = (key: string) => {
+    setSort(prev => ({
+      key,
+      direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc'
+    }));
+  };
+
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
@@ -1330,20 +1506,20 @@ function VolumesView({ hosts }: { hosts: Host[] }) {
         <table className="w-full text-sm">
           <thead className="bg-slate-900/70 text-slate-300">
             <tr>
-              <th className="p-2 text-left">Name</th>
-              <th className="p-2 text-left">Driver</th>
-              <th className="p-2 text-left">Mountpoint</th>
-              <th className="p-2 text-left">Created</th>
+              <SortableHeader sortKey="name" currentSort={sort} onSort={handleSort}>Name</SortableHeader>
+              <SortableHeader sortKey="driver" currentSort={sort} onSort={handleSort}>Driver</SortableHeader>
+              <SortableHeader sortKey="mountpoint" currentSort={sort} onSort={handleSort}>Mountpoint</SortableHeader>
+              <SortableHeader sortKey="created" currentSort={sort} onSort={handleSort}>Created</SortableHeader>
             </tr>
           </thead>
           <tbody>
             {loading && <tr><td className="p-3 text-slate-500" colSpan={4}>Loading…</td></tr>}
-            {(!loading && rows.length === 0) && <tr><td className="p-3 text-slate-500" colSpan={4}>No volumes.</td></tr>}
-            {rows.map((v, i) => (
-              <tr key={i} className="border-t border-slate-800">
+            {(!loading && sortedRows.length === 0) && <tr><td className="p-3 text-slate-500" colSpan={4}>No volumes.</td></tr>}
+            {sortedRows.map((v, i) => (
+              <tr key={i} className="border-t border-slate-800 hover:bg-slate-900/40">
                 <td className="p-2 text-slate-300">{v.name}</td>
                 <td className="p-2 text-slate-300">{v.driver}</td>
-                <td className="p-2 text-slate-300">{v.mountpoint}</td>
+                <td className="p-2 text-slate-300 font-mono text-xs">{v.mountpoint}</td>
                 <td className="p-2 text-slate-300">{v.created || "—"}</td>
               </tr>
             ))}
@@ -1369,7 +1545,7 @@ function LoginGate() {
           </CardTitle>
         </CardHeader>
         <CardContent className="space-y-4">
-          <p className="text-slate-300 text-sm">You’re signed out. Continue to your identity provider to sign in.</p>
+          <p className="text-slate-300 text-sm">You're signed out. Continue to your identity provider to sign in.</p>
           <Button
             className="w-full bg-[#310937] hover:bg-[#2a0830] text-white"
             onClick={() => { window.location.replace("/auth/login"); }}
@@ -1378,7 +1554,7 @@ function LoginGate() {
           </Button>
           <p className="text-xs text-slate-500">
             If you get stuck, ensure your OIDC <code>RedirectURL</code> points back to
-            <code> /auth/callback</code> and that cookies aren’t blocked.
+            <code> /auth/callback</code> and that cookies aren't blocked.
           </p>
         </CardContent>
       </Card>

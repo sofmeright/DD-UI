@@ -23,7 +23,7 @@ services:
     depends_on:
       ddui-postgres:
         condition: service_healthy
-    image: cr.pcfae.com/prplanit/ddui:v0.2.1
+    image: prplanit/ddui:v0.2.8
     ports:
       - "3000:8080"
     env_file: stack.env
@@ -38,6 +38,9 @@ services:
       - DDUI_DB_MIGRATE=true
       # or provide a single DSN:
       # - DDUI_DB_DSN=postgres://ddui:...@db:5432/ddui?sslmode=disable
+      # - DDUI_IAC_SCAN_AUTO=false
+      # - DDUI_IAC_SCAN_INTERVAL=90s
+      - DDUI_DEVOPS_APPLY=false
       # - DDUI_INVENTORY_PATH=/data/inventory
       - DDUI_SCAN_KIND=local
       - DDUI_SCAN_ROOT=/data/docker-compose

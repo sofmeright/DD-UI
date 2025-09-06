@@ -785,7 +785,13 @@ type MiniEditorProps = {
 
 function MiniEditor({
   id, initialPath, stackId, ensureStack, refresh,
-}: MiniEditorProps) {
+}: {
+  id: string;
+  initialPath: string;
+  stackId?: number;
+  ensureStack: () => Promise<number>;
+  refresh: () => void;
+}) {
   const [path, setPath] = useState(initialPath);
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(false);
@@ -819,15 +825,17 @@ function MiniEditor({
     return () => { cancel = true; };
   }, [stackId, path]);
 
-  async function saveFile() {
+  // NOTE: accept a force flag so callers aren’t dependent on async state
+  async function saveFile(forceSops?: boolean) {
     setLoading(true); setErr(null);
     try {
       const idToUse = stackId ?? await ensureStack();
+      const sopsFlag = forceSops ?? sops;
       const r = await fetch(`/api/iac/stacks/${idToUse}/file`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, content, sops }),
+        body: JSON.stringify({ path, content, sops: sopsFlag }),
       });
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
       refresh();
@@ -862,11 +870,11 @@ function MiniEditor({
     if (!stackId) { setErr("Create the stack by saving a file first."); return; }
     if (sops) { setErr("File is already marked as SOPS."); return; }
     if (!confirm("Encrypt this file with SOPS? This action cannot be undone locally.")) return;
-    
+
     setLoading(true); setErr(null);
     try {
-      setSops(true);
-      await saveFile(); // This will trigger SOPS encryption on the server
+      setSops(true);               // update UI state
+      await saveFile(true);        // ⟵ force sops=true in the payload THIS TIME
     } catch (e: any) {
       setSops(false);
       setErr(e?.message || "Failed to encrypt");
@@ -875,7 +883,10 @@ function MiniEditor({
     }
   }
 
-  const isSopsFile = path.toLowerCase().includes('_secret.env') || path.toLowerCase().includes('_private.env') || sops;
+  const isSopsFile =
+    path.toLowerCase().includes('_secret.env') ||
+    path.toLowerCase().includes('_private.env') ||
+    sops;
 
   return (
     <Card className="bg-slate-900/40 border-slate-800 h-full flex flex-col">
@@ -887,12 +898,12 @@ function MiniEditor({
           <Input value={path} onChange={e => setPath(e.target.value)} placeholder="docker-compose/host/stack/compose.yaml" className="flex-1" />
           <div className="flex gap-1">
             {isSopsFile && (
-              <Button onClick={revealSops} variant="outline" className="border-indigo-700 text-indigo-200" title="Decrypt and reveal SOPS content">
+              <Button onClick={revealSops} variant="outline" className="border-indigo-700 text-indigo-200" title="Decrypt and reveal SOPS content" disabled={loading}>
                 <Shield className="h-4 w-4 mr-1" />SOPS Reveal
               </Button>
             )}
             {!sops && !isSopsFile && (
-              <Button onClick={encryptSops} variant="outline" className="border-amber-700 text-amber-200" title="Encrypt this file with SOPS">
+              <Button onClick={encryptSops} variant="outline" className="border-amber-700 text-amber-200 disabled:opacity-60" title="Encrypt this file with SOPS" disabled={loading}>
                 <ShieldOff className="h-4 w-4 mr-1" />SOPS Encrypt
               </Button>
             )}
@@ -906,13 +917,14 @@ function MiniEditor({
           value={content}
           onChange={e => setContent(e.target.value)}
           placeholder={loading ? "Loading…" : "File content…"}
+          disabled={loading}
         />
         <div className="flex items-center justify-between shrink-0">
           <label className="text-sm text-slate-300 inline-flex items-center gap-2">
             <input type="checkbox" checked={sops} onChange={e => setSops(e.target.checked)} />
             Mark as SOPS file
           </label>
-          <Button onClick={saveFile} disabled={loading}><Save className="h-4 w-4 mr-1" /> Save</Button>
+          <Button onClick={() => saveFile()} disabled={loading}><Save className="h-4 w-4 mr-1" /> Save</Button>
         </div>
         <div className="text-xs text-slate-500 -mt-2">
           Files ending with <code>_private.env</code> or <code>_secret.env</code> will auto-encrypt with SOPS (if the server has a key).

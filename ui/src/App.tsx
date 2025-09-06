@@ -1,3 +1,4 @@
+// ui/src/App.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Boxes, Layers, AlertTriangle, XCircle, Search, RefreshCw, ArrowLeft,
@@ -392,7 +393,7 @@ function HostStacksView({
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ scope_kind: "host", scope_name: host.name, stack_name: name }),
+        body: JSON.stringify({ scope_kind: "host", scope_name: host.name, stack_name: name, iac_enabled: false }),
       });
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
       const j = await r.json();
@@ -581,16 +582,28 @@ function HostStacksView({
 
 /* ==================== Stack Detail & Editor ==================== */
 
-function EnvRow({ k, v }: { k: string; v: string }) {
+/* Updated: supports overflow-safe values and bulk reveal */
+function EnvRow({ k, v, forceShow }: { k: string; v: string; forceShow?: boolean }) {
   const [show, setShow] = useState(false);
+  const showEff = forceShow || show;
   const masked = v ? "•".repeat(Math.min(v.length, 24)) : "";
   return (
-    <div className="flex items-center justify-between gap-2 py-1">
-      <div className="text-slate-300 text-sm">{k}</div>
-      <div className="flex items-center gap-2">
-        <div className="text-slate-400 text-sm font-mono">{show ? v || "" : masked}</div>
-        <Button size="icon" variant="ghost" className="h-7 w-7" onClick={() => setShow(s => !s)} title={show ? "Hide" : "Reveal"}>
-          {show ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+    <div className="flex items-start gap-3 py-1">
+      <div className="text-slate-300 text-sm w-44 shrink-0">{k}</div>
+      <div className="flex items-start gap-2 grow min-w-0">
+        <div
+          className="text-slate-400 text-sm font-mono break-all whitespace-pre-wrap leading-tight max-h-24 overflow-auto pr-1"
+        >
+          {showEff ? v || "" : masked}
+        </div>
+        <Button
+          size="icon"
+          variant="ghost"
+          className="h-7 w-7 shrink-0"
+          onClick={() => setShow(s => !s)}
+          title={showEff ? "Hide" : "Reveal"}
+        >
+          {showEff ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
         </Button>
       </div>
     </div>
@@ -751,6 +764,7 @@ function StackDetailView({
   const [editPath, setEditPath] = useState<string | null>(null);
   const [stackIacId, setStackIacId] = useState<number | undefined>(iacId);
   const [autoDevOps, setAutoDevOps] = useState<boolean>(false);
+  const [revealEnvAll, setRevealEnvAll] = useState<boolean>(false); // NEW
 
   useEffect(() => { setAutoDevOps(false); }, [stackName]);
 
@@ -799,7 +813,7 @@ function StackDetailView({
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scope_kind: "host", scope_name: host.name, stack_name: stackName }),
+      body: JSON.stringify({ scope_kind: "host", scope_name: host.name, stack_name: stackName, iac_enabled: false }),
     });
     if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
     const j = await r.json();
@@ -878,8 +892,18 @@ function StackDetailView({
         {/* Left: Active Containers */}
         <div className="space-y-4">
           <Card className="bg-slate-900/50 border-slate-800">
-            <CardHeader className="pb-2">
+            <CardHeader className="pb-2 flex items-center justify-between">
               <CardTitle className="text-slate-200 text-lg">Active Containers</CardTitle>
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-slate-700"
+                onClick={() => setRevealEnvAll(v => !v)}
+                title={revealEnvAll ? "Hide all env" : "Reveal all env"}
+              >
+                {revealEnvAll ? <EyeOff className="h-4 w-4 mr-1" /> : <Eye className="h-4 w-4 mr-1" />}
+                {revealEnvAll ? "Hide env" : "Reveal env"}
+              </Button>
             </CardHeader>
             <CardContent className="space-y-3">
               {containers.length === 0 && (
@@ -913,7 +937,7 @@ function StackDetailView({
                       {(!c.env || Object.keys(c.env).length === 0) && <div className="text-sm text-slate-500">No environment variables.</div>}
                       <div className="space-y-1">
                         {Object.entries(c.env || {}).map(([k, v]) => (
-                          <EnvRow key={k} k={k} v={v} />
+                          <EnvRow key={k} k={k} v={v} forceShow={revealEnvAll} />
                         ))}
                       </div>
                     </div>
@@ -939,8 +963,8 @@ function StackDetailView({
           </Card>
         </div>
 
-        {/* Right: IaC Files / Editor (sticky, full height) */}
-        <div className="space-y-4 lg:sticky lg:top-4 lg:h-[calc(100vh-140px)]">
+        {/* Right: IaC Files / Editor (sticky, full height, elevated) */}
+        <div className="space-y-4 lg:sticky lg:top-4 lg:h-[calc(100vh-140px)] lg:z-10">
           <Card className="bg-slate-900/50 border-slate-800 h-full flex flex-col">
             <CardHeader className="pb-2 shrink-0">
               <CardTitle className="text-slate-200 text-lg">IaC Files</CardTitle>
@@ -1313,19 +1337,30 @@ export default function App() {
     return <div className="min-h-screen bg-slate-950" />;
   }
 
+  const hostMetrics = activeHost ? (metricsCache[activeHost.name] || { stacks: 0, containers: 0, drift: 0, errors: 0 }) : null;
+
   return (
     <div className="min-h-screen flex">
       <LeftNav page={page} onGoDeployments={() => setPage("deployments")} />
 
       <div className="flex-1 min-w-0">
         <main className="px-6 py-6 space-y-6">
-          {page !== 'stack' && (
+          {page === 'deployments' && (
             <div className="grid md:grid-cols-5 gap-4">
               <MetricCard title="Hosts" value={metrics.hosts} icon={Boxes} accent />
               <MetricCard title="Stacks" value={metrics.stacks} icon={Boxes} />
               <MetricCard title="Containers" value={metrics.containers} icon={Layers} />
               <MetricCard title="Drift" value={<span className="text-amber-400">{metrics.drift}</span>} icon={AlertTriangle} />
               <MetricCard title="Errors" value={<span className="text-rose-400">{metrics.errors}</span>} icon={XCircle} />
+            </div>
+          )}
+
+          {page === 'host' && activeHost && (
+            <div className="grid md:grid-cols-4 gap-4">
+              <MetricCard title="Stacks" value={hostMetrics!.stacks} icon={Boxes} />
+              <MetricCard title="Containers" value={hostMetrics!.containers} icon={Layers} />
+              <MetricCard title="Drift" value={<span className="text-amber-400">{hostMetrics!.drift}</span>} icon={AlertTriangle} />
+              <MetricCard title="Errors" value={<span className="text-rose-400">{hostMetrics!.errors}</span>} icon={XCircle} />
             </div>
           )}
 

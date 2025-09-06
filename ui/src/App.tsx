@@ -2,12 +2,13 @@
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Boxes, Layers, AlertTriangle, XCircle, Search, RefreshCw, ArrowLeft,
-  ChevronRight, ShieldCheck, Eye, EyeOff, FileText, Trash2, Plus, Save
+  ChevronRight, ShieldCheck, Eye, EyeOff, FileText, Trash2, Plus, Save,
+  Play, Square, Pause, RotateCcw, Activity, Terminal, Plug, Bug
 } from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-  import { Input } from "@/components/ui/input";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 
 /* ==================== Types ==================== */
@@ -184,7 +185,24 @@ function Fact({ label, value }: { label: string; value: React.ReactNode }) {
 
 /* ==================== Left Nav ==================== */
 
-function LeftNav({ page, onGoDeployments }: { page: string; onGoDeployments: () => void }) {
+function LeftNav({
+  page, onGo, active
+}: {
+  page: string;
+  onGo: (p: string) => void;
+  active?: string;
+}) {
+  function NavBtn({ id, label }: { id: string; label: string }) {
+    const activeClass = page === id ? 'bg-slate-800/60 border-slate-700 text-white' : 'hover:bg-slate-900/40 border-transparent text-slate-300';
+    return (
+      <button
+        className={`w-full text-left px-3 py-2 rounded-lg text-sm transition border ${activeClass}`}
+        onClick={() => onGo(id)}
+      >
+        {label}
+      </button>
+    );
+  }
   return (
     <div className="hidden md:flex md:flex-col w-60 shrink-0 border-r border-slate-800 bg-slate-950/60">
       <div className="px-4 py-4 border-b border-slate-800">
@@ -199,20 +217,12 @@ function LeftNav({ page, onGoDeployments }: { page: string; onGoDeployments: () 
 
       <div className="px-4 py-3 text-xs tracking-wide uppercase text-slate-400">Resources</div>
       <nav className="px-2 pb-4 space-y-1">
-        <button
-          className={`w-full text-left px-3 py-2 rounded-lg text-sm transition border ${
-            page === 'deployments'
-              ? 'bg-slate-800/60 border-slate-700 text-white'
-              : 'hover:bg-slate-900/40 border-transparent text-slate-300'
-          }`}
-          onClick={onGoDeployments}
-        >
-          Deployments
-        </button>
-        <div className="px-3 py-2 text-slate-500 text-sm cursor-not-allowed">Images</div>
-        <div className="px-3 py-2 text-slate-500 text-sm cursor-not-allowed">Networks</div>
-        <div className="px-3 py-2 text-slate-500 text-sm cursor-not-allowed">Volumes</div>
+        <NavBtn id="deployments" label="Deployments" />
+        <NavBtn id="images" label="Images" />
+        <NavBtn id="networks" label="Networks" />
+        <NavBtn id="volumes" label="Volumes" />
       </nav>
+
       <div className="px-4 py-3 text-xs tracking-wide uppercase text-slate-400">System</div>
       <nav className="px-2 space-y-1">
         <div className="px-3 py-2 text-slate-300 text-sm">Settings</div>
@@ -753,10 +763,21 @@ function MiniEditor({
   );
 }
 
+function QuickRow({
+  icon: Icon, label, onClick, disabled, title
+}: {
+  icon: any; label: string; onClick: ()=>void; disabled?: boolean; title?: string;
+}) {
+  return (
+    <Button size="sm" variant="outline" className="border-slate-700" onClick={onClick} disabled={disabled} title={title || label}>
+      <Icon className="h-4 w-4 mr-1" /> {label}
+    </Button>
+  );
+}
+
 function StackDetailView({
   host, stackName, iacId, onBack,
 }: { host: Host; stackName: string; iacId?: number; onBack: ()=>void }) {
-  const [runtime, setRuntime] = useState<ApiContainer[]>([]);
   const [containers, setContainers] = useState<InspectOut[]>([]);
   const [files, setFiles] = useState<IacFileMeta[]>([]);
   const [loading, setLoading] = useState(true);
@@ -764,7 +785,12 @@ function StackDetailView({
   const [editPath, setEditPath] = useState<string | null>(null);
   const [stackIacId, setStackIacId] = useState<number | undefined>(iacId);
   const [autoDevOps, setAutoDevOps] = useState<boolean>(false);
-  const [revealEnvAll, setRevealEnvAll] = useState<boolean>(false); // NEW
+  const [revealEnvAll, setRevealEnvAll] = useState<boolean>(false);
+  const [busyCtr, setBusyCtr] = useState<string | null>(null);
+  const [logOpen, setLogOpen] = useState<Record<string, boolean>>({});
+  const [logs, setLogs] = useState<Record<string, string>>({});
+  const [stats, setStats] = useState<Record<string, { cpu: number; mem: number; mem_total: number }>>({});
+  const [inspectRaw, setInspectRaw] = useState<Record<string, string>>({});
 
   useEffect(() => { setAutoDevOps(false); }, [stackName]);
 
@@ -776,26 +802,32 @@ function StackDetailView({
     setFiles(j.files || []);
   }
 
+  async function refreshContainers() {
+    try {
+      const rc = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`, { credentials: "include" });
+      if (rc.status === 401) { window.location.replace("/auth/login"); return; }
+      const contJson = await rc.json();
+      const runtimeAll: ApiContainer[] = (contJson.items || []) as ApiContainer[];
+      const my = runtimeAll.filter(c => (c.compose_project || c.stack || "(none)") === stackName);
+
+      const ins: InspectOut[] = [];
+      for (const c of my) {
+        const r = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(c.name)}/inspect`, { credentials: "include" });
+        if (!r.ok) continue;
+        ins.push(await r.json());
+      }
+      setContainers(ins);
+    } catch (e:any) {
+      setErr(e?.message || "Failed to load stack");
+    }
+  }
+
   useEffect(() => {
     let cancel = false;
     (async () => {
       setLoading(true); setErr(null);
       try {
-        const rc = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`, { credentials: "include" });
-        if (rc.status === 401) { window.location.replace("/auth/login"); return; }
-        const contJson = await rc.json();
-        const runtimeAll: ApiContainer[] = (contJson.items || []) as ApiContainer[];
-        const my = runtimeAll.filter(c => (c.compose_project || c.stack || "(none)") === stackName);
-        if (!cancel) setRuntime(my);
-
-        const ins: InspectOut[] = [];
-        for (const c of my) {
-          const r = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(c.name)}/inspect`, { credentials: "include" });
-          if (!r.ok) continue;
-          ins.push(await r.json());
-        }
-        if (!cancel) setContainers(ins);
-
+        await refreshContainers();
         if (stackIacId) await refreshFiles();
       } catch (e: any) {
         if (!cancel) setErr(e?.message || "Failed to load stack");
@@ -860,6 +892,56 @@ function StackDetailView({
     }
   }
 
+  async function deployNow() {
+    if (!stackIacId) {
+      const id = await ensureStack();
+      setStackIacId(id);
+    }
+    const r = await fetch(`/api/iac/stacks/${stackIacId}/deploy`, { method:"POST", credentials:"include" });
+    if (!r.ok) {
+      const t = await r.text().catch(()=> "");
+      alert(`Deploy failed: ${r.status} ${r.statusText}\n${t}`);
+      return;
+    }
+    await refreshContainers();
+    await refreshFiles();
+  }
+
+  async function ctrAction(name: string, action: string) {
+    setBusyCtr(name);
+    try {
+      const r = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(name)}/action`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      if (!r.ok) {
+        const t = await r.text().catch(()=> "");
+        alert(`${action} failed: ${r.status} ${r.statusText}\n${t}`);
+      }
+    } finally {
+      setBusyCtr(null);
+      await refreshContainers();
+    }
+  }
+
+  async function fetchLogs(name: string) {
+    const r = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(name)}/logs?tail=200`, { credentials: "include" });
+    const t = await r.text();
+    setLogs(prev => ({ ...prev, [name]: t || "(no logs)" }));
+  }
+  async function fetchStats(name: string) {
+    const r = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(name)}/stats?one_shot=1`, { credentials: "include" });
+    const j = await r.json();
+    setStats(prev => ({ ...prev, [name]: j || {} }));
+  }
+  async function fetchInspectRaw(name: string) {
+    const r = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(name)}/inspect`, { credentials: "include" });
+    const j = await r.json();
+    setInspectRaw(prev => ({ ...prev, [name]: JSON.stringify(j, null, 2) }));
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
@@ -876,6 +958,9 @@ function StackDetailView({
             <>
               <Button onClick={refreshFiles} variant="outline" className="border-slate-700">
                 <RefreshCw className="h-4 w-4 mr-1" /> Refresh
+              </Button>
+              <Button onClick={deployNow} className="bg-[#310937] hover:bg-[#2a0830] text-white">
+                <Play className="h-4 w-4 mr-1" /> Deploy
               </Button>
               <Button onClick={deleteStack} variant="outline" className="border-rose-700 text-rose-200">
                 <Trash2 className="h-4 w-4 mr-1" /> Delete IaC
@@ -915,6 +1000,16 @@ function StackDetailView({
                 <div key={i} className="rounded-lg border border-slate-800 p-3">
                   <div className="flex items-center justify-between">
                     <div className="font-medium text-slate-200">{c.name}</div>
+                    <div className="flex items-center gap-2">
+                      {/* Play/Stop/Kill/Restart/Pause/Resume/Remove */}
+                      <Button size="icon" variant="ghost" title="Start" onClick={()=>ctrAction(c.name, "start")} disabled={busyCtr===c.name}><Play className="h-4 w-4"/></Button>
+                      <Button size="icon" variant="ghost" title="Stop" onClick={()=>ctrAction(c.name, "stop")} disabled={busyCtr===c.name}><Square className="h-4 w-4"/></Button>
+                      <Button size="icon" variant="ghost" title="Kill" onClick={()=>ctrAction(c.name, "kill")} disabled={busyCtr===c.name}><XCircle className="h-4 w-4"/></Button>
+                      <Button size="icon" variant="ghost" title="Restart" onClick={()=>ctrAction(c.name, "restart")} disabled={busyCtr===c.name}><RotateCcw className="h-4 w-4"/></Button>
+                      <Button size="icon" variant="ghost" title="Pause" onClick={()=>ctrAction(c.name, "pause")} disabled={busyCtr===c.name}><Pause className="h-4 w-4"/></Button>
+                      <Button size="icon" variant="ghost" title="Resume" onClick={()=>ctrAction(c.name, "resume")} disabled={busyCtr===c.name}><Play className="h-4 w-4"/></Button>
+                      <Button size="icon" variant="ghost" title="Remove" onClick={()=>ctrAction(c.name, "remove")} disabled={busyCtr===c.name}><Trash2 className="h-4 w-4"/></Button>
+                    </div>
                   </div>
 
                   {/* Facts with aligned center divider */}
@@ -931,26 +1026,54 @@ function StackDetailView({
                     </div>
                   </div>
 
-                  <div className="mt-4 grid md:grid-cols-2 gap-3">
-                    <div className="md:pr-3 md:border-r md:border-slate-800">
-                      <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Environment</div>
-                      {(!c.env || Object.keys(c.env).length === 0) && <div className="text-sm text-slate-500">No environment variables.</div>}
-                      <div className="space-y-1">
-                        {Object.entries(c.env || {}).map(([k, v]) => (
-                          <EnvRow key={k} k={k} v={v} forceShow={revealEnvAll} />
-                        ))}
-                      </div>
+                  {/* Quick actions row */}
+                  <div className="mt-3 flex flex-wrap items-center gap-2">
+                    <QuickRow icon={FileText} label="Logs" onClick={async ()=>{ setLogOpen(p=>({ ...p, [c.name]: !p[c.name] })); if (!logs[c.name]) await fetchLogs(c.name); }} />
+                    <QuickRow icon={Search} label="Inspect" onClick={async ()=>{ await fetchInspectRaw(c.name); setLogOpen(p=>({ ...p, [c.name+"#inspect"]: !p[c.name+"#inspect"] })); }} />
+                    <QuickRow icon={Activity} label="Stats" onClick={async ()=>{ await fetchStats(c.name); setLogOpen(p=>({ ...p, [c.name+"#stats"]: !p[c.name+"#stats"] })); }} />
+                    <QuickRow icon={Terminal} label="Console" onClick={()=>alert("Interactive console coming soon")} disabled title="Coming soon" />
+                    <QuickRow icon={Plug} label="Attach" onClick={()=>alert("Attach console coming soon")} disabled title="Coming soon" />
+                    <QuickRow icon={Bug} label="Refresh" onClick={refreshContainers} />
+                  </div>
+
+                  {/* Panels */}
+                  {logOpen[c.name] && (
+                    <pre className="mt-2 text-xs bg-slate-950/60 border border-slate-800 rounded p-2 text-slate-300 max-h-64 overflow-auto whitespace-pre-wrap">
+                      {logs[c.name] || "Loading…"}
+                    </pre>
+                  )}
+                  {logOpen[c.name+"#inspect"] && (
+                    <pre className="mt-2 text-xs bg-slate-950/60 border border-slate-800 rounded p-2 text-slate-300 max-h-64 overflow-auto">
+{inspectRaw[c.name] || "Loading…"}
+                    </pre>
+                  )}
+                  {logOpen[c.name+"#stats"] && (
+                    <div className="mt-2 text-xs bg-slate-950/60 border border-slate-800 rounded p-2 text-slate-300">
+                      {stats[c.name]
+                        ? <>CPU: {stats[c.name].cpu.toFixed(1)}% · Mem: {(stats[c.name].mem/1024/1024).toFixed(1)} MiB / {(stats[c.name].mem_total/1024/1024).toFixed(0)} MiB</>
+                        : "Loading…"}
                     </div>
-                    <div className="md:pl-3 md:border-l md:border-slate-800">
-                      <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Labels</div>
-                      {(!c.labels || Object.keys(c.labels).length === 0) && <div className="text-sm text-slate-500">No labels.</div>}
-                      {(Object.entries(c.labels || {}).sort(([a],[b]) => a.localeCompare(b))).map(([k,v]) => (
-                        <div key={k} className="flex items-center justify-between gap-2 text-sm">
-                          <div className="text-slate-300">{k}</div>
-                          <div className="text-slate-400 font-mono truncate max-w-[22rem]" title={v}>{v}</div>
-                        </div>
+                  )}
+
+                  <div className="mt-3">
+                    <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Environment</div>
+                    {(!c.env || Object.keys(c.env).length === 0) && <div className="text-sm text-slate-500">No environment variables.</div>}
+                    <div className="space-y-1">
+                      {Object.entries(c.env || {}).map(([k, v]) => (
+                        <EnvRow key={k} k={k} v={v} forceShow={revealEnvAll} />
                       ))}
                     </div>
+                  </div>
+
+                  <div className="mt-3">
+                    <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Labels</div>
+                    {(!c.labels || Object.keys(c.labels).length === 0) && <div className="text-sm text-slate-500">No labels.</div>}
+                    {(Object.entries(c.labels || {}).sort(([a],[b]) => a.localeCompare(b))).map(([k,v]) => (
+                      <div key={k} className="flex items-center justify-between gap-2 text-sm">
+                        <div className="text-slate-300">{k}</div>
+                        <div className="text-slate-400 font-mono truncate max-w-[22rem]" title={v}>{v}</div>
+                      </div>
+                    ))}
                   </div>
 
                   <div className="mt-3">
@@ -963,7 +1086,7 @@ function StackDetailView({
           </Card>
         </div>
 
-        {/* Right: IaC Files / Editor (sticky, full height, elevated) */}
+        {/* Right: IaC Files / Editor (sticky) */}
         <div className="space-y-4 lg:sticky lg:top-4 lg:h-[calc(100vh-140px)] lg:z-10">
           <Card className="bg-slate-900/50 border-slate-800 h-full flex flex-col">
             <CardHeader className="pb-2 shrink-0">
@@ -1078,6 +1201,150 @@ function StackDetailView({
   );
 }
 
+/* ==================== Simple Resource Pages ==================== */
+
+function HostPicker({
+  hosts, value, onChange
+}: { hosts: Host[]; value: string; onChange: (v:string)=>void }) {
+  return (
+    <div className="flex items-center gap-2">
+      <div className="text-sm text-slate-300">Host:</div>
+      <select
+        className="bg-slate-950/50 border border-slate-800 rounded px-2 py-1 text-sm text-slate-200"
+        value={value}
+        onChange={e => onChange(e.target.value)}
+      >
+        {hosts.map(h => <option key={h.name} value={h.name}>{h.name}</option>)}
+      </select>
+    </div>
+  );
+}
+
+function ImagesPage({ hosts }: { hosts: Host[] }) {
+  const [host, setHost] = useState(hosts[0]?.name || "");
+  const [items, setItems] = useState<any[]>([]);
+  useEffect(() => {
+    if (!host) return;
+    (async () => {
+      const r = await fetch(`/api/hosts/${encodeURIComponent(host)}/images`, { credentials:"include" });
+      const j = await r.json();
+      setItems(j.items || []);
+    })();
+  }, [host]);
+  return (
+    <div className="space-y-4">
+      <HostPicker hosts={hosts} value={host} onChange={setHost} />
+      <div className="overflow-hidden rounded-xl border border-slate-800">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-900/70 text-slate-300">
+            <tr>
+              <th className="p-3 text-left">Repository</th>
+              <th className="p-3 text-left">Tag</th>
+              <th className="p-3 text-left">Image ID</th>
+              <th className="p-3 text-left">Size</th>
+              <th className="p-3 text-left">Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((it, i) => (
+              <tr key={i} className="border-t border-slate-800">
+                <td className="p-3 text-slate-300">{it.repo || "—"}</td>
+                <td className="p-3 text-slate-300">{it.tag || "—"}</td>
+                <td className="p-3 text-slate-300">{it.id}</td>
+                <td className="p-3 text-slate-300">{(it.size/1024/1024).toFixed(1)} MiB</td>
+                <td className="p-3 text-slate-300">{formatDT(it.created)}</td>
+              </tr>
+            ))}
+            {items.length === 0 && <tr><td className="p-4 text-slate-500" colSpan={5}>No images.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function NetworksPage({ hosts }: { hosts: Host[] }) {
+  const [host, setHost] = useState(hosts[0]?.name || "");
+  const [items, setItems] = useState<any[]>([]);
+  useEffect(() => {
+    if (!host) return;
+    (async () => {
+      const r = await fetch(`/api/hosts/${encodeURIComponent(host)}/networks`, { credentials:"include" });
+      const j = await r.json();
+      setItems(j.items || []);
+    })();
+  }, [host]);
+  return (
+    <div className="space-y-4">
+      <HostPicker hosts={hosts} value={host} onChange={setHost} />
+      <div className="overflow-hidden rounded-xl border border-slate-800">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-900/70 text-slate-300">
+            <tr>
+              <th className="p-3 text-left">Name</th>
+              <th className="p-3 text-left">Driver</th>
+              <th className="p-3 text-left">Scope</th>
+              <th className="p-3 text-left">ID</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((it, i) => (
+              <tr key={i} className="border-t border-slate-800">
+                <td className="p-3 text-slate-300">{it.name}</td>
+                <td className="p-3 text-slate-300">{it.driver}</td>
+                <td className="p-3 text-slate-300">{it.scope}</td>
+                <td className="p-3 text-slate-300">{it.id}</td>
+              </tr>
+            ))}
+            {items.length === 0 && <tr><td className="p-4 text-slate-500" colSpan={4}>No networks.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
+function VolumesPage({ hosts }: { hosts: Host[] }) {
+  const [host, setHost] = useState(hosts[0]?.name || "");
+  const [items, setItems] = useState<any[]>([]);
+  useEffect(() => {
+    if (!host) return;
+    (async () => {
+      const r = await fetch(`/api/hosts/${encodeURIComponent(host)}/volumes`, { credentials:"include" });
+      const j = await r.json();
+      setItems(j.items || []);
+    })();
+  }, [host]);
+  return (
+    <div className="space-y-4">
+      <HostPicker hosts={hosts} value={host} onChange={setHost} />
+      <div className="overflow-hidden rounded-xl border border-slate-800">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-900/70 text-slate-300">
+            <tr>
+              <th className="p-3 text-left">Name</th>
+              <th className="p-3 text-left">Driver</th>
+              <th className="p-3 text-left">Mountpoint</th>
+              <th className="p-3 text-left">Scope</th>
+            </tr>
+          </thead>
+          <tbody>
+            {items.map((it, i) => (
+              <tr key={i} className="border-t border-slate-800">
+                <td className="p-3 text-slate-300">{it.name}</td>
+                <td className="p-3 text-slate-300">{it.driver}</td>
+                <td className="p-3 text-slate-300">{it.mountpoint}</td>
+                <td className="p-3 text-slate-300">{it.scope}</td>
+              </tr>
+            ))}
+            {items.length === 0 && <tr><td className="p-4 text-slate-500" colSpan={4}>No volumes.</td></tr>}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  );
+}
+
 /* ==================== Login Gate ==================== */
 
 function LoginGate() {
@@ -1118,15 +1385,11 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
-  const [hostScanState, setHostScanState] = useState<Record<string, {
-    kind: "ok" | "skipped" | "error"; saved?: number; reason?: string; err?: string
-  }>>({});
-
   const [metricsCache, setMetricsCache] = useState<
     Record<string, { stacks: number; containers: number; drift: number; errors: number }>
   >({});
 
-  const [page, setPage] = useState<"deployments" | "host" | "stack">("deployments");
+  const [page, setPage] = useState<"deployments" | "host" | "stack" | "images" | "networks" | "volumes">("deployments");
   const [activeHost, setActiveHost] = useState<Host | null>(null);
   const [activeStack, setActiveStack] = useState<{ name: string; iacId?: number } | null>(null);
 
@@ -1169,7 +1432,7 @@ export default function App() {
       } catch (e: any) {
         setErr(e?.message || "Failed to load hosts");
       } finally {
-               setLoading(false);
+        setLoading(false);
       }
     })();
   }, [authed]);
@@ -1303,13 +1566,7 @@ export default function App() {
       const res = await fetch("/api/scan/all", { method: "POST", credentials: "include" });
       if (res.status === 401) { window.location.replace("/auth/login"); return; }
       const data = await res.json();
-      const map: Record<string, { kind: "ok" | "skipped" | "error"; saved?: number; reason?: string; err?: string }> = {};
-      for (const r of data.results || []) {
-        if (r.skipped) map[r.host] = { kind: "skipped", reason: r.reason };
-        else if (r.err) map[r.host] = { kind: "error", err: r.err };
-        else map[r.host] = { kind: "ok", saved: r.saved ?? 0 };
-      }
-      setHostScanState(prev => ({ ...prev, ...map }));
+      // optional: surface errors
       await refreshMetricsForHosts(hosts.map(h => h.name));
     } finally {
       setScanning(false);
@@ -1330,18 +1587,14 @@ export default function App() {
     setPage("stack");
   }
 
-  if (sessionChecked && !authed) {
-    return <LoginGate />;
-  }
-  if (!sessionChecked) {
-    return <div className="min-h-screen bg-slate-950" />;
-  }
+  if (sessionChecked && !authed) return <LoginGate />;
+  if (!sessionChecked) return <div className="min-h-screen bg-slate-950" />;
 
   const hostMetrics = activeHost ? (metricsCache[activeHost.name] || { stacks: 0, containers: 0, drift: 0, errors: 0 }) : null;
 
   return (
     <div className="min-h-screen flex">
-      <LeftNav page={page} onGoDeployments={() => setPage("deployments")} />
+      <LeftNav page={page} onGo={(p)=> setPage(p as any)} />
 
       <div className="flex-1 min-w-0">
         <main className="px-6 py-6 space-y-6">
@@ -1423,7 +1676,6 @@ export default function App() {
                               setScanning(true);
                               try {
                                 await fetch(`/api/scan/host/${encodeURIComponent(h.name)}`, { method: "POST", credentials: "include" });
-                                setHostScanState(prev => ({ ...prev, [h.name]: { kind: "ok" } }));
                                 await refreshMetricsForHosts([h.name]);
                               } finally {
                                 setScanning(false);
@@ -1435,7 +1687,7 @@ export default function App() {
                             Scan
                           </Button>
                         </td>
-                        <td className="p-3">{/* per-host results summarized in metrics */}</td>
+                        <td className="p-3">{/* summarized in metrics */}</td>
                       </tr>
                     ))}
                     {!loading && filteredHosts.length === 0 && (
@@ -1464,6 +1716,10 @@ export default function App() {
               onBack={() => setPage('host')}
             />
           )}
+
+          {page === 'images' && <ImagesPage hosts={hosts} />}
+          {page === 'networks' && <NetworksPage hosts={hosts} />}
+          {page === 'volumes' && <VolumesPage hosts={hosts} />}
 
           <div className="pt-6 pb-10 text-center text-xs text-slate-500">
             © 2025 PrecisionPlanIT &amp; SoFMeRight (Kai)

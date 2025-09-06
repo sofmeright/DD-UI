@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -14,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/docker/docker/api/types"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 )
@@ -30,7 +32,7 @@ func makeRouter() http.Handler {
 	// CORS – permissive for now; tighten later
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "DELETE", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Content-Type", "Authorization", "X-Confirm-Reveal"},
 		AllowCredentials: true,
 		MaxAge:           300,
@@ -106,6 +108,28 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"items": items})
 			})
 
+			// Container actions (start/stop/kill/restart/pause/resume/remove)
+			priv.Post("/hosts/{name}/containers/{ctr}/action", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				ctr := chi.URLParam(r, "ctr")
+				var body struct {
+					Action string `json:"action"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				if body.Action == "" {
+					http.Error(w, "action required", http.StatusBadRequest)
+					return
+				}
+				if err := doContainerAction(r.Context(), host, ctr, strings.ToLower(body.Action)); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+			})
+
 			// Inspect a single container by host (for the stack compare page)
 			priv.Get("/hosts/{name}/containers/{ctr}/inspect", func(w http.ResponseWriter, r *http.Request) {
 				host := chi.URLParam(r, "name")
@@ -116,6 +140,36 @@ func makeRouter() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, out)
+			})
+
+			// Container logs (tail text)
+			priv.Get("/hosts/{name}/containers/{ctr}/logs", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				ctr := chi.URLParam(r, "ctr")
+				tail := strings.TrimSpace(r.URL.Query().Get("tail"))
+				if tail == "" {
+					tail = "200"
+				}
+				out, err := getContainerLogs(r.Context(), host, ctr, tail)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				w.Header().Set("Cache-Control", "no-store")
+				_, _ = w.Write([]byte(out))
+			})
+
+			// Container stats (one-shot)
+			priv.Get("/hosts/{name}/containers/{ctr}/stats", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				ctr := chi.URLParam(r, "ctr")
+				s, err := getContainerStatsOneShot(r.Context(), host, ctr)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, s)
 			})
 
 			// Trigger on-demand scan for a single host
@@ -302,12 +356,41 @@ func makeRouter() http.Handler {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
-				id, err := upsertIacStack(r.Context(), repoID, body.ScopeKind, body.ScopeName, body.StackName, rel, "", "unmanaged", "", "none", true)
+				id, err := upsertIacStack(r.Context(), repoID, body.ScopeKind, body.ScopeName, body.StackName, rel, "", "unmanaged", "", "none", false)
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
 				writeJSON(w, http.StatusOK, map[string]any{"id": id, "rel_path": rel})
+			})
+
+			// Update stack flags (PATCH)
+			priv.Patch("/iac/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {
+				idStr := chi.URLParam(r, "id")
+				id, _ := strconv.ParseInt(idStr, 10, 64)
+				var body struct {
+					IacEnabled *bool  `json:"iac_enabled"`
+					PullPolicy string `json:"pull_policy"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				if body.IacEnabled != nil {
+					_, err := db.Exec(r.Context(), `UPDATE iac_stacks SET iac_enabled=$1 WHERE id=$2`, *body.IacEnabled, id)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+				}
+				if strings.TrimSpace(body.PullPolicy) != "" {
+					_, err := db.Exec(r.Context(), `UPDATE iac_stacks SET pull_policy=$1 WHERE id=$2`, strings.TrimSpace(body.PullPolicy), id)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"status": "updated"})
 			})
 
 			// Delete a stack (optionally delete files too)
@@ -409,7 +492,7 @@ func makeRouter() http.Handler {
 				_, _ = w.Write(data)
 			})
 
-			// Create/update file content
+			// Create/update file content (with SOPS auto-encrypt)
 			//   POST /api/iac/stacks/{id}/file  { "path": "docker-compose/host/stack/x.env", "content":"..." }
 			priv.Post("/iac/stacks/{id}/file", func(w http.ResponseWriter, r *http.Request) {
 				idStr := chi.URLParam(r, "id")
@@ -442,30 +525,48 @@ func makeRouter() http.Handler {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
+
+				// write plaintext first
 				if err := os.WriteFile(full, []byte(body.Content), 0o644); err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
-				sum, sz := sha256File(full)
+
+				// decide role if not provided
+				low := strings.ToLower(full)
 				if body.Role == "" {
-					low := strings.ToLower(full)
 					switch {
 					case strings.HasSuffix(low, ".yml"), strings.HasSuffix(low, ".yaml"):
 						body.Role = "compose"
 					case strings.HasSuffix(low, ".sh"):
 						body.Role = "script"
-					case strings.Contains(low, ".env") || strings.HasSuffix(low, ".env"):
+					case strings.Contains(low, ".env"):
 						body.Role = "env"
 					default:
 						body.Role = "other"
 					}
 				}
+
+				// SOPS auto encrypt?
+				shouldAuto := body.Sops ||
+					strings.HasSuffix(strings.ToLower(filepath.Base(body.Path)), "_private.env") ||
+					strings.HasSuffix(strings.ToLower(filepath.Base(body.Path)), "_secret.env")
+				if shouldAuto && sopsKeyAvailable() {
+					if err := sopsEncryptFile(r.Context(), full, body.Role); err != nil {
+						http.Error(w, "sops encrypt failed: "+err.Error(), http.StatusBadRequest)
+						return
+					}
+					log.Printf("sops: encrypted %s", full)
+					body.Sops = true
+				}
+
+				sum, sz := sha256File(full)
 				relFromRoot := filepath.ToSlash(strings.TrimPrefix(full, strings.TrimSuffix(root, "/")+"/"))
 				if err := upsertIacFile(r.Context(), id, body.Role, relFromRoot, body.Sops, sum, sz); err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
-				writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "size": sz, "sha256": sum})
+				writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "size": sz, "sha256": sum, "sops": body.Sops})
 			})
 
 			// Delete a file from a stack
@@ -491,6 +592,51 @@ func makeRouter() http.Handler {
 				_ = os.Remove(full) // best effort
 				_ = deleteIacFileRow(r.Context(), id, rel)
 				writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
+			})
+
+			// Deploy a stack now
+			priv.Post("/iac/stacks/{id}/deploy", func(w http.ResponseWriter, r *http.Request) {
+				idStr := chi.URLParam(r, "id")
+				id, _ := strconv.ParseInt(idStr, 10, 64)
+				ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
+				defer cancel()
+				if err := deployStack(ctx, id); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]string{"status": "deployed"})
+			})
+
+			/* ---- Images / Networks / Volumes ---- */
+
+			priv.Get("/hosts/{name}/images", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				items, err := listImages(r.Context(), host)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"items": items})
+			})
+
+			priv.Get("/hosts/{name}/networks", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				items, err := listNetworks(r.Context(), host)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"items": items})
+			})
+
+			priv.Get("/hosts/{name}/volumes", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				items, err := listVolumes(r.Context(), host)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"items": items})
 			})
 		})
 	})
@@ -580,4 +726,254 @@ func joinUnder(root, rel string) (string, error) {
 		return "", errors.New("outside root")
 	}
 	return full, nil
+}
+
+/* ---------- SOPS helpers ---------- */
+
+func sopsKeyAvailable() bool {
+	if strings.TrimSpace(os.Getenv("SOPS_AGE_KEY")) != "" {
+		return true
+	}
+	if f := strings.TrimSpace(os.Getenv("SOPS_AGE_KEY_FILE")); f != "" {
+		_, err := os.Stat(f)
+		return err == nil
+	}
+	return false
+}
+
+func sopsEncryptFile(ctx context.Context, fullPath string, role string) error {
+	args := []string{"-e", "-i"}
+	// try to hint input type for dotenv
+	low := strings.ToLower(fullPath)
+	if role == "env" || strings.HasSuffix(low, ".env") {
+		args = append(args, "--input-type", "dotenv")
+	}
+	args = append(args, fullPath)
+	cmd := exec.CommandContext(ctx, "sops", args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return errors.New(string(out))
+	}
+	return nil
+}
+
+/* ---------- Deploy helper ---------- */
+
+func deployStack(ctx context.Context, id int64) error {
+	var rel, scopeKind, scopeName, deployKind string
+	if err := db.QueryRow(ctx, `SELECT rel_path, scope_kind, scope_name, deploy_kind FROM iac_stacks WHERE id=$1`, id).
+		Scan(&rel, &scopeKind, &scopeName, &deployKind); err != nil {
+		return err
+	}
+	root, err := getRepoRootForStack(ctx, id)
+	if err != nil {
+		return err
+	}
+	dir, err := joinUnder(root, rel)
+	if err != nil {
+		return err
+	}
+
+	// Try compose first
+	candidates := []string{"docker-compose.yaml", "docker-compose.yml", "compose.yaml", "compose.yml"}
+	var composePath string
+	for _, c := range candidates {
+		p := filepath.Join(dir, c)
+		if _, err := os.Stat(p); err == nil {
+			composePath = p
+			break
+		}
+	}
+	if composePath != "" {
+		// prefer "docker compose"
+		cmd := exec.CommandContext(ctx, "docker", "compose", "-f", composePath, "up", "-d", "--remove-orphans")
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err == nil {
+			log.Printf("deploy: compose up ok id=%d dir=%s", id, dir)
+			return nil
+		}
+		// fallback to docker-compose
+		cmd = exec.CommandContext(ctx, "docker-compose", "-f", composePath, "up", "-d", "--remove-orphans")
+		cmd.Dir = dir
+		out, err = cmd.CombinedOutput()
+		if err != nil {
+			return errors.New("compose up failed: " + string(out))
+		}
+		log.Printf("deploy: docker-compose up ok id=%d dir=%s", id, dir)
+		return nil
+	}
+
+	// Try deploy.sh
+	if _, err := os.Stat(filepath.Join(dir, "deploy.sh")); err == nil {
+		cmd := exec.CommandContext(ctx, "bash", "deploy.sh")
+		cmd.Dir = dir
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			return errors.New("deploy.sh failed: " + string(out))
+		}
+		log.Printf("deploy: script ok id=%d dir=%s", id, dir)
+		return nil
+	}
+
+	return errors.New("no compose file or deploy.sh found")
+}
+
+/* ---------- Images / Networks / Volumes helpers ---------- */
+
+func listImages(ctx context.Context, host string) ([]map[string]any, error) {
+	h, err := GetHostByName(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	cli, err := dockerClientForHost(h)
+	if err != nil {
+		return nil, err
+	}
+	defer cli.Close()
+
+	imgs, err := cli.ImageList(ctx, types.ImageListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	var out []map[string]any
+	for _, im := range imgs {
+		repo, tag := "", ""
+		if len(im.RepoTags) > 0 {
+			parts := strings.SplitN(im.RepoTags[0], ":", 2)
+			repo = parts[0]
+			if len(parts) == 2 {
+				tag = parts[1]
+			}
+		}
+		out = append(out, map[string]any{
+			"id":      im.ID[:19],
+			"repo":    repo,
+			"tag":     tag,
+			"size":    im.Size,
+			"created": time.Unix(im.Created, 0).Format(time.RFC3339),
+		})
+	}
+	return out, nil
+}
+
+func listNetworks(ctx context.Context, host string) ([]map[string]any, error) {
+	h, err := GetHostByName(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	cli, err := dockerClientForHost(h)
+	if err != nil {
+		return nil, err
+	}
+	defer cli.Close()
+
+	nets, err := cli.NetworkList(ctx, types.NetworkListOptions{})
+	if err != nil {
+		return nil, err
+	}
+	var out []map[string]any
+	for _, n := range nets {
+		out = append(out, map[string]any{
+			"id":     n.ID[:12],
+			"name":   n.Name,
+			"driver": n.Driver,
+			"scope":  n.Scope,
+		})
+	}
+	return out, nil
+}
+
+func listVolumes(ctx context.Context, host string) ([]map[string]any, error) {
+	h, err := GetHostByName(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	cli, err := dockerClientForHost(h)
+	if err != nil {
+		return nil, err
+	}
+	defer cli.Close()
+
+	vols, err := cli.VolumeList(ctx, types.Filters{})
+	if err != nil {
+		return nil, err
+	}
+	var out []map[string]any
+	for _, v := range vols.Volumes {
+		out = append(out, map[string]any{
+			"name":       v.Name,
+			"driver":     v.Driver,
+			"mountpoint": v.Mountpoint,
+			"scope":      v.Scope,
+		})
+	}
+	return out, nil
+}
+
+/* ---------- Container logs/stats helpers ---------- */
+
+func getContainerLogs(ctx context.Context, host, ctr, tail string) (string, error) {
+	h, err := GetHostByName(ctx, host)
+	if err != nil {
+		return "", err
+	}
+	cli, err := dockerClientForHost(h)
+	if err != nil {
+		return "", err
+	}
+	defer cli.Close()
+
+	rc, err := cli.ContainerLogs(ctx, ctr, types.ContainerLogsOptions{
+		ShowStdout: true,
+		ShowStderr: true,
+		Tail:       tail,
+		Timestamps: false,
+	})
+	if err != nil {
+		return "", err
+	}
+	defer rc.Close()
+	b, _ := io.ReadAll(rc)
+	// docker multiplexed logs may have headers; keep simple for MVP
+	return string(b), nil
+}
+
+func getContainerStatsOneShot(ctx context.Context, host, ctr string) (map[string]any, error) {
+	h, err := GetHostByName(ctx, host)
+	if err != nil {
+		return nil, err
+	}
+	cli, err := dockerClientForHost(h)
+	if err != nil {
+		return nil, err
+	}
+	defer cli.Close()
+
+	stats, err := cli.ContainerStats(ctx, ctr, false)
+	if err != nil {
+		return nil, err
+	}
+	defer stats.Body.Close()
+
+	var s types.StatsJSON
+	if err := json.NewDecoder(stats.Body).Decode(&s); err != nil {
+		return nil, err
+	}
+
+	// CPU calc (same as docker CLI approach)
+	var cpuPercent float64
+	cpuDelta := float64(s.CPUStats.CPUUsage.TotalUsage - s.PreCPUStats.CPUUsage.TotalUsage)
+	sysDelta := float64(s.CPUStats.SystemUsage - s.PreCPUStats.SystemUsage)
+	if sysDelta > 0.0 && cpuDelta > 0.0 {
+		cpuPercent = (cpuDelta / sysDelta) * float64(len(s.CPUStats.CPUUsage.PercpuUsage)) * 100.0
+	}
+	mem := float64(s.MemoryStats.Usage)
+	memLimit := float64(s.MemoryStats.Limit)
+
+	return map[string]any{
+		"cpu":       cpuPercent,
+		"mem":       mem,
+		"mem_total": memLimit,
+	}, nil
 }

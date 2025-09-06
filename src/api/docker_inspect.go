@@ -39,7 +39,7 @@ type VolumeOut struct {
 }
 
 func dockerClientForHost(h HostRow) (*client.Client, error) {
-	url, _ := dockerURLFor(h) // in this codebase second return is a string, not error
+	url, _ := dockerURLFor(h)
 	return client.NewClientWithOpts(
 		client.WithHost(url),
 		client.FromEnv,
@@ -100,7 +100,7 @@ func inspectContainerByHost(ctx context.Context, hostName, container string) (*I
 		out.RestartPolicy = string(info.HostConfig.RestartPolicy.Name)
 	}
 
-	// Ports (from HostConfig.PortBindings: map[nat.Port][]nat.PortBinding)
+	// Ports
 	if info.HostConfig != nil && info.HostConfig.PortBindings != nil {
 		for port, bindings := range info.HostConfig.PortBindings {
 			parts := strings.SplitN(string(port), "/", 2)

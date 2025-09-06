@@ -17,6 +17,14 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /bin/ddui
 
 # --- Runtime ---
 FROM debian:bookworm-slim
+
+LABEL maintainer="SoFMeRight <sofmeright@gmail.com>" \
+      org.opencontainers.image.title="DDUI (Designated Driver UI)" \
+      description="Sometimes you need someone else to take the wheel, DDUI... Declarative, security-first Docker orchestration. Please docker responsibly." \
+      org.opencontainers.image.description="Sometimes you need someone else to take the wheel, DDUI... Declarative, security-first Docker orchestration. Please docker responsibly." \
+      org.opencontainers.image.source="https://github.com/sofmeright/DDUI.git" \
+      org.opencontainers.image.licenses="GPL-3.0"
+
 RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates curl openssh-client tzdata && rm -rf /var/lib/apt/lists/*
 WORKDIR /home/ddui
 COPY --from=api /bin/ddui /usr/local/bin/ddui

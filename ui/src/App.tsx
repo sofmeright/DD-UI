@@ -980,33 +980,30 @@ function StackDetailView({
   }
 
   async function toggleAutoDevOps(checked: boolean) {
-    if (!stackIacId) {
+    let id = stackIacId;
+    if (!id) {
       try {
-        const id = await ensureStack();
+        id = await ensureStack();
         setStackIacId(id);
       } catch (e: any) {
         alert(e?.message || "Unable to create stack for Auto DevOps");
         return;
       }
     }
-    
+  
     // Check if stack has content before enabling
     if (checked && files.length === 0) {
       alert("This stack needs compose files or services before Auto DevOps can be enabled. Add content first.");
       return;
     }
-    
+  
     setAutoDevOps(checked);
-    const r = await fetch(`/api/iac/stacks/${stackIacId!}`, {
+    const r = await fetch(`/api/iac/stacks/${id}`, {
       method: "PATCH",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ iac_enabled: checked }),
     });
-    if (!r.ok) {
-      alert(`Failed to update Auto DevOps: ${r.status} ${r.statusText}`);
-      setAutoDevOps(!checked);
-    }
   }
 
   async function deployNow() {

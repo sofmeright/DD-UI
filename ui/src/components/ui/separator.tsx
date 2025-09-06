@@ -1,3 +1,4 @@
+// ui/src/components/ui/separator.tsx
 import React from "react";
 
 export function Separator({ orientation="horizontal", className="" }: {orientation?: "horizontal"|"vertical"; className?: string}) {

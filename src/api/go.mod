@@ -1,3 +1,4 @@
+// src/api/go.mod
 module ddui
 
 go 1.23

@@ -1,3 +1,4 @@
+// ui/src/components/ui/tabs.tsx
 import React, { createContext, useContext, useState } from "react";
 
 type Ctx = { value: string; setValue: (v:string)=>void };
@@ -16,7 +17,7 @@ export function TabsTrigger({ value, children }: React.PropsWithChildren<{value:
   const ctx = useContext(TabsCtx)!;
   const active = ctx.value === value;
   return (
-    <button
+    <button type="button"
       className={`px-4 py-2 text-sm border ${active ? "bg-slate-800 text-white border-slate-700" : "bg-slate-900 text-slate-300 border-slate-800 hover:bg-slate-800"}`}
       onClick={()=>ctx.setValue(value)}
     >{children}</button>

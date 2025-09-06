@@ -1,3 +1,4 @@
+// ui/src/auth.tsx
 import React from "react";
 
 type User = { sub: string; email: string; name: string; picture?: string };
@@ -49,7 +50,7 @@ function LoginSplash() {
         <div className="text-xl font-bold mb-2">Designated Driver UI</div>
         <div className="text-sm text-slate-400 mb-6">Sign in with your identity provider to continue.</div>
         <a
-          href="/login"
+          href="/auth/login"
           className="inline-flex items-center justify-center rounded-md px-4 py-2 font-medium bg-[#74ecbe] text-slate-900 hover:bg-[#63d9ad]"
         >
           Sign in with SSO

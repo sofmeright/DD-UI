@@ -1,3 +1,4 @@
+// ui/src/components/ui/input.tsx
 import React from "react";
 
 export function Input(props: React.InputHTMLAttributes<HTMLInputElement>) {

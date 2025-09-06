@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 	"log"
-	"time"
 
 	"github.com/docker/docker/api/types/container"
 )

@@ -1,4 +1,4 @@
-# DDUI (Designated Driver UI)
+# <img src="ui/public/DDUI-Logo.png" alt="DDUI (Designated Driver UI)" width="35" height="35" /> DDUI (Designated Driver UI)
 > Declarative, security-first Docker orchestration. DDUI compares runtime state (containers on your hosts) to declared state (your IaC repo), shows drift, and puts encryption (SOPS/AGE) and DevOps ergonomics first.
 
 <img src="example/screenshots/DDUI-deployments-host.png" width="750" /><img src="example/screenshots/DDUI-deployments-stack.png" width="750" />

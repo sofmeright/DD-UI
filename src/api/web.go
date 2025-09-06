@@ -30,7 +30,7 @@ func makeRouter() http.Handler {
 	// CORS – permissive for now; tighten later
 	r.Use(cors.Handler(cors.Options{
 		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "OPTIONS"},
+		AllowedMethods:   []string{"GET", "POST", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Accept", "Content-Type", "Authorization", "X-Confirm-Reveal"},
 		AllowCredentials: true,
 		MaxAge:           300,
@@ -49,7 +49,9 @@ func makeRouter() http.Handler {
 		api.Group(func(priv chi.Router) {
 			priv.Use(RequireAuth)
 
-			// List hosts with optional filters:
+			/* ---------- Runtime / Inventory ---------- */
+
+			// Hosts listing with filters
 			priv.Get("/hosts", func(w http.ResponseWriter, r *http.Request) {
 				items, err := ListHosts(r.Context())
 				if err != nil {
@@ -102,6 +104,18 @@ func makeRouter() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, map[string]any{"items": items})
+			})
+
+			// Inspect a single container by host (for the stack compare page)
+			priv.Get("/hosts/{name}/containers/{ctr}/inspect", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				ctr := chi.URLParam(r, "ctr")
+				out, err := inspectContainerByHost(r.Context(), host, ctr)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, out)
 			})
 
 			// Trigger on-demand scan for a single host
@@ -224,7 +238,9 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
 			})
 
-			// IaC: force scan (local)
+			/* ---------- IaC ---------- */
+
+			// Force IaC scan (local)
 			priv.Post("/iac/scan", func(w http.ResponseWriter, r *http.Request) {
 				ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
 				defer cancel()
@@ -240,7 +256,7 @@ func makeRouter() http.Handler {
 				})
 			})
 
-			// IaC: fetch desired stacks/services for a host (host + groups)
+			// Desired stacks/services for a host (host + groups)
 			priv.Get("/hosts/{name}/iac", func(w http.ResponseWriter, r *http.Request) {
 				name := chi.URLParam(r, "name")
 				items, err := listIacStacksForHost(r.Context(), name)
@@ -249,6 +265,77 @@ func makeRouter() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, map[string]any{"stacks": items})
+			})
+
+			// Create a new stack in the local IaC repo
+			// POST /api/iac/stacks  { scope_kind:"host"|"group", scope_name:"hostA", stack_name:"myapp" }
+			priv.Post("/iac/stacks", func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					ScopeKind string `json:"scope_kind"`
+					ScopeName string `json:"scope_name"`
+					StackName string `json:"stack_name"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				if body.ScopeKind == "" || body.ScopeName == "" || body.StackName == "" {
+					http.Error(w, "scope_kind, scope_name, stack_name required", http.StatusBadRequest)
+					return
+				}
+
+				root := strings.TrimSpace(env(iacDefaultRootEnv, iacDefaultRoot))
+				dirname := strings.TrimSpace(env(iacDirNameEnv, iacDefaultDirName))
+				rel := filepath.ToSlash(filepath.Join(dirname, body.ScopeName, body.StackName))
+				full, err := joinUnder(root, rel)
+				if err != nil {
+					http.Error(w, "invalid path", http.StatusBadRequest)
+					return
+				}
+				if err := os.MkdirAll(full, 0o755); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+
+				repoID, err := upsertIacRepoLocal(r.Context(), root)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				id, err := upsertIacStack(r.Context(), repoID, body.ScopeKind, body.ScopeName, body.StackName, rel, "", "unmanaged", "", "none", true)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"id": id, "rel_path": rel})
+			})
+
+			// Delete a stack (optionally delete files too)
+			// DELETE /api/iac/stacks/{id}?delete_files=1
+			priv.Delete("/iac/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {
+				idStr := chi.URLParam(r, "id")
+				id, _ := strconv.ParseInt(idStr, 10, 64)
+				deleteFiles := r.URL.Query().Get("delete_files") == "1" || r.URL.Query().Get("delete_files") == "true"
+
+				root, err := getRepoRootForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+
+				var rel string
+				_ = db.QueryRow(r.Context(), `SELECT rel_path FROM iac_stacks WHERE id=$1`, id).Scan(&rel)
+
+				if _, err := db.Exec(r.Context(), `DELETE FROM iac_stacks WHERE id=$1`, id); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if deleteFiles && rel != "" {
+					if full, err := joinUnder(root, rel); err == nil {
+						_ = os.RemoveAll(full) // best effort
+					}
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
 			})
 
 			// ===== IaC Editor APIs =====
@@ -337,7 +424,7 @@ func makeRouter() http.Handler {
 					http.Error(w, "bad json", http.StatusBadRequest)
 					return
 				}
-				if strings.TrimSpace(body.Path) == "" { // <-- fixed extra ')'
+				if strings.TrimSpace(body.Path) == "" {
 					http.Error(w, "path required", http.StatusBadRequest)
 					return
 				}
@@ -379,6 +466,31 @@ func makeRouter() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "size": sz, "sha256": sum})
+			})
+
+			// Delete a file from a stack
+			//   DELETE /api/iac/stacks/{id}/file?path=rel/path
+			priv.Delete("/iac/stacks/{id}/file", func(w http.ResponseWriter, r *http.Request) {
+				idStr := chi.URLParam(r, "id")
+				id, _ := strconv.ParseInt(idStr, 10, 64)
+				rel := strings.TrimSpace(r.URL.Query().Get("path"))
+				if rel == "" {
+					http.Error(w, "missing path", http.StatusBadRequest)
+					return
+				}
+				root, err := getRepoRootForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				full, err := joinUnder(root, rel)
+				if err != nil {
+					http.Error(w, "invalid path", http.StatusBadRequest)
+					return
+				}
+				_ = os.Remove(full) // best effort
+				_ = deleteIacFileRow(r.Context(), id, rel)
+				writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
 			})
 		})
 	})

@@ -28,7 +28,7 @@ type IacStackRow struct {
 	Compose    string `json:"compose_file,omitempty"`
 	DeployKind string `json:"deploy_kind"`
 	PullPolicy string `json:"pull_policy,omitempty"`
-	SopsStatus string `json:"sops_status"`
+	SopsStatus string `json:"sops_status"` // all|partial|none
 	IacEnabled bool   `json:"iac_enabled"`
 }
 
@@ -122,20 +122,20 @@ func pruneIacStacksNotIn(ctx context.Context, repoID int64, keepIDs []int64) (in
 	return cmd.RowsAffected(), nil
 }
 
-// ---- Read for API
+/* ---------- Read for API ---------- */
 
 type IacStackOut struct {
-	ID         int64           `json:"id"`
-	Name       string          `json:"name"` // stack_name
-	ScopeKind  string          `json:"scope_kind"`
-	ScopeName  string          `json:"scope_name"`
-	DeployKind string          `json:"deploy_kind"`
-	PullPolicy string          `json:"pull_policy"`
-	SopsStatus string          `json:"sops_status"`
-	IacEnabled bool            `json:"iac_enabled"`
-	RelPath    string          `json:"rel_path"`
-	Compose    string          `json:"compose_file,omitempty"`
-	Services   []IacServiceRow `json:"services"`
+	ID         int64             `json:"id"`
+	Name       string            `json:"name"` // stack_name
+	ScopeKind  string            `json:"scope_kind"`
+	ScopeName  string            `json:"scope_name"`
+	DeployKind string            `json:"deploy_kind"`
+	PullPolicy string            `json:"pull_policy"`
+	SopsStatus string            `json:"sops_status"`
+	IacEnabled bool              `json:"iac_enabled"`
+	RelPath    string            `json:"rel_path"`
+	Compose    string            `json:"compose_file,omitempty"`
+	Services   []IacServiceRow   `json:"services"`
 }
 
 func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, error) {
@@ -144,6 +144,7 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 		return nil, err
 	}
 
+	// gather group names from host row (assuming stored in DB; fallback empty)
 	groups := h.Groups
 	if groups == nil {
 		groups = []string{}
@@ -249,4 +250,9 @@ func listFilesForStack(ctx context.Context, stackID int64) ([]IacFileMetaRow, er
 		out = append(out, it)
 	}
 	return out, rows.Err()
+}
+
+func deleteIacFileRow(ctx context.Context, stackID int64, relPath string) error {
+	_, err := db.Exec(ctx, `DELETE FROM iac_stack_files WHERE stack_id=$1 AND rel_path=$2`, stackID, relPath)
+	return err
 }

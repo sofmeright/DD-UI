@@ -1,13 +1,74 @@
 version: "3.8"
 services:
-  ddui:
-    build: .
-    image: ddui:dev
-    ports:
-      - "3000:3000"
+  
+  ddui-postgres:
+    container_name: ddui-postgres
+    image: postgres:16-alpine
     environment:
-      - DDUI_BIND=0.0.0.0:3000
+      - POSTGRES_DB=ddui
+      - POSTGRES_USER=prplanit
+      - POSTGRES_PASSWORD_FILE=/run/secrets/pg_pass
+    volumes:
+      - /opt/docker/ddui/postgres:/var/lib/postgresql/data
+    secrets:
+      - pg_pass
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      
+  ddui-app:
+    container_name: ddui-app
+    depends_on:
+      ddui-postgres:
+        condition: service_healthy
+    image: cr.pcfae.com/prplanit/ddui:v0.2.1
+    ports:
+      - "3000:8080"
+    env_file: stack.env
+    environment:
+      - DDUI_BIND=0.0.0.0:8080
+      - DDUI_DB_HOST=ddui-postgres
+      - DDUI_DB_PORT=5432
+      - DDUI_DB_NAME=ddui
+      - DDUI_DB_USER=prplanit
+      - DDUI_DB_PASS_FILE=/run/secrets/pg_pass
+      - DDUI_DB_SSLMODE=disable
+      - DDUI_DB_MIGRATE=true
+      # or provide a single DSN:
+      # - DDUI_DB_DSN=postgres://ddui:...@db:5432/ddui?sslmode=disable
+      # - DDUI_INVENTORY_PATH=/data/inventory
       - DDUI_SCAN_KIND=local
       - DDUI_SCAN_ROOT=/data/docker-compose
+      # SSH to each host for docker scans
+      - DDUI_SSH_USER=kai           # or a limited user in docker group
+      - DDUI_SSH_PORT=22
+      - DDUI_SSH_USE_SUDO=false      # true if your user needs sudo
+      - DDUI_SSH_STRICT_HOST_KEY=false
+      - DDUI_SSH_KEY=@/run/secrets/ddui_ssh_key
+      # Scanner Settings
+      - DDUI_SCAN_AUTO=true
+      - DDUI_SCAN_ON_START=true
+      - DDUI_SCAN_INTERVAL=1m
+      - DDUI_SCAN_HOST_TIMEOUT=45s
+      - DDUI_SCAN_CONCURRENCY=3
+      # Remote & SSH Settings
+      - DDUI_LOCAL_HOST=anchorage
+      #- COOKIE_DOMAIN=anchorage
+      - COOKIE_SECURE=false
+      - OIDC_ISSUER_URL=https://sso.prplanit.com
+      - OIDC_REDIRECT_URL=http://anchorage:3000/auth/callback
+      - OIDC_SCOPES=openid email profile
+      # - OIDC_ALLOWED_EMAIL_DOMAIN # (optional; blocks others)
+    secrets:
+      - pg_pass
     volumes:
-      - ./example:/data
+      - /opt/docker/ddui/data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+
+secrets:
+  ddui_ssh_key:
+    file: /opt/docker/ddui/secrets/id_ed25519   # your private key
+  pg_pass:
+    file: /opt/docker/ddui/secrets/postgres_password.txt

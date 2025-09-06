@@ -1,4 +1,3 @@
-// ui/src/App.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import {
   Boxes, Layers, AlertTriangle, XCircle, Search, RefreshCw, ArrowLeft,
@@ -7,7 +6,7 @@ import {
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
-import { Input } from "@/components/ui/input";
+  import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 
 /* ==================== Types ==================== */
@@ -429,7 +428,6 @@ function HostStacksView({
     if (!confirm(`Delete IaC for stack "${s.name}"? This removes IaC files/metadata but not runtime containers.`)) return;
     const r = await fetch(`/api/iac/stacks/${s.iacId}`, { method: "DELETE", credentials: "include" });
     if (!r.ok) { alert(`Failed to delete: ${r.status} ${r.statusText}`); return; }
-    // wipe IaC-related state for this row
     setStacks(prev => prev.map((row, i) => i === index
       ? { ...row, iacId: undefined, hasIac: false, iacEnabled: false, pullPolicy: undefined, sops: false, drift: "unknown" }
       : row
@@ -646,20 +644,17 @@ function MiniEditor({
   const [decryptView, setDecryptView] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  // Keep path in sync with parent picker
   useEffect(() => { setPath(initialPath); setContent(""); setErr(null); setDecryptView(false); }, [initialPath]);
 
-  // Auto-open file when editor is shown or path changes
   useEffect(() => {
     let cancel = false;
     (async () => {
-      if (!stackId) return; // new stack; nothing to load yet
+      if (!stackId) return;
       setLoading(true); setErr(null);
       try {
         const url = `/api/iac/stacks/${stackId}/file?path=${encodeURIComponent(path)}`;
         const r = await fetch(url, { credentials: "include" });
         if (!r.ok) {
-          // 404 is ok for new files; just start empty
           if (r.status !== 404) throw new Error(`${r.status} ${r.statusText}`);
           setContent("");
         } else {
@@ -715,25 +710,25 @@ function MiniEditor({
   }
 
   return (
-    <Card className="bg-slate-900/40 border-slate-800">
-      <CardHeader className="pb-2">
+    <Card className="bg-slate-900/40 border-slate-800 h-full flex flex-col">
+      <CardHeader className="pb-2 shrink-0">
         <CardTitle className="text-sm text-slate-200">Editor</CardTitle>
       </CardHeader>
-      <CardContent className="space-y-3">
-        <div className="flex gap-2">
+      <CardContent className="flex-1 min-h-0 flex flex-col gap-3">
+        <div className="flex gap-2 shrink-0">
           <Input value={path} onChange={e => setPath(e.target.value)} placeholder="docker-compose/host/stack/compose.yaml" />
           <Button onClick={revealSops} variant="outline" className="border-indigo-700 text-indigo-200">Reveal SOPS</Button>
         </div>
-        {err && <div className="text-xs text-rose-300">Error: {err}</div>}
-        {decryptView && <div className="text-xs text-amber-300">Warning: Decrypted secrets are visible in your browser until you navigate away.</div>}
+        {err && <div className="text-xs text-rose-300 shrink-0">Error: {err}</div>}
+        {decryptView && <div className="text-xs text-amber-300 shrink-0">Warning: Decrypted secrets are visible in your browser until you navigate away.</div>}
         <textarea
           id={id}
-          className="w-full min-h-[220px] text-sm bg-slate-950/50 border border-slate-800 rounded p-2 font-mono text-slate-200"
+          className="w-full flex-1 min-h-0 text-sm bg-slate-950/50 border border-slate-800 rounded p-2 font-mono text-slate-200"
           value={content}
           onChange={e => setContent(e.target.value)}
           placeholder={loading ? "Loading…" : "File content…"}
         />
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between shrink-0">
           <label className="text-sm text-slate-300 inline-flex items-center gap-2">
             <input type="checkbox" checked={sops} onChange={e => setSops(e.target.checked)} />
             Mark as SOPS file
@@ -830,7 +825,6 @@ function StackDetailView({
 
   async function toggleAutoDevOps(checked: boolean) {
     if (!stackIacId) {
-      // create lazily if user enables without files
       try {
         const id = await ensureStack();
         setStackIacId(id);
@@ -881,11 +875,11 @@ function StackDetailView({
       {err && <div className="text-sm px-3 py-2 rounded-lg border border-rose-800/50 bg-rose-950/50 text-rose-200">Error: {err}</div>}
 
       <div className="grid lg:grid-cols-2 gap-4">
-        {/* Left: Runtime detail */}
+        {/* Left: Active Containers */}
         <div className="space-y-4">
           <Card className="bg-slate-900/50 border-slate-800">
             <CardHeader className="pb-2">
-              <CardTitle className="text-slate-200 text-lg">Runtime</CardTitle>
+              <CardTitle className="text-slate-200 text-lg">Active Containers</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
               {containers.length === 0 && (
@@ -899,14 +893,14 @@ function StackDetailView({
                     <div className="font-medium text-slate-200">{c.name}</div>
                   </div>
 
-                  {/* Facts, alphabetical */}
+                  {/* Facts with aligned center divider */}
                   <div className="mt-2 grid md:grid-cols-2 gap-3">
                     <div className="space-y-2 md:pr-3 md:border-r md:border-slate-800">
                       <Fact label="CMD" value={<span className="font-mono">{(c.cmd || []).join(" ") || "—"}</span>} />
                       <Fact label="ENTRYPOINT" value={<span className="font-mono">{(c.entrypoint || []).join(" ") || "—"}</span>} />
                       <Fact label="Image" value={<span className="font-mono">{c.image || "—"}</span>} />
                     </div>
-                    <div className="space-y-2">
+                    <div className="space-y-2 md:pl-3 md:border-l md:border-slate-800">
                       <Fact label="Networks" value={(c.networks || []).join(", ") || "—"} />
                       <Fact label="Ports" value={<PortsBlock ports={c.ports} />} />
                       <Fact label="Restart policy" value={c.restart_policy || "—"} />
@@ -914,7 +908,7 @@ function StackDetailView({
                   </div>
 
                   <div className="mt-4 grid md:grid-cols-2 gap-3">
-                    <div>
+                    <div className="md:pr-3 md:border-r md:border-slate-800">
                       <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Environment</div>
                       {(!c.env || Object.keys(c.env).length === 0) && <div className="text-sm text-slate-500">No environment variables.</div>}
                       <div className="space-y-1">
@@ -946,24 +940,24 @@ function StackDetailView({
         </div>
 
         {/* Right: IaC Files / Editor (sticky, full height) */}
-        <div className="space-y-4 lg:sticky lg:top-4 lg:h-[calc(100vh-140px)] lg:overflow-auto">
-          <Card className="bg-slate-900/50 border-slate-800 h-full">
-            <CardHeader className="pb-2">
+        <div className="space-y-4 lg:sticky lg:top-4 lg:h-[calc(100vh-140px)]">
+          <Card className="bg-slate-900/50 border-slate-800 h-full flex flex-col">
+            <CardHeader className="pb-2 shrink-0">
               <CardTitle className="text-slate-200 text-lg">IaC Files</CardTitle>
             </CardHeader>
-            <CardContent className="space-y-3">
+            <CardContent className="flex-1 min-h-0 flex flex-col gap-3">
               {!stackIacId && (
-                <div className="text-sm text-amber-300">
+                <div className="text-sm text-amber-300 shrink-0">
                   No IaC yet. Use the buttons below — the <b>first Save</b> will create the IaC stack automatically.
                 </div>
               )}
 
-              <div className="flex items-center justify-between">
+              <div className="flex items-center justify-between shrink-0">
                 <div className="text-slate-300 text-sm">{files.length} file(s)</div>
                 <div className="flex items-center gap-2">
                   <Button
                     size="sm"
-                    onClick={() => setEditPath(`docker-compose/${host.name}/${stackName}/compose.yaml`)}
+                    onClick={() => setEditPath(`docker-compose/${host.name}/${stackName}/docker-compose.yaml`)}
                   >
                     <FileText className="h-4 w-4 mr-1" /> New compose
                   </Button>
@@ -986,7 +980,7 @@ function StackDetailView({
                 </div>
               </div>
 
-              <div className="rounded-lg border border-slate-800 overflow-hidden">
+              <div className="rounded-lg border border-slate-800 overflow-hidden shrink-0">
                 <table className="w-full text-sm">
                   <thead className="bg-slate-900/70 text-slate-300">
                     <tr>
@@ -1032,14 +1026,16 @@ function StackDetailView({
               </div>
 
               {editPath && (
-                <MiniEditor
-                  key={editPath}
-                  id="stack-editor"
-                  initialPath={editPath}
-                  stackId={stackIacId}
-                  ensureStack={ensureStack}
-                  refresh={() => { setEditPath(null); refreshFiles(); }}
-                />
+                <div className="flex-1 min-h-0">
+                  <MiniEditor
+                    key={editPath}
+                    id="stack-editor"
+                    initialPath={editPath}
+                    stackId={stackIacId}
+                    ensureStack={ensureStack}
+                    refresh={() => { setEditPath(null); refreshFiles(); }}
+                  />
+                </div>
               )}
             </CardContent>
           </Card>
@@ -1149,7 +1145,7 @@ export default function App() {
       } catch (e: any) {
         setErr(e?.message || "Failed to load hosts");
       } finally {
-        setLoading(false);
+               setLoading(false);
       }
     })();
   }, [authed]);
@@ -1323,13 +1319,15 @@ export default function App() {
 
       <div className="flex-1 min-w-0">
         <main className="px-6 py-6 space-y-6">
-          <div className="grid md:grid-cols-5 gap-4">
-            <MetricCard title="Hosts" value={metrics.hosts} icon={Boxes} accent />
-            <MetricCard title="Stacks" value={metrics.stacks} icon={Boxes} />
-            <MetricCard title="Containers" value={metrics.containers} icon={Layers} />
-            <MetricCard title="Drift" value={<span className="text-amber-400">{metrics.drift}</span>} icon={AlertTriangle} />
-            <MetricCard title="Errors" value={<span className="text-rose-400">{metrics.errors}</span>} icon={XCircle} />
-          </div>
+          {page !== 'stack' && (
+            <div className="grid md:grid-cols-5 gap-4">
+              <MetricCard title="Hosts" value={metrics.hosts} icon={Boxes} accent />
+              <MetricCard title="Stacks" value={metrics.stacks} icon={Boxes} />
+              <MetricCard title="Containers" value={metrics.containers} icon={Layers} />
+              <MetricCard title="Drift" value={<span className="text-amber-400">{metrics.drift}</span>} icon={AlertTriangle} />
+              <MetricCard title="Errors" value={<span className="text-rose-400">{metrics.errors}</span>} icon={XCircle} />
+            </div>
+          )}
 
           {page === 'deployments' && (
             <div className="space-y-4">

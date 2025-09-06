@@ -30,12 +30,6 @@ type Health struct {
 	Edition   string    `json:"edition"`
 }
 
-// truthy env helper: 1/true/yes/on
-func envBool(key string) bool {
-	v := strings.TrimSpace(strings.ToLower(os.Getenv(key)))
-	return v == "1" || v == "true" || v == "yes" || v == "on"
-}
-
 func makeRouter() http.Handler {
 	r := chi.NewRouter()
 
@@ -589,7 +583,7 @@ func makeRouter() http.Handler {
 				var data []byte
 				if decrypt {
 					// require explicit confirmation + server-side allow
-					if !envBool("DDUI_ALLOW_SOPS_DECRYPT") {
+					if !envBool("DDUI_ALLOW_SOPS_DECRYPT", "false") {
 						http.Error(w, "decrypt disabled on server", http.StatusForbidden)
 						return
 					}
@@ -675,7 +669,7 @@ func makeRouter() http.Handler {
 				}
 
 				// SOPS auto-encrypt if requested or filename matches.
-				// Try when we have either a private key (decrypt capability) OR recipients (encrypt capability).
+				// Try when we have either a private key OR recipients.
 				shouldSops := body.Sops || strings.HasSuffix(strings.ToLower(body.Path), "_private.env") || strings.HasSuffix(strings.ToLower(body.Path), "_secret.env")
 				if shouldSops && (os.Getenv("SOPS_AGE_KEY") != "" || os.Getenv("SOPS_AGE_KEY_FILE") != "" || os.Getenv("SOPS_AGE_RECIPIENTS") != "") {
 					args := []string{"-e", "-i"}
@@ -683,7 +677,7 @@ func makeRouter() http.Handler {
 					if strings.HasSuffix(strings.ToLower(body.Path), ".env") {
 						args = []string{"-e", "-i", "--input-type", "dotenv"}
 					}
-					// if recipients env is set, pass them explicitly so we don't rely on a sops config file
+					// pass recipients explicitly (space- or newline-separated)
 					if rec := strings.TrimSpace(os.Getenv("SOPS_AGE_RECIPIENTS")); rec != "" {
 						for _, rcp := range strings.Fields(rec) {
 							if rcp != "" {

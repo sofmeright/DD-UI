@@ -20,8 +20,8 @@ FROM debian:bookworm-slim
 
 LABEL maintainer="SoFMeRight <sofmeright@gmail.com>" \
       org.opencontainers.image.title="DDUI (Designated Driver UI)" \
-      description="Sometimes you need someone else to take the wheel, DDUI... Declarative, security-first Docker orchestration. Please docker responsibly." \
-      org.opencontainers.image.description="Sometimes you need someone else to take the wheel, DDUI... Declarative, security-first Docker orchestration. Please docker responsibly." \
+      description="Sometimes you need someone else to take the wheel... DDUI is a declarative, security-first Docker orchestration engine. Please Docker responsibly." \
+      org.opencontainers.image.description="Sometimes you need someone else to take the wheel... DDUI is a declarative, security-first Docker orchestration engine. Please Docker responsibly." \
       org.opencontainers.image.source="https://github.com/sofmeright/DDUI.git" \
       org.opencontainers.image.licenses="GPL-3.0"
 

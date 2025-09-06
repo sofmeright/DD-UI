@@ -58,7 +58,7 @@ type IacStack = {
   deploy_kind: "compose" | "script" | "unmanaged" | string;
   pull_policy?: string;
   sops_status: "all" | "partial" | "none" | string;
-  iac_enabled: boolean; // interpreted as "Auto DevOps" (auto-redeploy on IaC changes)
+  iac_enabled: boolean; // Auto DevOps
   rel_path: string;
   compose?: string;
   services: IacService[] | null | undefined;
@@ -415,14 +415,25 @@ function HostStacksView({
 
   function handleToggleAuto(sIndex: number, enabled: boolean) {
     const s = stacks[sIndex];
-    if (!s.iacId) return; // nothing to toggle if not in IaC yet
-    // optimistic UI update
+    if (!s.iacId) return;
     setStacks(prev => prev.map((row, i) => i === sIndex ? { ...row, iacEnabled: enabled } : row));
     setAutoDevOps(s.iacId!, enabled).catch(err => {
       alert(`Failed to update Auto DevOps: ${err?.message || err}`);
-      // revert
       setStacks(prev => prev.map((row, i) => i === sIndex ? { ...row, iacEnabled: !enabled } : row));
     });
+  }
+
+  async function deleteStackAt(index: number) {
+    const s = stacks[index];
+    if (!s.iacId) return;
+    if (!confirm(`Delete IaC for stack "${s.name}"? This removes IaC files/metadata but not runtime containers.`)) return;
+    const r = await fetch(`/api/iac/stacks/${s.iacId}`, { method: "DELETE", credentials: "include" });
+    if (!r.ok) { alert(`Failed to delete: ${r.status} ${r.statusText}`); return; }
+    // wipe IaC-related state for this row
+    setStacks(prev => prev.map((row, i) => i === index
+      ? { ...row, iacId: undefined, hasIac: false, iacEnabled: false, pullPolicy: undefined, sops: false, drift: "unknown" }
+      : row
+    ));
   }
 
   return (
@@ -480,13 +491,23 @@ function HostStacksView({
                 )}
               </div>
             </div>
-            <div className="flex items-center gap-3">
+            <div className="flex items-center gap-2">
               <span className="text-sm text-slate-300">Auto DevOps</span>
               <Switch
                 checked={!!s.iacEnabled}
                 onCheckedChange={(v) => handleToggleAuto(idx, !!v)}
                 disabled={!s.iacId}
               />
+              {s.iacId && (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  title="Delete IaC for this stack"
+                  onClick={() => deleteStackAt(idx)}
+                >
+                  <Trash2 className="h-4 w-4 text-rose-300" />
+                </Button>
+              )}
             </div>
           </CardHeader>
           <CardContent className="pt-0">
@@ -611,7 +632,7 @@ type MiniEditorProps = {
   id: string;
   initialPath: string;
   stackId?: number;
-  ensureStack: () => Promise<number>; // create lazily before first save
+  ensureStack: () => Promise<number>; // lazy create before first save
   refresh: () => void;
 };
 
@@ -625,26 +646,34 @@ function MiniEditor({
   const [decryptView, setDecryptView] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  useEffect(() => { setPath(initialPath); setContent(""); }, [initialPath]);
+  // Keep path in sync with parent picker
+  useEffect(() => { setPath(initialPath); setContent(""); setErr(null); setDecryptView(false); }, [initialPath]);
 
-  async function loadFile(decrypt: boolean) {
-    if (!stackId) { setErr("Create the stack by saving a file first."); return; }
-    setLoading(true); setErr(null);
-    try {
-      const url = `/api/iac/stacks/${stackId}/file?path=${encodeURIComponent(path)}${decrypt ? "&decrypt=1" : ""}`;
-      const r = await fetch(url, {
-        credentials: "include",
-        headers: decrypt ? { "X-Confirm-Reveal": "yes" } : undefined,
-      });
-      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-      const txt = await r.text();
-      setContent(txt);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to load");
-    } finally {
-      setLoading(false);
-    }
-  }
+  // Auto-open file when editor is shown or path changes
+  useEffect(() => {
+    let cancel = false;
+    (async () => {
+      if (!stackId) return; // new stack; nothing to load yet
+      setLoading(true); setErr(null);
+      try {
+        const url = `/api/iac/stacks/${stackId}/file?path=${encodeURIComponent(path)}`;
+        const r = await fetch(url, { credentials: "include" });
+        if (!r.ok) {
+          // 404 is ok for new files; just start empty
+          if (r.status !== 404) throw new Error(`${r.status} ${r.statusText}`);
+          setContent("");
+        } else {
+          const txt = await r.text();
+          if (!cancel) setContent(txt);
+        }
+      } catch (e: any) {
+        if (!cancel) setErr(e?.message || "Failed to load");
+      } finally {
+        if (!cancel) setLoading(false);
+      }
+    })();
+    return () => { cancel = true; };
+  }, [stackId, path]);
 
   async function saveFile() {
     setLoading(true); setErr(null);
@@ -665,6 +694,26 @@ function MiniEditor({
     }
   }
 
+  async function revealSops() {
+    if (!stackId) { setErr("Create the stack by saving a file first."); return; }
+    setDecryptView(true);
+    setLoading(true); setErr(null);
+    try {
+      const url = `/api/iac/stacks/${stackId}/file?path=${encodeURIComponent(path)}&decrypt=1`;
+      const r = await fetch(url, {
+        credentials: "include",
+        headers: { "X-Confirm-Reveal": "yes" },
+      });
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      const txt = await r.text();
+      setContent(txt);
+    } catch (e: any) {
+      setErr(e?.message || "Failed to decrypt");
+    } finally {
+      setLoading(false);
+    }
+  }
+
   return (
     <Card className="bg-slate-900/40 border-slate-800">
       <CardHeader className="pb-2">
@@ -673,8 +722,7 @@ function MiniEditor({
       <CardContent className="space-y-3">
         <div className="flex gap-2">
           <Input value={path} onChange={e => setPath(e.target.value)} placeholder="docker-compose/host/stack/compose.yaml" />
-          <Button onClick={() => loadFile(false)} variant="outline" className="border-slate-700">Open</Button>
-          <Button onClick={() => { setDecryptView(true); loadFile(true); }} variant="outline" className="border-indigo-700 text-indigo-200">Reveal SOPS</Button>
+          <Button onClick={revealSops} variant="outline" className="border-indigo-700 text-indigo-200">Reveal SOPS</Button>
         </div>
         {err && <div className="text-xs text-rose-300">Error: {err}</div>}
         {decryptView && <div className="text-xs text-amber-300">Warning: Decrypted secrets are visible in your browser until you navigate away.</div>}
@@ -782,7 +830,7 @@ function StackDetailView({
 
   async function toggleAutoDevOps(checked: boolean) {
     if (!stackIacId) {
-      // create lazily if user tries to enable Auto DevOps without files
+      // create lazily if user enables without files
       try {
         const id = await ensureStack();
         setStackIacId(id);
@@ -897,20 +945,19 @@ function StackDetailView({
           </Card>
         </div>
 
-        {/* Right: IaC Files / Editor (sticky) */}
-        <div className="space-y-4 lg:sticky lg:top-6 lg:max-h-[calc(100vh-160px)] lg:overflow-auto">
-          <Card className="bg-slate-900/50 border-slate-800">
+        {/* Right: IaC Files / Editor (sticky, full height) */}
+        <div className="space-y-4 lg:sticky lg:top-4 lg:h-[calc(100vh-140px)] lg:overflow-auto">
+          <Card className="bg-slate-900/50 border-slate-800 h-full">
             <CardHeader className="pb-2">
               <CardTitle className="text-slate-200 text-lg">IaC Files</CardTitle>
             </CardHeader>
             <CardContent className="space-y-3">
               {!stackIacId && (
                 <div className="text-sm text-amber-300">
-                  No IaC yet. Use the buttons below — the **first Save** will create the IaC stack automatically.
+                  No IaC yet. Use the buttons below — the <b>first Save</b> will create the IaC stack automatically.
                 </div>
               )}
 
-              {/* New file actions always visible; creation is lazy on Save */}
               <div className="flex items-center justify-between">
                 <div className="text-slate-300 text-sm">{files.length} file(s)</div>
                 <div className="flex items-center gap-2">
@@ -1063,7 +1110,6 @@ export default function App() {
   const [activeHost, setActiveHost] = useState<Host | null>(null);
   const [activeStack, setActiveStack] = useState<{ name: string; iacId?: number } | null>(null);
 
-  // Session gate
   const [sessionChecked, setSessionChecked] = useState(false);
   const [authed, setAuthed] = useState<boolean>(false);
 
@@ -1214,7 +1260,6 @@ export default function App() {
   useEffect(() => {
     if (!authed || !hosts.length) return;
     refreshMetricsForHosts(hosts.map(h => h.name));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [authed, hosts]);
 
   const metrics = useMemo(() => {

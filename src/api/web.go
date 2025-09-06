@@ -33,13 +33,24 @@ type Health struct {
 func makeRouter() http.Handler {
 	r := chi.NewRouter()
 
-	// CORS – permissive for now; tighten later
+	// CORS – locked down for credentials
+	uiOrigin := strings.TrimSpace(env("UI_ORIGIN", ""))
+	allowedOrigins := []string{}
+	if uiOrigin != "" {
+		allowedOrigins = append(allowedOrigins, uiOrigin)
+	}
+	// dev helpers
+	allowedOrigins = append(allowedOrigins,
+		"http://localhost:5173",
+		"http://127.0.0.1:5173",
+	)
+
 	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
-		AllowedMethods:   []string{"GET", "POST", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Content-Type", "Authorization", "X-Confirm-Reveal"},
+		AllowedOrigins:   allowedOrigins, // no "*"
+		AllowedMethods:   []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
+		AllowedHeaders:   []string{"Content-Type", "X-Confirm-Reveal"},
 		AllowCredentials: true,
-		MaxAge:           300,
+		MaxAge:           600,
 	}))
 
 	// -------- API
@@ -711,12 +722,41 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
 			})
 
-			// Deploy endpoint (MVP placeholder – returns 202)
+			// Deploy endpoint (now wired)
 			priv.Post("/iac/stacks/{id}/deploy", func(w http.ResponseWriter, r *http.Request) {
 				idStr := chi.URLParam(r, "id")
-				log.Printf("deploy: requested stack id=%s", idStr)
-				w.WriteHeader(http.StatusAccepted)
-				_, _ = w.Write([]byte(`{"status":"queued"}`))
+				id, err := strconv.ParseInt(idStr, 10, 64)
+				if err != nil || id <= 0 {
+					http.Error(w, "bad id", http.StatusBadRequest)
+					return
+				}
+
+				// sanity check: must have something to deploy
+				ok, derr := stackHasContent(r.Context(), id)
+				if derr != nil {
+					http.Error(w, derr.Error(), http.StatusInternalServerError)
+					return
+				}
+				if !ok {
+					http.Error(w, "stack has no files", http.StatusBadRequest)
+					return
+				}
+
+				// async deploy with timeout + logging
+				go func(stackID int64) {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+					defer cancel()
+					if err := deployStack(ctx, stackID); err != nil {
+						log.Printf("deploy: stack %d failed: %v", stackID, err)
+						return
+					}
+					log.Printf("deploy: stack %d ok", stackID)
+				}(id)
+
+				writeJSON(w, http.StatusAccepted, map[string]any{
+					"status": "queued",
+					"id":     id,
+				})
 			})
 		})
 	})

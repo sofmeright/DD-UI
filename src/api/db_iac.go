@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 )
 
@@ -125,17 +126,17 @@ func pruneIacStacksNotIn(ctx context.Context, repoID int64, keepIDs []int64) (in
 /* ---------- Read for API ---------- */
 
 type IacStackOut struct {
-	ID         int64             `json:"id"`
-	Name       string            `json:"name"` // stack_name
-	ScopeKind  string            `json:"scope_kind"`
-	ScopeName  string            `json:"scope_name"`
-	DeployKind string            `json:"deploy_kind"`
-	PullPolicy string            `json:"pull_policy"`
-	SopsStatus string            `json:"sops_status"`
-	IacEnabled bool              `json:"iac_enabled"`
-	RelPath    string            `json:"rel_path"`
-	Compose    string            `json:"compose_file,omitempty"`
-	Services   []IacServiceRow   `json:"services"`
+	ID         int64           `json:"id"`
+	Name       string          `json:"name"` // stack_name
+	ScopeKind  string          `json:"scope_kind"`
+	ScopeName  string          `json:"scope_name"`
+	DeployKind string          `json:"deploy_kind"`
+	PullPolicy string          `json:"pull_policy"`
+	SopsStatus string          `json:"sops_status"`
+	IacEnabled bool            `json:"iac_enabled"`
+	RelPath    string          `json:"rel_path"`
+	Compose    string          `json:"compose_file,omitempty"`
+	Services   []IacServiceRow `json:"services"`
 }
 
 func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, error) {
@@ -255,4 +256,18 @@ func listFilesForStack(ctx context.Context, stackID int64) ([]IacFileMetaRow, er
 func deleteIacFileRow(ctx context.Context, stackID int64, relPath string) error {
 	_, err := db.Exec(ctx, `DELETE FROM iac_stack_files WHERE stack_id=$1 AND rel_path=$2`, stackID, relPath)
 	return err
+}
+
+// stackHasContent returns true if the stack has any tracked files or a compose_file set.
+func stackHasContent(ctx context.Context, stackID int64) (bool, error) {
+	var n int64
+	if err := db.QueryRow(ctx, `SELECT COUNT(1) FROM iac_stack_files WHERE stack_id=$1`, stackID).Scan(&n); err != nil {
+		return false, err
+	}
+	if n > 0 {
+		return true, nil
+	}
+	var compose string
+	_ = db.QueryRow(ctx, `SELECT COALESCE(compose_file,'') FROM iac_stacks WHERE id=$1`, stackID).Scan(&compose)
+	return strings.TrimSpace(compose) != "", nil
 }

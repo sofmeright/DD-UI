@@ -10,6 +10,7 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -31,12 +32,12 @@ type User struct {
 }
 
 var (
-	oidcProv            *oidc.Provider
-	oidcVerifier        *oidc.IDTokenVerifier
-	oauthCfg            *oauth2.Config
-	store               *sessions.CookieStore
-	cfg                 AuthConfig
-	endSessionEndpoint  string // discovered from .well-known
+	oidcProv           *oidc.Provider
+	oidcVerifier       *oidc.IDTokenVerifier
+	oauthCfg           *oauth2.Config
+	store              *sessions.CookieStore
+	cfg                AuthConfig
+	endSessionEndpoint string // discovered from .well-known
 )
 
 type AuthConfig struct {
@@ -50,7 +51,7 @@ type AuthConfig struct {
 	SecureCookies bool
 	CookieDomain  string
 
-	PostLogoutRedirectURL string // <-- add
+	PostLogoutRedirectURL string // used for RP-initiated logout
 }
 
 const (
@@ -116,16 +117,16 @@ func InitAuthFromEnv() error {
 	}
 
 	cfg = AuthConfig{
-		Issuer:        env("OIDC_ISSUER_URL", ""),
-		ClientID:      env("OIDC_CLIENT_ID", ""),
-		ClientSecret:  cs,
-		RedirectURL:   redirect,
-		Scopes:        scopes(env("OIDC_SCOPES", "openid email profile")),
-		SessionSecret: []byte(sec),
-		AllowedDomain: strings.ToLower(env("OIDC_ALLOWED_EMAIL_DOMAIN", "")),
-		SecureCookies: secure,
-		CookieDomain:  env("COOKIE_DOMAIN", ""),
-		PostLogoutRedirectURL: env("OIDC_POST_LOGOUT_REDIRECT_URL", ""),
+		Issuer:                 env("OIDC_ISSUER_URL", ""),
+		ClientID:               env("OIDC_CLIENT_ID", ""),
+		ClientSecret:           cs,
+		RedirectURL:            redirect,
+		Scopes:                 scopes(env("OIDC_SCOPES", "openid email profile")),
+		SessionSecret:          []byte(sec),
+		AllowedDomain:          strings.ToLower(env("OIDC_ALLOWED_EMAIL_DOMAIN", "")),
+		SecureCookies:          secure,
+		CookieDomain:           env("COOKIE_DOMAIN", ""),
+		PostLogoutRedirectURL:  env("OIDC_POST_LOGOUT_REDIRECT_URL", ""),
 	}
 
 	if cfg.Issuer == "" || cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURL == "" {
@@ -147,7 +148,7 @@ func InitAuthFromEnv() error {
 		endSessionEndpoint = strings.TrimSpace(disc.EndSessionEndpoint)
 	}
 	if endSessionEndpoint == "" {
-		log.Printf("auth: no end_session_endpoint found in discovery; RP-logout will fall back to /login")
+		log.Printf("auth: no end_session_endpoint found in discovery; RP-logout will fall back to local clear")
 	}
 
 	oidcVerifier = oidcProv.Verifier(&oidc.Config{ClientID: cfg.ClientID})
@@ -159,22 +160,28 @@ func InitAuthFromEnv() error {
 		Scopes:       cfg.Scopes,
 	}
 
-	// ---- Session cookie store (picks up derived Secure flag)
+	// ---- Session cookie store
+	// Use SameSite=None for broadest compatibility when API/UI run on different origins;
+	// fall back to Lax for non-secure local dev.
+	sameSite := http.SameSiteLaxMode
+	if cfg.SecureCookies {
+		sameSite = http.SameSiteNoneMode
+	}
 	store = sessions.NewCookieStore(cfg.SessionSecret)
 	store.Options = &sessions.Options{
 		Path:     "/",
 		MaxAge:   cookieMaxAge,
 		HttpOnly: true,
 		Secure:   cfg.SecureCookies,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: sameSite,
 		Domain:   cfg.CookieDomain,
 	}
 
 	return nil
 }
 
-func scopes(s string) []string { /* unchanged */ return strings.Fields(s) }
-func randHex(n int) string     { /* unchanged */ b := make([]byte, n/2); _, _ = rand.Read(b); return hex.EncodeToString(b) }
+func scopes(s string) []string { return strings.Fields(s) }
+func randHex(n int) string     { b := make([]byte, n/2); _, _ = rand.Read(b); return hex.EncodeToString(b) }
 
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	if oauthCfg == nil || oidcProv == nil {
@@ -195,7 +202,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   300, // 5 minutes
 		HttpOnly: true,
 		Secure:   cfg.SecureCookies,
-		SameSite: http.SameSiteLaxMode, // works for top-level GET redirects
+		SameSite: http.SameSiteLaxMode, // safe for top-level redirects
 		Domain:   cfg.CookieDomain,
 	}
 	_ = tmp.Save(r, w)
@@ -204,7 +211,6 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	authURL := oauthCfg.AuthCodeURL(state, oidc.Nonce(nonce))
 	http.Redirect(w, r, authURL, http.StatusFound)
 }
-
 
 func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	// Read and immediately expire the temporary oauth cookie
@@ -227,7 +233,7 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- define rawID here ---
+	// --- raw id_token for RP-logout ---
 	rawID, ok := tok.Extra("id_token").(string)
 	if !ok {
 		http.Error(w, "no id_token", http.StatusBadGateway)
@@ -244,14 +250,14 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- define claims here ---
+	// --- claims ---
 	var claims struct {
 		Sub    string `json:"sub"`
 		Email  string `json:"email"`
 		Name   string `json:"name"`
 		Pic    string `json:"picture"`
-		HD     string `json:"hd"`     // Google hosted domain (if used)
-		Domain string `json:"domain"` // some providers set this
+		HD     string `json:"hd"`
+		Domain string `json:"domain"`
 		Exp    int64  `json:"exp"`
 	}
 	if err := idt.Claims(&claims); err != nil {
@@ -287,40 +293,64 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func LogoutHandler(w http.ResponseWriter, r *http.Request) {
-    // expire main session
-    sess, _ := store.Get(r, sessionName)
-    for k := range sess.Values {
-        delete(sess.Values, k)
-    }
-    sess.Options = &sessions.Options{
-        Path:     "/",
-        MaxAge:   -1,
-        HttpOnly: true,
-        Secure:   cfg.SecureCookies,
-        SameSite: http.SameSiteLaxMode,
-        Domain:   cfg.CookieDomain,
-    }
-    _ = sess.Save(r, w)
+	// read id_token for RP-initiated logout BEFORE clearing
+	sess, _ := store.Get(r, sessionName)
+	rawID, _ := sess.Values["id_token"].(string)
 
-    // expire oauth temp cookie too
-    tmp, _ := store.Get(r, oauthTmpName)
-    tmp.Options = &sessions.Options{
-        Path:     "/",
-        MaxAge:   -1,
-        HttpOnly: true,
-        Secure:   cfg.SecureCookies,
-        SameSite: http.SameSiteLaxMode,
-        Domain:   cfg.CookieDomain,
-    }
-    _ = tmp.Save(r, w)
+	// expire main session
+	for k := range sess.Values {
+		delete(sess.Values, k)
+	}
+	// match store options; SameSite mirrors InitAuthFromEnv choice
+	sameSite := http.SameSiteLaxMode
+	if cfg.SecureCookies {
+		sameSite = http.SameSiteNoneMode
+	}
+	sess.Options = &sessions.Options{
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   cfg.SecureCookies,
+		SameSite: sameSite,
+		Domain:   cfg.CookieDomain,
+	}
+	_ = sess.Save(r, w)
 
-    // If the UI calls this via fetch, 204 is fine.
-    // If it's a <form>, do a redirect so user sees the app again.
-    if r.Header.Get("Accept") == "application/json" {
-        w.WriteHeader(http.StatusNoContent)
-        return
-    }
-    http.Redirect(w, r, "/", http.StatusSeeOther)
+	// expire oauth temp cookie too
+	tmp, _ := store.Get(r, oauthTmpName)
+	tmp.Options = &sessions.Options{
+		Path:     "/",
+		MaxAge:   -1,
+		HttpOnly: true,
+		Secure:   cfg.SecureCookies,
+		SameSite: http.SameSiteLaxMode,
+		Domain:   cfg.CookieDomain,
+	}
+	_ = tmp.Save(r, w)
+
+	// If discovery had an end_session_endpoint and we have an id_token, do RP-initiated logout.
+	if endSessionEndpoint != "" && strings.TrimSpace(rawID) != "" {
+		u, _ := url.Parse(endSessionEndpoint)
+		q := u.Query()
+		q.Set("id_token_hint", rawID)
+		if cfg.PostLogoutRedirectURL != "" {
+			q.Set("post_logout_redirect_uri", cfg.PostLogoutRedirectURL)
+		}
+		// Some IdPs expect client_id too
+		if cfg.ClientID != "" {
+			q.Set("client_id", cfg.ClientID)
+		}
+		u.RawQuery = q.Encode()
+		http.Redirect(w, r, u.String(), http.StatusSeeOther) // 303
+		return
+	}
+
+	// Fallback: JSON callers get 204, otherwise go home
+	if r.Header.Get("Accept") == "application/json" {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	http.Redirect(w, r, "/", http.StatusSeeOther)
 }
 
 func SessionHandler(w http.ResponseWriter, r *http.Request) {

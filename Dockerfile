@@ -61,6 +61,12 @@ RUN set -eux; \
       chmod +x /usr/local/lib/docker/cli-plugins/docker-compose; \
       docker compose version
 
+# Install SOPS (v3.10.2)
+RUN curl -LO https://github.com/getsops/sops/releases/download/v3.10.2/sops-v3.10.2.linux.amd64 && \
+
+    mv sops-v3.10.2.linux.amd64 /usr/local/bin/sops && \
+    chmod +x /usr/local/bin/sops
+
 WORKDIR /home/ddui
 COPY --from=api /bin/ddui /usr/local/bin/ddui
 COPY --from=ui /ui/dist ./ui/dist

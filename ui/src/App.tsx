@@ -261,15 +261,15 @@ type MergedStack = {
   rows: MergedRow[];
   iacId?: number;
   hasIac: boolean;
-  hasContent?: boolean; // NEW: Track if stack has any compose files or services
+  hasContent?: boolean;
 };
 
 function ActionBtn({
   title, onClick, icon: Icon, disabled=false
 }: { title: string; onClick: ()=>void; icon: any; disabled?: boolean }) {
   return (
-    <Button size="icon" variant="ghost" className="h-7 w-7" title={title} onClick={onClick} disabled={disabled}>
-      <Icon className="h-3 w-3 text-slate-200" />
+    <Button size="icon" variant="ghost" className="h-6 w-6 shrink-0" title={title} onClick={onClick} disabled={disabled}>
+      <Icon className="h-3.5 w-3.5 text-slate-200" />
     </Button>
   );
 }
@@ -300,7 +300,6 @@ function HostStacksView({
         body: JSON.stringify({ action }),
       });
       onSync();
-      // quick optimistic UI: mark restarting/paused/etc locally
       setStacks(prev => prev.map(s => ({
         ...s,
         rows: s.rows.map(r => r.name === ctr
@@ -361,8 +360,6 @@ function HostStacksView({
           const is = iacByStack.get(sname);
           const services: IacService[] = Array.isArray(is?.services) ? (is!.services as IacService[]) : [];
           const hasIac = !!is && (services.length > 0 || !!is.compose);
-          
-          // NEW: Check if stack has actual content (compose file or services)
           const hasContent = !!is && (!!is.compose || services.length > 0);
 
           const rows: MergedRow[] = [];
@@ -430,7 +427,7 @@ function HostStacksView({
             rows,
             iacId: is?.id,
             hasIac,
-            hasContent, // NEW
+            hasContent,
           });
         }
 
@@ -594,76 +591,107 @@ function HostStacksView({
           </CardHeader>
           <CardContent className="pt-0">
             <div className="overflow-x-auto rounded-lg border border-slate-800">
-              <table className="w-full text-sm table-fixed">
+              {/* tighter: smaller font + tighter paddings */}
+              <table className="w-full text-xs table-fixed">
                 <thead className="bg-slate-900/70 text-slate-300">
-                  <tr>
-                    <th className="p-3 text-left w-64">Name</th>
-                    <th className="p-3 text-left w-44">State</th>
-                    <th className="p-3 text-left w-[28rem]">Image</th>
-                    <th className="p-3 text-left w-44">Created</th>
-                    <th className="p-3 text-left w-40">IP Address</th>
-                    <th className="p-3 text-left w-64">Published Ports</th>
-                    <th className="p-3 text-left w-40">Owner</th>
-                    <th className="p-3 text-left w-[30rem]">Actions</th>
+                  <tr className="whitespace-nowrap">
+                    <th className="px-2 py-2 text-left w-56">Name</th>
+                    <th className="px-2 py-2 text-left w-36">State</th>
+                    <th className="px-2 py-2 text-left w-[24rem]">Image</th>
+                    <th className="px-2 py-2 text-left w-40">Created</th>
+                    <th className="px-2 py-2 text-left w-36">IP</th>
+                    <th className="px-2 py-2 text-left w-56">Published Ports</th>
+                    <th className="px-2 py-2 text-left w-32">Owner</th>
+                    <th className="px-2 py-2 text-left w-[18rem]">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(s.rows.filter(r => matchRow(r, hostQuery))).map((r, i) => (
-                    <tr key={i} className="border-t border-slate-800 hover:bg-slate-900/40">
-                      <td className="p-3 font-medium text-slate-200 truncate">{r.name}</td>
-                      <td className="p-3 text-slate-300"><StatePill state={r.state} /></td>
-                      <td className="p-3 text-slate-300">
-                        <div className="flex items-center gap-2">
-                          <div className="max-w-[28rem] truncate" title={r.imageRun || ""}>{r.imageRun || "—"}</div>
-                          {r.imageIac && (
-                            <>
-                              <ChevronRight className="h-4 w-4 text-slate-500" />
-                              <div
-                                className={`max-w-[28rem] truncate ${r.drift ? "text-amber-300" : "text-slate-300"}`}
-                                title={r.imageIac}
-                              >
-                                {r.imageIac}
-                              </div>
-                            </>
-                          )}
-                        </div>
-                      </td>
-                      <td className="p-3 text-slate-300">{r.created || "—"}</td>
-                      <td className="p-3 text-slate-300">{r.ip || "—"}</td>
-                      <td className="p-3 text-slate-300 align-top w-64">
-                        <div className="max-w-64 whitespace-pre-line leading-tight">
-                          {r.portsText || "—"}
-                        </div>
-                      </td>
-                      <td className="p-3 text-slate-300">{r.owner || "—"}</td>
-                      <td className="p-2">
-                        <div className="grid grid-cols-4 gap-1 w-fit">
-                          <ActionBtn title="Play" icon={Play} onClick={() => doCtrAction(r.name, "start")} />
-                          <ActionBtn title="Stop" icon={Square} onClick={() => doCtrAction(r.name, "stop")} />
-                          <ActionBtn title="Kill" icon={ZapOff} onClick={() => doCtrAction(r.name, "kill")} />
-                          <ActionBtn title="Restart" icon={RotateCw} onClick={() => doCtrAction(r.name, "restart")} />
-                          <ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />
-                          <ActionBtn title="Resume" icon={PlayCircle} onClick={() => doCtrAction(r.name, "unpause")} />
-                          <ActionBtn title="Remove" icon={Trash2} onClick={() => doCtrAction(r.name, "remove")} />
-                          <div className="col-span-1" />
-                          <ActionBtn title="Logs" icon={FileText} onClick={() => openLogs(r.name)} />
-                          <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
-                          <ActionBtn title="Stats" icon={Activity} onClick={async () => {
-                            try {
-                              const r2 = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(r.name)}/stats`, { credentials: "include" });
-                              const txt = await r2.text();
-                              setLogModal({ ctr: `${r.name} (stats)`, text: txt });
-                            } catch {
-                              setLogModal({ ctr: `${r.name} (stats)`, text: "(failed to load stats)" });
-                            }
-                          }} />
-                          <ActionBtn title="Console" icon={Terminal} onClick={() => alert("Console attach: coming soon")} disabled />
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                  {(s.rows.filter(r => matchRow(r, hostQuery))).map((r, i) => {
+                    const st = (r.state || "").toLowerCase();
+                    const isRunning = st.includes("running") || st.includes("up") || st.includes("healthy") || st.includes("restarting");
+                    const isPaused = st.includes("paused");
+                    return (
+                      <tr key={i} className="border-t border-slate-800 hover:bg-slate-900/40 align-top">
+                        <td className="px-2 py-1.5 font-medium text-slate-200 truncate">{r.name}</td>
+                        <td className="px-2 py-1.5 text-slate-300"><StatePill state={r.state} /></td>
+                        <td className="px-2 py-1.5 text-slate-300">
+                          <div className="flex items-center gap-2">
+                            <div className="max-w-[24rem] truncate" title={r.imageRun || ""}>{r.imageRun || "—"}</div>
+                            {r.imageIac && (
+                              <>
+                                <ChevronRight className="h-4 w-4 text-slate-500" />
+                                <div
+                                  className={`max-w-[24rem] truncate ${r.drift ? "text-amber-300" : "text-slate-300"}`}
+                                  title={r.imageIac}
+                                >
+                                  {r.imageIac}
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-300">{r.created || "—"}</td>
+                        <td className="px-2 py-1.5 text-slate-300">{r.ip || "—"}</td>
+                        <td className="px-2 py-1.5 text-slate-300 align-top">
+                          <div className="max-w-56 whitespace-pre-line leading-tight">
+                            {r.portsText || "—"}
+                          </div>
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-300">{r.owner || "—"}</td>
+                        <td className="px-2 py-1">
+                          {/* Single-line, non-wrapping, compact action toolbar */}
+                          <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap py-0.5">
+                            {/* Primary lifecycle (contextual to minimize count) */}
+                            {!isRunning && !isPaused && (
+                              <ActionBtn title="Start" icon={Play} onClick={() => doCtrAction(r.name, "start")} />
+                            )}
+                            {isRunning && (
+                              <ActionBtn title="Stop" icon={Square} onClick={() => doCtrAction(r.name, "stop")} />
+                            )}
+                            {(isRunning || isPaused) && (
+                              <ActionBtn title="Restart" icon={RotateCw} onClick={() => doCtrAction(r.name, "restart")} />
+                            )}
+                            {isRunning && !isPaused && (
+                              <ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />
+                            )}
+                            {isPaused && (
+                              <ActionBtn title="Resume" icon={PlayCircle} onClick={() => doCtrAction(r.name, "unpause")} />
+                            )}
+
+                            <span className="mx-1 h-4 w-px bg-slate-700/60" />
+
+                            {/* Diagnostics */}
+                            <ActionBtn title="Logs" icon={FileText} onClick={() => openLogs(r.name)} />
+                            <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
+                            <ActionBtn
+                              title="Stats"
+                              icon={Activity}
+                              onClick={async () => {
+                                try {
+                                  const r2 = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(r.name)}/stats`, { credentials: "include" });
+                                  const txt = await r2.text();
+                                  setLogModal({ ctr: `${r.name} (stats)`, text: txt });
+                                } catch {
+                                  setLogModal({ ctr: `${r.name} (stats)`, text: "(failed to load stats)" });
+                                }
+                              }}
+                            />
+
+                            <span className="mx-1 h-4 w-px bg-slate-700/60" />
+
+                            {/* Destructive */}
+                            <ActionBtn title="Kill" icon={ZapOff} onClick={() => doCtrAction(r.name, "kill")} />
+                            <ActionBtn title="Remove" icon={Trash2} onClick={() => doCtrAction(r.name, "remove")} />
+
+                            {/* Placeholder for future console; kept disabled but compact */}
+                            <ActionBtn title="Console (soon)" icon={Terminal} onClick={() => {}} disabled />
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                   {(!s.rows || s.rows.filter(r => matchRow(r, hostQuery)).length === 0) && (
-                    <tr><td className="p-4 text-slate-500" colSpan={8}>No containers or services.</td></tr>
+                    <tr><td className="p-3 text-slate-500" colSpan={8}>No containers or services.</td></tr>
                   )}
                 </tbody>
               </table>
@@ -991,14 +1019,13 @@ function StackDetailView({
       }
     }
   
-    // Check if stack has content before enabling
     if (checked && files.length === 0) {
       alert("This stack needs compose files or services before Auto DevOps can be enabled. Add content first.");
       return;
     }
   
     setAutoDevOps(checked);
-    const r = await fetch(`/api/iac/stacks/${id}`, {
+    await fetch(`/api/iac/stacks/${id}`, {
       method: "PATCH",
       credentials: "include",
       headers: { "Content-Type": "application/json" },

@@ -3,12 +3,9 @@ package main
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
-	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/client"
-	"github.com/docker/go-connections/nat"
 )
 
 type InspectOut struct {
@@ -42,10 +39,7 @@ type VolumeOut struct {
 }
 
 func dockerClientForHost(h HostRow) (*client.Client, error) {
-	url, err := dockerURLFor(h)
-	if err != nil {
-		return nil, err
-	}
+	url, _ := dockerURLFor(h) // in this codebase second return is a string, not error
 	return client.NewClientWithOpts(
 		client.WithHost(url),
 		client.FromEnv,
@@ -72,16 +66,28 @@ func inspectContainerByHost(ctx context.Context, hostName, container string) (*I
 	out := &InspectOut{
 		ID:         info.ID,
 		Name:       strings.TrimPrefix(info.Name, "/"),
-		Image:      info.Config.Image,
+		Image:      "",
 		State:      "",
 		Health:     "",
 		Created:    info.Created,
-		Cmd:        []string(info.Config.Cmd),
-		Entrypoint: []string(info.Config.Entrypoint),
-		Env:        toEnvMap(info.Config.Env),
-		Labels:     info.Config.Labels,
+		Cmd:        nil,
+		Entrypoint: nil,
+		Env:        map[string]string{},
+		Labels:     map[string]string{},
 	}
 
+	// Config
+	if info.Config != nil {
+		out.Image = info.Config.Image
+		out.Cmd = append([]string{}, info.Config.Cmd...)
+		out.Entrypoint = append([]string{}, info.Config.Entrypoint...)
+		out.Env = toEnvMap(info.Config.Env)
+		if info.Config.Labels != nil {
+			out.Labels = info.Config.Labels
+		}
+	}
+
+	// State / Health
 	if info.State != nil {
 		out.State = info.State.Status
 		if info.State.Health != nil {
@@ -89,53 +95,56 @@ func inspectContainerByHost(ctx context.Context, hostName, container string) (*I
 		}
 	}
 
+	// Restart policy
 	if info.HostConfig != nil {
-		out.RestartPolicy = info.HostConfig.RestartPolicy.Name
+		out.RestartPolicy = string(info.HostConfig.RestartPolicy.Name)
 	}
 
-	// Ports: HostConfig.PortBindings
-	var ports []PortBindingOut
+	// Ports (from HostConfig.PortBindings: map[nat.Port][]nat.PortBinding)
 	if info.HostConfig != nil && info.HostConfig.PortBindings != nil {
 		for port, bindings := range info.HostConfig.PortBindings {
-			target := string(port)
+			parts := strings.SplitN(string(port), "/", 2)
+			target := parts[0]
 			proto := ""
-			if p, err := nat.ParsePort(target); err == nil {
-				proto = string(p.Proto())
-				target = fmt.Sprintf("%d/%s", p.Int(), p.Proto())
+			if len(parts) == 2 {
+				proto = parts[1]
 			}
 			if len(bindings) == 0 {
-				ports = append(ports, PortBindingOut{Target: target, Protocol: proto})
+				out.Ports = append(out.Ports, PortBindingOut{
+					Target:   target,
+					Protocol: proto,
+				})
+				continue
 			}
 			for _, b := range bindings {
-				ports = append(ports, PortBindingOut{
-					Published: b.HostIPPort(),
+				pub := b.HostPort
+				if b.HostIP != "" && b.HostIP != "0.0.0.0" {
+					pub = b.HostIP + ":" + b.HostPort
+				}
+				out.Ports = append(out.Ports, PortBindingOut{
+					Published: pub,
 					Target:    target,
 					Protocol:  proto,
 				})
 			}
 		}
 	}
-	out.Ports = ports
 
-	// Volumes / Mounts
-	var vols []VolumeOut
+	// Volumes / mounts
 	for _, m := range info.Mounts {
-		vols = append(vols, VolumeOut{
+		out.Volumes = append(out.Volumes, VolumeOut{
 			Source: m.Source,
 			Target: m.Destination,
 			Mode:   m.Mode,
 			RW:     m.RW,
 		})
 	}
-	out.Volumes = vols
 
 	// Networks
-	if info.NetworkSettings != nil {
-		nets := make([]string, 0, len(info.NetworkSettings.Networks))
+	if info.NetworkSettings != nil && info.NetworkSettings.Networks != nil {
 		for name := range info.NetworkSettings.Networks {
-			nets = append(nets, name)
+			out.Networks = append(out.Networks, name)
 		}
-		out.Networks = nets
 	}
 
 	return out, nil

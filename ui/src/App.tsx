@@ -61,7 +61,7 @@ type IacStack = {
   iac_enabled: boolean;
   rel_path: string;
   compose?: string;
-  services: IacService[];
+  services: IacService[] | null; // ⚠️ can be null from API on brand-new stacks
 };
 
 type IacFileMeta = {
@@ -117,27 +117,36 @@ function MetricCard({
   );
 }
 
-function StatusCircle({ state, health }: { state?: string; health?: string }) {
+/* Portainer-style oblong status pill */
+function HealthPill({ state, health }: { state?: string; health?: string }) {
   const s = (state || "").toLowerCase();
   const h = (health || "").toLowerCase();
-  let color = "border-slate-600 text-slate-300";
-  let text = state || "unknown";
+  let cls = "bg-slate-900/40 border-slate-700 text-slate-300";
+  let text = (h || s || "unknown").split(" ")[0];
+
   if (h === "healthy") {
-    color = "border-emerald-500 text-emerald-300";
+    cls = "bg-emerald-900/35 border-emerald-700/60 text-emerald-200";
     text = "healthy";
-  } else if (s.includes("running")) {
-    color = "border-emerald-500 text-emerald-300";
+  } else if (h === "unhealthy") {
+    cls = "bg-rose-900/35 border-rose-700/60 text-rose-200";
+    text = "unhealthy";
+  } else if (s.includes("running") || s.includes("up")) {
+    cls = "bg-emerald-900/25 border-emerald-700/50 text-emerald-200";
+    text = "running";
   } else if (s.includes("restarting")) {
-    color = "border-amber-500 text-amber-300";
+    cls = "bg-amber-900/30 border-amber-700/50 text-amber-200";
+    text = "restarting";
   } else if (s.includes("paused")) {
-    color = "border-sky-500 text-sky-300";
+    cls = "bg-sky-900/30 border-sky-700/50 text-sky-200";
+    text = "paused";
   } else if (s.includes("exited") || s.includes("dead")) {
-    color = "border-rose-500 text-rose-300";
+    cls = "bg-rose-900/30 border-rose-700/50 text-rose-200";
+    text = s.includes("dead") ? "dead" : "exited";
   }
+
   return (
-    <span className={`inline-flex items-center gap-2`}>
-      <span className={`inline-block w-2.5 h-2.5 rounded-full border-2 ${color}`} />
-      <span className="text-sm">{text}</span>
+    <span className={`inline-flex items-center rounded-full px-2.5 py-0.5 text-xs font-semibold border ${cls}`}>
+      {text}
     </span>
   );
 }
@@ -241,6 +250,10 @@ type MergedStack = {
   iacId?: number;
 };
 
+function safeServices(s?: IacService[] | null): IacService[] {
+  return Array.isArray(s) ? s : [];
+}
+
 function HostStacksView({
   host, onBack, onSync, onOpenStack,
 }: { host: Host; onBack: () => void; onSync: ()=>void; onOpenStack: (stackName: string, iacId?: number)=>void }) {
@@ -292,7 +305,8 @@ function HostStacksView({
 
           function desiredImageFor(c: ApiContainer): string | undefined {
             if (!is) return undefined;
-            const svc = is.services.find(x =>
+            const svcs = safeServices(is.services);
+            const svc = svcs.find(x =>
               (c.compose_service && x.service_name === c.compose_service) ||
               (x.container_name && x.container_name === c.name)
             );
@@ -319,7 +333,8 @@ function HostStacksView({
           }
 
           if (is) {
-            for (const svc of is.services) {
+            const svcs = safeServices(is.services);
+            for (const svc of svcs) {
               const exists = rows.some(r => r.name === (svc.container_name || svc.service_name));
               if (!exists) {
                 rows.push({
@@ -338,7 +353,11 @@ function HostStacksView({
             }
           }
 
-          const stackDrift = rows.some(r => r.drift) ? "drift" : (is ? "in_sync" : (rcs.length ? "unknown" : "unknown"));
+          const stackDrift =
+            rows.some(r => r.drift)
+              ? "drift"
+              : (is ? "in_sync" : (rcs.length ? "unknown" : "unknown"));
+
           merged.push({
             name: sname,
             drift: stackDrift,
@@ -432,7 +451,7 @@ function HostStacksView({
                   {(s.rows.filter(r => matchRow(r, hostQuery))).map((r, i) => (
                     <tr key={i} className="border-t border-slate-800 hover:bg-slate-900/40">
                       <td className="p-3 font-medium text-slate-200 truncate">{r.name}</td>
-                      <td className="p-3 text-slate-300"><StatusCircle state={r.state} /></td>
+                      <td className="p-3"><HealthPill state={r.state} /></td>
                       <td className="p-3 text-slate-300">
                         <div className="flex items-center gap-2">
                           <div className="max-w-[28rem] truncate" title={r.imageRun || ""}>{r.imageRun || "—"}</div>
@@ -691,7 +710,6 @@ function StackDetailView({
     if (!r.ok) return;
     const j = await r.json();
     (j.id) && await refreshFiles();
-    // crude: reload the page to pick up id in parent
     window.location.reload();
   }
 
@@ -746,7 +764,7 @@ function StackDetailView({
                 <div key={i} className="rounded-lg border border-slate-800 p-3">
                   <div className="flex items-center justify-between">
                     <div className="font-medium text-slate-200">{c.name}</div>
-                    <StatusCircle state={c.state} health={c.health} />
+                    <HealthPill state={c.state} health={c.health} />
                   </div>
                   <div className="mt-2 grid md:grid-cols-2 gap-3 text-sm">
                     <KVList title="Image" items={{ Image: c.image }} />
@@ -1050,7 +1068,8 @@ export default function App() {
 
       const desiredImageFor = (c: ApiContainer): string | undefined => {
         if (!is) return undefined;
-        const svc = is.services.find(x =>
+        const svcs = safeServices(is.services);
+        const svc = svcs.find(x =>
           (c.compose_service && x.service_name === c.compose_service) ||
           (x.container_name && x.container_name === c.name)
         );
@@ -1064,7 +1083,8 @@ export default function App() {
         }
       }
       if (!stackDrift && is) {
-        for (const svc of is.services) {
+        const svcs = safeServices(is.services);
+        for (const svc of svcs) {
           const match = rcs.some(c =>
             (c.compose_service && svc.service_name === c.compose_service) ||
             (svc.container_name && c.name === svc.container_name)
@@ -1072,7 +1092,8 @@ export default function App() {
           if (!match) { stackDrift = true; break; }
         }
       }
-      if (!rcs.length && is && is.services.length > 0) stackDrift = true;
+      const svcs = safeServices(is?.services);
+      if (!rcs.length && is && svcs.length > 0) stackDrift = true;
       if (stackDrift) drift++;
     }
 
@@ -1258,7 +1279,7 @@ export default function App() {
                           </Button>
                         </td>
                         <td className="p-3">
-                          {/* just placeholder pill since per-host results come back via Sync */}
+                          {/* status result shown after Sync; pill per-host can be added later */}
                         </td>
                       </tr>
                     ))}

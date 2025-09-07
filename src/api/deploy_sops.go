@@ -89,6 +89,14 @@ func prepareStackFilesForCompose(ctx context.Context, stackID int64) (composes [
 		return nil, nil, cleanup, err
 	}
 
+	// Resolve the stack working directory (used for default .env detection)
+	var rel string
+	_ = db.QueryRow(ctx, `SELECT rel_path FROM iac_stacks WHERE id=$1`, stackID).Scan(&rel)
+	dir, jerr := joinUnder(root, rel)
+	if jerr != nil {
+		return nil, nil, cleanup, jerr
+	}
+
 	// role: compose|env|script|other
 	rows, err := db.Query(ctx, `SELECT role, rel_path, COALESCE(sops,false) FROM iac_stack_files WHERE stack_id=$1`, stackID)
 	if err != nil {
@@ -103,19 +111,22 @@ func prepareStackFilesForCompose(ctx context.Context, stackID int64) (composes [
 	}
 	var files []rec
 	for rows.Next() {
-		var role, rel string
+		var role, relp string
 		var sops bool
-		if err := rows.Scan(&role, &rel, &sops); err != nil {
+		if err := rows.Scan(&role, &relp, &sops); err != nil {
 			return nil, nil, cleanup, err
 		}
-		full, jerr := joinUnder(root, rel)
+		full, jerr := joinUnder(root, relp)
 		if jerr != nil {
 			return nil, nil, cleanup, jerr
 		}
 		files = append(files, rec{role: strings.ToLower(role), path: full, sops: sops})
 	}
 
-	// Decrypt only what docker compose reads directly: compose files + env files.
+	// Track which env files we already added (by cleaned absolute path)
+	addedEnv := map[string]bool{}
+
+	// Decrypt compose + tracked env files
 	for _, f := range files {
 		switch f.role {
 		case "compose", "env":
@@ -135,9 +146,31 @@ func prepareStackFilesForCompose(ctx context.Context, stackID int64) (composes [
 				composes = append(composes, usePath)
 			} else {
 				envs = append(envs, usePath)
+				addedEnv[filepath.Clean(f.path)] = true
 			}
 		default:
-			// scripts/other: not fed into compose directly
+			// scripts/other: not fed to compose directly
+		}
+	}
+
+	// NEW: Also include the default .env in the stack directory if present,
+	// even if it isn't tracked. Put it LAST so it has highest precedence.
+	defEnv := filepath.Join(dir, ".env")
+	if fi, err := os.Stat(defEnv); err == nil && !fi.IsDir() {
+		if !addedEnv[filepath.Clean(defEnv)] {
+			usePath := defEnv
+			if hasSopsKeys() {
+				dec, clr, decOK, derr := decryptIfNeeded(ctx, defEnv)
+				if derr != nil {
+					cleanup()
+					return nil, nil, nil, derr
+				}
+				if decOK {
+					cleanups = append(cleanups, clr)
+					usePath = dec
+				}
+			}
+			envs = append(envs, usePath)
 		}
 	}
 

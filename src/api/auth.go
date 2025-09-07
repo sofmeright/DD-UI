@@ -128,7 +128,7 @@ func InitAuthFromEnv() error {
 	// Derive SecureCookies if COOKIE_SECURE is unset.
 	// - If redirect URI is https, use secure cookies.
 	// - If it's http (dev), allow non-secure cookies so the session works locally.
-	secureStr := strings.TrimSpace(env("COOKIE_SECURE", ""))
+	secureStr := strings.TrimSpace(env("DDUI_COOKIE_SECURE", ""))
 	var secure bool
 	if secureStr == "" {
 		secure = strings.HasPrefix(strings.ToLower(redirect), "https://")
@@ -150,7 +150,7 @@ func InitAuthFromEnv() error {
 		SessionSecret:         []byte(sec),
 		AllowedDomain:         strings.ToLower(env("OIDC_ALLOWED_EMAIL_DOMAIN", "")),
 		SecureCookies:         secure,
-		CookieDomain:          env("COOKIE_DOMAIN", ""),
+		CookieDomain:          env("DDUI_COOKIE_DOMAIN", ""),
 		PostLogoutRedirectURL: env("OIDC_POST_LOGOUT_REDIRECT_URL", ""),
 	}
 

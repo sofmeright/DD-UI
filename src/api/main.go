@@ -111,18 +111,18 @@ func scanAllOnce(ctx context.Context, perHostTO time.Duration, conc int) {
 }
 
 func startAutoScanner(ctx context.Context) {
-	if !envBool("DDUI_SCAN_AUTO", "true") {
-		log.Printf("scan: auto disabled (DDUI_SCAN_AUTO=false)")
+	if !envBool("DDUI_SCAN_DOCKER_AUTO", "true") {
+		log.Printf("scan: auto disabled (DDUI_SCAN_DOCKER_AUTO=false)")
 		return
 	}
-	interval := envDur("DDUI_SCAN_INTERVAL", "1m")       // Portainer-like
-	perHostTO := envDur("DDUI_SCAN_HOST_TIMEOUT", "45s") // per host protection
-	conc := envInt("DDUI_SCAN_CONCURRENCY", 3)
+	interval := envDur("DDUI_SCAN_DOCKER_INTERVAL", "1m")       // Portainer-like
+	perHostTO := envDur("DDUI_SCAN_DOCKER_HOST_TIMEOUT", "45s") // per host protection
+	conc := envInt("DDUI_SCAN_DOCKER_CONCURRENCY", 3)
 
 	log.Printf("scan: auto enabled interval=%s host_timeout=%s conc=%d", interval, perHostTO, conc)
 
 	// optional boot scan
-	if envBool("DDUI_SCAN_ON_START", "true") {
+	if envBool("DDUI_SCAN_DOCKER_ON_START", "true") {
 		go scanAllOnce(ctx, perHostTO, conc)
 	}
 
@@ -144,11 +144,11 @@ func startAutoScanner(ctx context.Context) {
 // ---- IaC auto-scan (local + apply) ----
 
 func startIacAutoScanner(ctx context.Context) {
-	if !envBool("DDUI_IAC_SCAN_AUTO", "true") {
-		log.Printf("iac: auto disabled (DDUI_IAC_SCAN_AUTO=false)")
+	if !envBool("DDUI_SCAN_IAC_AUTO", "true") {
+		log.Printf("iac: auto disabled (DDUI_SCAN_IAC_AUTO=false)")
 		return
 	}
-	interval := envDur("DDUI_IAC_SCAN_INTERVAL", "90s") // default 1m30s
+	interval := envDur("DDUI_SCAN_IAC_INTERVAL", "90s") // default 1m30s
 	log.Printf("iac: auto enabled interval=%s", interval)
 
 	// initial scan on boot (non-fatal)

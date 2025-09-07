@@ -49,22 +49,22 @@ func dockerURLFor(h HostRow) (string, string) {
 	if v := h.Vars["docker_host"]; v != "" {
 		return v, h.Vars["docker_ssh_cmd"]
 	}
-	kind := env("DDUI_SCAN_KIND", "ssh") // ssh|tcp|local
+	kind := env("DDUI_SCAN_DOCKER_METHOD", "ssh") // ssh|tcp|local
 	switch kind {
 	case "local":
-		sock := env("DDUI_LOCAL_SOCK", "/var/run/docker.sock")
+		sock := env("DOCKER_SOCK_PATH", "/var/run/docker.sock")
 		return "unix://" + sock, ""
 	case "tcp":
 		host := h.Addr
 		if host == "" {
 			host = h.Name
 		}
-		port := env("DDUI_DOCKER_TCP_PORT", "2375")
+		port := env("DOCKER_TCP_PORT", "2375")
 		return fmt.Sprintf("tcp://%s:%s", host, port), ""
 	default: // ssh
 		user := h.Vars["ansible_user"]
 		if user == "" {
-			user = env("DDUI_SSH_USER", "root")
+			user = env("SSH_USER", "root")
 		}
 		addr := h.Addr
 		if addr == "" {
@@ -152,7 +152,7 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 			map[string]any{"url": url, "host": h.Name})
 		return 0, ErrSkipScan
 	}
-	if strings.EqualFold(env("DDUI_SCAN_DEBUG", "false"), "true") {
+	if strings.EqualFold(env("DDUI_SCAN_DOCKER_DEBUG", "false"), "true") {
 		log.Printf("scan: host=%s docker_url=%s", h.Name, url)
 	}
 

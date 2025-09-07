@@ -1,3 +1,4 @@
+-- src/api/migrations/012_add_iac_indexes.sql
 -- Speed up per-host/group IaC lookups
 CREATE INDEX IF NOT EXISTS idx_iac_stacks_scope
   ON iac_stacks (scope_kind, scope_name);

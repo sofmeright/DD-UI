@@ -90,7 +90,7 @@ func prepareStackFilesForCompose(ctx context.Context, stackID int64) (composes [
 	}
 
 	// role: compose|env|script|other
-	rows, err := db.Query(ctx, `SELECT role, rel_path, COALESCE(sops,false) FROM iac_files WHERE stack_id=$1`, stackID)
+	rows, err := db.Query(ctx, `SELECT role, rel_path, COALESCE(sops,false) FROM iac_stack_files WHERE stack_id=$1`, stackID)
 	if err != nil {
 		return nil, nil, cleanup, err
 	}

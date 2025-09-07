@@ -1,3 +1,4 @@
+-- src/api/migrations/011_iac_repo_unique.sql
 BEGIN;
 
 -- Deduplicate rows that would violate the new unique constraint (keep the lowest id)

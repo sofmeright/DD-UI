@@ -31,33 +31,65 @@ func hasSopsKeys() bool {
 	return false
 }
 
+// Looks for SOPS markers to decide if we should even try to decrypt.
+func looksSopsEncrypted(path, inputType string) bool {
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return false
+	}
+	s := strings.ToLower(string(b))
+	if inputType == "dotenv" {
+		// SOPS dotenv adds metadata keys like: sops_mac, sops_version, sops_age__*, etc.
+		return strings.Contains(s, "sops_mac=") ||
+			strings.Contains(s, "sops_version=") ||
+			strings.Contains(s, "sops_age__")
+	}
+	// YAML/JSON compose: top-level "sops:" (yaml) or a "sops" object (json)
+	return strings.Contains(s, "\nsops:") ||
+		strings.Contains(s, "\n sops:") ||
+		strings.Contains(s, `"sops"`)
+}
+
 // Read plaintext for file `full`. If SOPS can decrypt it, return decrypted bytes;
 // if it's not encrypted, return the plain bytes. `inputType` is "" or "dotenv".
 func readDecryptedOrPlain(ctx context.Context, full, inputType string) ([]byte, bool, error) {
-	tryDecrypt := hasSopsKeys()
-	if tryDecrypt {
-		args := []string{"-d"}
-		if inputType == "dotenv" {
-			args = append(args, "--input-type", "dotenv")
-		}
-		args = append(args, full)
-
-		dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
-		defer cancel()
-
-		out, err := exec.CommandContext(dctx, "sops", args...).CombinedOutput()
-		if err == nil {
-			return out, true, nil
-		}
-		low := strings.ToLower(string(out))
-		if strings.Contains(low, "file is not encrypted") || strings.Contains(low, "sops metadata not found") {
-			// fall through to plain read
-		} else {
-			return nil, false, fmt.Errorf("sops decrypt failed for %s: %v: %s", full, err, strings.TrimSpace(string(out)))
-		}
+	// If we don't have keys, or the file doesn't look SOPS-encrypted, read as plain.
+	if !hasSopsKeys() || !looksSopsEncrypted(full, inputType) {
+		b, err := os.ReadFile(full)
+		return b, false, err
 	}
-	b, rerr := os.ReadFile(full)
-	return b, false, rerr
+
+	args := []string{"-d"}
+	if inputType == "dotenv" {
+		args = append(args, "--input-type", "dotenv")
+	}
+	args = append(args, full)
+
+	dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+
+	out, err := exec.CommandContext(dctx, "sops", args...).CombinedOutput()
+	if err == nil {
+		return out, true, nil
+	}
+
+	// If sops complains about missing metadata, treat it as plaintext.
+	low := strings.ToLower(string(out))
+	if strings.Contains(low, "file is not encrypted") ||
+		strings.Contains(low, "sops metadata not found") {
+		b, rerr := os.ReadFile(full)
+		return b, false, rerr
+	}
+
+	// Extra safeguard: even with a weird error, if the file doesn't actually
+	// contain SOPS markers, treat as plain.
+	if !looksSopsEncrypted(full, inputType) {
+		b, rerr := os.ReadFile(full)
+		return b, false, rerr
+	}
+
+	// Real decrypt error on an actually SOPS-encrypted file.
+	return nil, false, fmt.Errorf("sops decrypt failed for %s: %v: %s", full, err, strings.TrimSpace(string(out)))
 }
 
 // Drop SOPS metadata keys from dotenv content and normalize "export KEY=..." to "KEY=...".

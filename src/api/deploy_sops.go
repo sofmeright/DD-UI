@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -44,17 +43,7 @@ func decryptIfNeeded(ctx context.Context, full string) (string, func(), bool, er
 		inputType = "dotenv"
 	}
 
-	// Try to decide if this actually needs decryption. For .env we look for ENC[...
-	// For structured formats we look for a 'sops' block. If unsure, we still try sops -d.
-	b, _ := os.ReadFile(full)
-	needs := false
-	if inputType == "dotenv" {
-		needs = strings.Contains(string(b), "ENC[")
-	} else {
-		needs = looksSopsStructured(string(b))
-	}
-
-	// Optimistic: even if heuristics didn't trigger, still try sops -d; treat "not encrypted" as no-op.
+	// Optimistic: always try sops -d; treat "not encrypted" as no-op.
 	args := []string{"-d"}
 	if inputType == "dotenv" {
 		args = append(args, "--input-type", "dotenv")

@@ -89,15 +89,17 @@ func prepareStackFilesForCompose(ctx context.Context, stackID int64) (composes [
 		return nil, nil, cleanup, err
 	}
 
-	// Resolve the stack working directory (used for default .env detection)
+	// Figure out the stack directory (to check for the default .env)
 	var rel string
 	_ = db.QueryRow(ctx, `SELECT rel_path FROM iac_stacks WHERE id=$1`, stackID).Scan(&rel)
-	dir, jerr := joinUnder(root, rel)
-	if jerr != nil {
-		return nil, nil, cleanup, jerr
+	stackDir := ""
+	if strings.TrimSpace(rel) != "" {
+		if d, jerr := joinUnder(root, rel); jerr == nil {
+			stackDir = d
+		}
 	}
 
-	// role: compose|env|script|other
+	// role: compose|env|script|other (NOTE: table name is iac_stack_files)
 	rows, err := db.Query(ctx, `SELECT role, rel_path, COALESCE(sops,false) FROM iac_stack_files WHERE stack_id=$1`, stackID)
 	if err != nil {
 		return nil, nil, cleanup, err
@@ -111,22 +113,23 @@ func prepareStackFilesForCompose(ctx context.Context, stackID int64) (composes [
 	}
 	var files []rec
 	for rows.Next() {
-		var role, relp string
+		var role, rp string
 		var sops bool
-		if err := rows.Scan(&role, &relp, &sops); err != nil {
+		if err := rows.Scan(&role, &rp, &sops); err != nil {
 			return nil, nil, cleanup, err
 		}
-		full, jerr := joinUnder(root, relp)
+		full, jerr := joinUnder(root, rp)
 		if jerr != nil {
 			return nil, nil, cleanup, jerr
 		}
 		files = append(files, rec{role: strings.ToLower(role), path: full, sops: sops})
 	}
 
-	// Track which env files we already added (by cleaned absolute path)
-	addedEnv := map[string]bool{}
+	// Deduplicate by original path (before decrypt) so we don't add the same file twice.
+	composeSeen := map[string]bool{}
+	envSeen := map[string]bool{}
 
-	// Decrypt compose + tracked env files
+	// Decrypt only what docker compose reads directly: compose files + env files.
 	for _, f := range files {
 		switch f.role {
 		case "compose", "env":
@@ -143,21 +146,25 @@ func prepareStackFilesForCompose(ctx context.Context, stackID int64) (composes [
 				}
 			}
 			if f.role == "compose" {
-				composes = append(composes, usePath)
+				if !composeSeen[f.path] {
+					composes = append(composes, usePath)
+					composeSeen[f.path] = true
+				}
 			} else {
-				envs = append(envs, usePath)
-				addedEnv[filepath.Clean(f.path)] = true
+				if !envSeen[f.path] {
+					envs = append(envs, usePath)
+					envSeen[f.path] = true
+				}
 			}
 		default:
-			// scripts/other: not fed to compose directly
+			// scripts/other: not fed into compose directly
 		}
 	}
 
-	// NEW: Also include the default .env in the stack directory if present,
-	// even if it isn't tracked. Put it LAST so it has highest precedence.
-	defEnv := filepath.Join(dir, ".env")
-	if fi, err := os.Stat(defEnv); err == nil && !fi.IsDir() {
-		if !addedEnv[filepath.Clean(defEnv)] {
+	// Also include the default .env at the stack root (even if not tracked in IaC).
+	if stackDir != "" {
+		defEnv := filepath.Join(stackDir, ".env")
+		if _, statErr := os.Stat(defEnv); statErr == nil && !envSeen[defEnv] {
 			usePath := defEnv
 			if hasSopsKeys() {
 				dec, clr, decOK, derr := decryptIfNeeded(ctx, defEnv)
@@ -171,6 +178,7 @@ func prepareStackFilesForCompose(ctx context.Context, stackID int64) (composes [
 				}
 			}
 			envs = append(envs, usePath)
+			envSeen[defEnv] = true
 		}
 	}
 

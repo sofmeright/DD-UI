@@ -1,3 +1,4 @@
+// ui/src/views/HostsStacksView.tsx
 import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -80,6 +81,23 @@ export default function HostStacksView({
         const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
         const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
 
+        // Fetch per-stack effective Auto DevOps
+        const effMap: Record<number, boolean> = {};
+        await Promise.all(
+          (iacStacks || [])
+            .filter(s => typeof (s as any)?.id === "number")
+            .map(async (s) => {
+              try {
+                const r = await fetch(`/api/iac/stacks/${(s as any).id}`, { credentials: "include" });
+                if (!r.ok) return;
+                const j = await r.json();
+                if (j?.stack?.id) {
+                  effMap[j.stack.id] = !!j.stack.effective_auto_devops;
+                }
+              } catch { /* ignore per-stack errors */ }
+            })
+        );
+
         const rtByStack = new Map<string, ApiContainer[]>();
         for (const c of runtime) {
           const key = (c.compose_project || c.stack || "(none)").trim() || "(none)";
@@ -155,15 +173,17 @@ export default function HostStacksView({
             stackDrift = rows.some(r => r.drift) ? "drift" : "in_sync";
           }
 
+          const effectiveAuto = (is && typeof (is as any).id === "number" && effMap[(is as any).id]) ? true : false;
+
           merged.push({
             name: sname,
             drift: stackDrift,
-            iacEnabled: !!is?.iac_enabled,
+            iacEnabled: effectiveAuto,                      // <- switch reflects EFFECTIVE auto-devops
             pullPolicy: hasIac ? is?.pull_policy : undefined,
             sops: hasIac ? (is?.sops_status === "all") : false,
             deployKind: hasIac ? (is?.deploy_kind || "compose") : (sname === "(none)" ? "unmanaged" : "unmanaged"),
             rows,
-            iacId: is?.id,
+            iacId: (is as any)?.id,
             hasIac,
             hasContent,
           });
@@ -201,12 +221,13 @@ export default function HostStacksView({
     }
   }
 
+  // PATCH the stack Auto DevOps OVERRIDE (decoupled from iac_enabled)
   async function setAutoDevOps(id: number, enabled: boolean) {
     const r = await fetch(`/api/iac/stacks/${id}`, {
       method: "PATCH",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ iac_enabled: enabled }),
+      body: JSON.stringify({ auto_devops: enabled }),
     });
     if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
   }

@@ -82,6 +82,7 @@ export default function StackDetailView({
     setFiles(j.files || []);
   }
 
+  // Load runtime + files; keep as-is
   useEffect(() => {
     let cancel = false;
     (async () => {
@@ -112,6 +113,21 @@ export default function StackDetailView({
     return () => { cancel = true; };
   }, [host.name, stackName, stackIacId]);
 
+  // Load EFFECTIVE Auto DevOps for this stack id
+  useEffect(() => {
+    let cancel = false;
+    (async () => {
+      if (!stackIacId) { setAutoDevOps(false); return; }
+      try {
+        const r = await fetch(`/api/iac/stacks/${stackIacId}`, { credentials: "include" });
+        if (!r.ok) return;
+        const j = await r.json();
+        if (!cancel) setAutoDevOps(!!j?.stack?.effective_auto_devops);
+      } catch { /* ignore */ }
+    })();
+    return () => { cancel = true; };
+  }, [stackIacId]);
+
   async function ensureStack() {
     if (stackIacId) return stackIacId;
     const r = await fetch(`/api/iac/stacks`, {
@@ -136,6 +152,7 @@ export default function StackDetailView({
     setEditPath(null);
   }
 
+  // Toggle stack Auto DevOps OVERRIDE (decoupled)
   async function toggleAutoDevOps(checked: boolean) {
     let id = stackIacId;
     if (!id) {
@@ -156,7 +173,7 @@ export default function StackDetailView({
       method: "PATCH",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ iac_enabled: checked }),
+      body: JSON.stringify({ auto_devops: checked }),
     });
   }
 
@@ -165,7 +182,7 @@ export default function StackDetailView({
     if (files.length === 0) { alert("This stack has no files to deploy. Add a compose file or scripts first."); return; }
     setDeploying(true);
     try {
-      const r = await fetch(`/api/iac/stacks/${stackIacId}/deploy`, { method: "POST", credentials: "include" });
+      const r = await fetch(`/api/iac/stacks/${stackIacId}/deploy?manual=1`, { method: "POST", credentials: "include" });
       if (!r.ok) { const txt = await r.text(); alert(`Deploy failed: ${r.status} ${txt}`); return; }
       alert("Deploy requested. Check host for activity.");
     } catch (e: any) {

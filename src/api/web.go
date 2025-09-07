@@ -1,4 +1,3 @@
-// src/api/web.go
 package main
 
 import (
@@ -65,6 +64,82 @@ func makeRouter() http.Handler {
 		// Everything below requires auth
 		api.Group(func(priv chi.Router) {
 			priv.Use(RequireAuth)
+
+			/* ---------- Global DevOps Apply (Auto DevOps) ---------- */
+
+			// GET current global value (DB override or ENV fallback) + source
+			priv.Get("/devops/apply", func(w http.ResponseWriter, r *http.Request) {
+				val, src := getGlobalDevopsApply(r.Context())
+				writeJSON(w, http.StatusOK, map[string]any{
+					"value":  val,
+					"source": src, // "db" or "env"
+				})
+			})
+
+			// PATCH global value: { "value": true|false } or { "value": null } to clear override (revert to env)
+			priv.Patch("/devops/apply", func(w http.ResponseWriter, r *http.Request) {
+				var body struct {
+					Value *bool `json:"value"` // nil removes DB override
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				if err := setGlobalDevopsApply(r.Context(), body.Value); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				val, src := getGlobalDevopsApply(r.Context())
+				writeJSON(w, http.StatusOK, map[string]any{"value": val, "source": src, "status": "ok"})
+			})
+
+			/* ---------- Host-level DevOps Apply override ---------- */
+
+			// GET host override + effective (host override if set, else global)
+			priv.Get("/hosts/{name}/devops/apply", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				ov, _ := getHostDevopsOverride(r.Context(), host)
+				glob, _ := getAppSettingBool(r.Context(), "devops_apply")
+				if glob == nil {
+					d := envBool("DDUI_DEVOPS_APPLY", "false")
+					glob = &d
+				}
+				eff := *glob
+				if ov != nil {
+					eff = *ov
+				}
+				writeJSON(w, http.StatusOK, map[string]any{
+					"override": ov,   // null means inherit
+					"effective": eff, // bool
+				})
+			})
+
+			// PATCH host override: { "value": true|false } or { "value": null } to clear
+			priv.Patch("/hosts/{name}/devops/apply", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				var body struct {
+					Value *bool `json:"value"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				if err := setHostDevopsOverride(r.Context(), host, body.Value); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				ov, _ := getHostDevopsOverride(r.Context(), host)
+				glob, _ := getAppSettingBool(r.Context(), "devops_apply")
+				if glob == nil {
+					d := envBool("DDUI_DEVOPS_APPLY", "false")
+					glob = &d
+				}
+				eff := *glob
+				if ov != nil {
+					eff = *ov
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"override": ov, "effective": eff, "status": "ok"})
+			})
 
 			/* ---------- Runtime / Inventory ---------- */
 
@@ -515,9 +590,9 @@ func makeRouter() http.Handler {
 				})
 			})
 
-			// Trigger scan for all known hosts (sequential, simple summary) + IaC scan (non-fatal)
+			// Trigger scan for all known hosts (inventory only)
 			priv.Post("/scan/all", func(w http.ResponseWriter, r *http.Request) {
-				// Always try IaC scan as part of Sync; log-only on error
+				// IaC scan (non-fatal)
 				if _, _, err := ScanIacLocal(r.Context()); err != nil {
 					log.Printf("iac: sync scan failed: %v", err)
 				}
@@ -547,7 +622,6 @@ func makeRouter() http.Handler {
 				)
 
 				for _, h := range hostRows {
-					// Pre-filter: if this host would use a local unix sock but isn't the designated local host, skip it.
 					url, _ := dockerURLFor(h)
 					if isUnixSock(url) && !localHostAllowed(h) {
 						results = append(results, result{
@@ -590,7 +664,7 @@ func makeRouter() http.Handler {
 				})
 			})
 
-			// POST /api/inventory/reload  (optional body: {"path":"/new/path"})
+			// POST /api/inventory/reload
 			priv.Post("/inventory/reload", func(w http.ResponseWriter, r *http.Request) {
 				var body struct{ Path string `json:"path"` }
 				_ = json.NewDecoder(r.Body).Decode(&body)
@@ -638,7 +712,6 @@ func makeRouter() http.Handler {
 			})
 
 			// Create a new stack in the local IaC repo
-			// POST /api/iac/stacks  { scope_kind:"host"|"group", scope_name:"hostA", stack_name:"myapp" }
 			priv.Post("/iac/stacks", func(w http.ResponseWriter, r *http.Request) {
 				var body struct {
 					ScopeKind string `json:"scope_kind"`
@@ -680,84 +753,99 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"id": id, "rel_path": rel})
 			})
 
-			// ---- NEW: Get a single IaC stack (for UI sync)
+			// Get a single IaC stack (returns effective auto devops)
 			priv.Get("/iac/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {
 				idStr := chi.URLParam(r, "id")
 				id, _ := strconv.ParseInt(idStr, 10, 64)
 
 				var row struct {
-					ID         int64  `json:"id"`
-					RepoID     int64  `json:"repo_id"`
-					ScopeKind  string `json:"scope_kind"`
-					ScopeName  string `json:"scope_name"`
-					StackName  string `json:"stack_name"`
-					RelPath    string `json:"rel_path"`
-					IacEnabled bool   `json:"iac_enabled"`
-					DeployKind string `json:"deploy_kind"`
-					SopsStatus string `json:"sops_status"`
-					UpdatedAt  string `json:"updated_at"`
+					ID         int64   `json:"id"`
+					RepoID     int64   `json:"repo_id"`
+					ScopeKind  string  `json:"scope_kind"`
+					ScopeName  string  `json:"scope_name"`
+					StackName  string  `json:"stack_name"`
+					RelPath    string  `json:"rel_path"`
+					IacEnabled bool    `json:"iac_enabled"`
+					DeployKind string  `json:"deploy_kind"`
+					SopsStatus string  `json:"sops_status"`
+					Override   *bool   `json:"auto_apply_override"`
+					UpdatedAt  string  `json:"updated_at"`
+					Effective  bool    `json:"effective_auto_devops"`
 				}
 				var updatedAt time.Time
 				err := db.QueryRow(r.Context(), `
 					SELECT id, repo_id, scope_kind::text, scope_name, stack_name, rel_path,
-					       iac_enabled, deploy_kind::text, sops_status::text, updated_at
+					       iac_enabled, deploy_kind::text, sops_status::text, auto_apply_override, updated_at
 					FROM iac_stacks
 					WHERE id=$1
 				`, id).Scan(
 					&row.ID, &row.RepoID, &row.ScopeKind, &row.ScopeName, &row.StackName, &row.RelPath,
-					&row.IacEnabled, &row.DeployKind, &row.SopsStatus, &updatedAt,
+					&row.IacEnabled, &row.DeployKind, &row.SopsStatus, &row.Override, &updatedAt,
 				)
 				if err != nil {
 					http.Error(w, "not found", http.StatusNotFound)
 					return
 				}
 				row.UpdatedAt = updatedAt.Format(time.RFC3339)
+				eff, _ := shouldAutoApply(r.Context(), id)
+				row.Effective = eff
 				writeJSON(w, http.StatusOK, map[string]any{"stack": row})
 			})
 
-			// ---- NEW: Patch IaC stack (toggle Auto DevOps)
-			// Accepts any of: { "iac_enabled": true|false }, { "enabled": ... }, { "auto_devops": ... }
+			// Patch IaC stack (decoupled):
+			//   { "iac_enabled": true|false }              -> updates ONLY iac_enabled
+			//   { "auto_devops": true|false }             -> sets stack auto_apply_override to value
+			//   { "auto_devops_inherit": true }           -> clears stack override (inherit)
 			priv.Patch("/iac/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {
 				idStr := chi.URLParam(r, "id")
 				id, _ := strconv.ParseInt(idStr, 10, 64)
 
 				var body struct {
-					IacEnabled *bool `json:"iac_enabled,omitempty"`
-					Enabled    *bool `json:"enabled,omitempty"`
-					AutoDevOps *bool `json:"auto_devops,omitempty"`
+					IacEnabled        *bool `json:"iac_enabled,omitempty"`
+					AutoDevOps        *bool `json:"auto_devops,omitempty"`
+					AutoDevOpsInherit *bool `json:"auto_devops_inherit,omitempty"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					http.Error(w, "bad json", http.StatusBadRequest)
 					return
 				}
-				var v *bool
+
+				// Update iac_enabled only (no coupling)
 				if body.IacEnabled != nil {
-					v = body.IacEnabled
-				} else if body.Enabled != nil {
-					v = body.Enabled
-				} else if body.AutoDevOps != nil {
-					v = body.AutoDevOps
-				}
-				if v == nil {
-					http.Error(w, "no supported fields to update", http.StatusBadRequest)
-					return
+					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET iac_enabled=$1 WHERE id=$2`, *body.IacEnabled, id); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
 				}
 
-				_, err := db.Exec(r.Context(), `UPDATE iac_stacks SET iac_enabled=$1 WHERE id=$2`, *v, id)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
+				// Clear override if requested
+				if body.AutoDevOpsInherit != nil && *body.AutoDevOpsInherit {
+					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_apply_override=NULL WHERE id=$1`, id); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
 				}
 
+				// Set explicit auto devops override
+				if body.AutoDevOps != nil {
+					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_apply_override=$1 WHERE id=$2`, *body.AutoDevOps, id); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+				}
+
+				eff, _ := shouldAutoApply(r.Context(), id)
 				writeJSON(w, http.StatusOK, map[string]any{
-					"id":          id,
-					"iac_enabled": *v,
-					"status":      "ok",
+					"id":                   id,
+					"iac_enabled":          body.IacEnabled,
+					"auto_devops":          body.AutoDevOps,
+					"auto_devops_inherit":  body.AutoDevOpsInherit,
+					"effective_auto_devops": eff,
+					"status":               "ok",
 				})
 			})
 
 			// Delete a stack (optionally delete files too)
-			// DELETE /api/iac/stacks/{id}?delete_files=1
 			priv.Delete("/iac/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {
 				idStr := chi.URLParam(r, "id")
 				id, _ := strconv.ParseInt(idStr, 10, 64)
@@ -798,8 +886,7 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"files": items})
 			})
 
-			// Read file content for a stack file
-			//   GET /api/iac/stacks/{id}/file?path=rel/path&decrypt=1
+			// Read file content for a stack file (with optional decrypt)
 			priv.Get("/iac/stacks/{id}/file", func(w http.ResponseWriter, r *http.Request) {
 				idStr := chi.URLParam(r, "id")
 				id, _ := strconv.ParseInt(idStr, 10, 64)
@@ -856,7 +943,6 @@ func makeRouter() http.Handler {
 			})
 
 			// Create/update file content
-			//   POST /api/iac/stacks/{id}/file  { "path": "docker-compose/host/stack/x.env", "content":"..." }
 			priv.Post("/iac/stacks/{id}/file", func(w http.ResponseWriter, r *http.Request) {
 				idStr := chi.URLParam(r, "id")
 				id, _ := strconv.ParseInt(idStr, 10, 64)
@@ -908,16 +994,13 @@ func makeRouter() http.Handler {
 					}
 				}
 
-				// SOPS auto-encrypt if requested or filename matches.
-				// Try when we have either a private key OR recipients.
+				// Optional SOPS auto-encrypt on save (opt-in)
 				shouldSops := body.Sops || strings.HasSuffix(strings.ToLower(body.Path), "_private.env") || strings.HasSuffix(strings.ToLower(body.Path), "_secret.env")
 				if shouldSops && (os.Getenv("SOPS_AGE_KEY") != "" || os.Getenv("SOPS_AGE_KEY_FILE") != "" || os.Getenv("SOPS_AGE_RECIPIENTS") != "") {
 					args := []string{"-e", "-i"}
-					// hint for dotenv
 					if strings.HasSuffix(strings.ToLower(body.Path), ".env") {
 						args = []string{"-e", "-i", "--input-type", "dotenv"}
 					}
-					// pass recipients explicitly (space- or newline-separated)
 					if rec := strings.TrimSpace(os.Getenv("SOPS_AGE_RECIPIENTS")); rec != "" {
 						for _, rcp := range strings.Fields(rec) {
 							if rcp != "" {
@@ -948,7 +1031,6 @@ func makeRouter() http.Handler {
 			})
 
 			// Delete a file from a stack
-			//   DELETE /api/iac/stacks/{id}/file?path=rel/path
 			priv.Delete("/iac/stacks/{id}/file", func(w http.ResponseWriter, r *http.Request) {
 				idStr := chi.URLParam(r, "id")
 				id, _ := strconv.ParseInt(idStr, 10, 64)
@@ -972,7 +1054,9 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
 			})
 
-			// Deploy endpoint (now wired)
+			// Deploy endpoint
+			// - Manual deploys: POST .../deploy?manual=1  -> always allowed
+			// - Auto/background: POST .../deploy         -> only if shouldAutoApply == true
 			priv.Post("/iac/stacks/{id}/deploy", func(w http.ResponseWriter, r *http.Request) {
 				idStr := chi.URLParam(r, "id")
 				id, err := strconv.ParseInt(idStr, 10, 64)
@@ -981,7 +1065,7 @@ func makeRouter() http.Handler {
 					return
 				}
 
-				// sanity check: must have something to deploy
+				// must have something to deploy
 				ok, derr := stackHasContent(r.Context(), id)
 				if derr != nil {
 					http.Error(w, derr.Error(), http.StatusInternalServerError)
@@ -990,6 +1074,24 @@ func makeRouter() http.Handler {
 				if !ok {
 					http.Error(w, "stack has no files", http.StatusBadRequest)
 					return
+				}
+
+				manual := isTrueish(r.URL.Query().Get("manual"))
+
+				if !manual {
+					allowed, aerr := shouldAutoApply(r.Context(), id)
+					if aerr != nil {
+						http.Error(w, aerr.Error(), http.StatusBadRequest)
+						return
+					}
+					if !allowed {
+						writeJSON(w, http.StatusAccepted, map[string]any{
+							"status":  "skipped",
+							"reason":  "auto_devops_disabled",
+							"stackID": id,
+						})
+						return
+					}
 				}
 
 				// async deploy with timeout + logging
@@ -1004,8 +1106,10 @@ func makeRouter() http.Handler {
 				}(id)
 
 				writeJSON(w, http.StatusAccepted, map[string]any{
-					"status": "queued",
-					"id":     id,
+					"status":  "queued",
+					"id":      id,
+					"manual":  manual,
+					"allowed": true,
 				})
 			})
 		})
@@ -1051,7 +1155,6 @@ func makeRouter() http.Handler {
 
 func respondJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
-	// discourage caching of API responses
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(v)
 }
@@ -1100,7 +1203,6 @@ func joinUnder(root, rel string) (string, error) {
 
 // --- Image repo/tag persistence helpers ---
 
-// upsertImageTag updates or inserts the repo/tag for (host,image_id) and bumps last_seen.
 func upsertImageTag(ctx context.Context, host, id, repo, tag string) error {
 	_, err := db.Exec(ctx, `
 		INSERT INTO image_tags (host_name, image_id, repo, tag)
@@ -1111,7 +1213,6 @@ func upsertImageTag(ctx context.Context, host, id, repo, tag string) error {
 	return err
 }
 
-// getImageTagMap returns stored repo/tag by image_id for a host.
 func getImageTagMap(ctx context.Context, host string) (map[string][2]string, error) {
 	rows, err := db.Query(ctx, `SELECT image_id, repo, tag FROM image_tags WHERE host_name=$1`, host)
 	if err != nil {
@@ -1129,9 +1230,7 @@ func getImageTagMap(ctx context.Context, host string) (map[string][2]string, err
 	return out, nil
 }
 
-// cleanupImageTags removes DB rows for images we didn't see in the latest list.
 func cleanupImageTags(ctx context.Context, host string, keepIDs map[string]struct{}) error {
-	// Build a temp table in-memory via UNNEST for efficient diff
 	ids := make([]string, 0, len(keepIDs))
 	for id := range keepIDs {
 		ids = append(ids, id)
@@ -1160,4 +1259,117 @@ func humanSize(b int64) string {
 	}
 	return strings.TrimSuffix(strings.TrimSpace(
 		strconv.FormatFloat(float64(b)/float64(div), 'f', 1, 64)), ".0") + " " + string("KMGTPE"[exp]) + "B"
+}
+
+/* ---------------- DevOps Apply helpers ---------------- */
+
+func isTrueish(s string) bool {
+	if s == "" {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "1", "t", "true", "y", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// app_settings: simple KV store (migration 013)
+func getAppSetting(ctx context.Context, key string) (string, bool) {
+	var v string
+	err := db.QueryRow(ctx, `SELECT value FROM app_settings WHERE key=$1`, key).Scan(&v)
+	if err != nil {
+		return "", false
+	}
+	return v, true
+}
+func setAppSetting(ctx context.Context, key, value string) error {
+	_, err := db.Exec(ctx, `
+		INSERT INTO app_settings (key, value) VALUES ($1,$2)
+		ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()
+	`, key, value)
+	return err
+}
+func delAppSetting(ctx context.Context, key string) error {
+	_, err := db.Exec(ctx, `DELETE FROM app_settings WHERE key=$1`, key)
+	return err
+}
+func getAppSettingBool(ctx context.Context, key string) (*bool, bool) {
+	if s, ok := getAppSetting(ctx, key); ok {
+		b := isTrueish(s)
+		return &b, true
+	}
+	return nil, false
+}
+
+// Global DevOps Apply (Auto DevOps) – DB override with ENV fallback
+func getGlobalDevopsApply(ctx context.Context) (bool, string) {
+	if b, ok := getAppSettingBool(ctx, "devops_apply"); ok && b != nil {
+		return *b, "db"
+	}
+	return envBool("DDUI_DEVOPS_APPLY", "false"), "env"
+}
+func setGlobalDevopsApply(ctx context.Context, v *bool) error {
+	if v == nil {
+		return delAppSetting(ctx, "devops_apply")
+	}
+	if *v {
+		return setAppSetting(ctx, "devops_apply", "true")
+	}
+	return setAppSetting(ctx, "devops_apply", "false")
+}
+
+// host_settings: per-host overrides (migration 013)
+func getHostDevopsOverride(ctx context.Context, host string) (*bool, error) {
+	var val *bool
+	err := db.QueryRow(ctx, `SELECT auto_apply_override FROM host_settings WHERE host_name=$1`, host).Scan(&val)
+	if err != nil {
+		return nil, nil // treat as absent
+	}
+	return val, nil
+}
+func setHostDevopsOverride(ctx context.Context, host string, v *bool) error {
+	if v == nil {
+		_, err := db.Exec(ctx, `DELETE FROM host_settings WHERE host_name=$1`, host)
+		return err
+	}
+	_, err := db.Exec(ctx, `
+		INSERT INTO host_settings (host_name, auto_apply_override)
+		VALUES ($1,$2)
+		ON CONFLICT (host_name) DO UPDATE SET auto_apply_override=EXCLUDED.auto_apply_override, updated_at=now()
+	`, host, *v)
+	return err
+}
+
+// shouldAutoApply resolves: global -> host override -> stack override
+func shouldAutoApply(ctx context.Context, stackID int64) (bool, error) {
+	// Base: global
+	global, _ := getGlobalDevopsApply(ctx)
+
+	// Fetch stack scope + stack override
+	var scopeKind, scopeName string
+	var stackOv *bool
+	err := db.QueryRow(ctx, `
+		SELECT scope_kind::text, scope_name, auto_apply_override
+		FROM iac_stacks WHERE id=$1
+	`, stackID).Scan(&scopeKind, &scopeName, &stackOv)
+	if err != nil {
+		return false, errors.New("stack not found")
+	}
+
+	eff := global
+
+	// Host override (only for host-scoped stacks)
+	if strings.EqualFold(scopeKind, "host") {
+		if hov, _ := getHostDevopsOverride(ctx, scopeName); hov != nil {
+			eff = *hov
+		}
+	}
+
+	// Stack override wins if set
+	if stackOv != nil {
+		eff = *stackOv
+	}
+
+	return eff, nil
 }

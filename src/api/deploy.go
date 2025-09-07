@@ -11,11 +11,31 @@ import (
 	"strings"
 )
 
+// ctxManualKey marks a deploy as "manual", which bypasses Auto DevOps gating.
+type ctxManualKey struct{}
+
 // deployStack stages a mirror of the stack into a scope-aware builds dir,
 // auto-decrypts any SOPS-protected env files into that stage (same names),
 // then runs `docker compose up -d` with the staged compose files.
 // Originals are never modified and plaintext only lives in the stage dir.
+//
+// IMPORTANT: This function now **guards** non-manual invocations behind
+// shouldAutoApply(ctx, stackID). Any code path that calls deployStack directly
+// will respect the global/host/stack Auto DevOps toggles unless the caller
+// sets context.WithValue(ctx, ctxManualKey{}, true).
 func deployStack(ctx context.Context, stackID int64) error {
+	// Auto-DevOps gate (unless manual override)
+	if man, _ := ctx.Value(ctxManualKey{}).(bool); !man {
+		allowed, aerr := shouldAutoApply(ctx, stackID)
+		if aerr != nil {
+			return aerr
+		}
+		if !allowed {
+			log.Printf("deploy: stack %d skipped (auto_devops disabled by effective policy)", stackID)
+			return nil
+		}
+	}
+
 	// Figure out the working dir for compose (stack root on disk)
 	root, err := getRepoRootForStack(ctx, stackID)
 	if err != nil {
@@ -26,6 +46,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 	if strings.TrimSpace(rel) == "" {
 		return errors.New("deploy: stack has no rel_path")
 	}
+
 	// Prepare staged tree (scope/host-or-group/stack/buildID/rel_path)
 	stageDir, stagedComposes, cleanup, derr := stageStackForCompose(ctx, stackID)
 	if derr != nil {

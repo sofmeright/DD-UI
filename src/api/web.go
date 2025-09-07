@@ -1,3 +1,4 @@
+// src/api/web.go
 package main
 
 import (
@@ -115,6 +116,7 @@ func makeRouter() http.Handler {
 			})
 
 			// PATCH host override: { "value": true|false } or { "value": null } to clear
+			// Robust: falls back to app_settings if host_settings table is absent.
 			priv.Patch("/hosts/{name}/devops/apply", func(w http.ResponseWriter, r *http.Request) {
 				host := chi.URLParam(r, "name")
 				var body struct {
@@ -310,7 +312,7 @@ func makeRouter() http.Handler {
 				type row struct {
 					Repo    string `json:"repo"`
 					Tag     string `json:"tag"`
-					ID      string `json:"id"` // full sha256
+					ID      string `json:"id"`
 					Size    string `json:"size"`
 					Created string `json:"created"`
 				}
@@ -318,12 +320,11 @@ func makeRouter() http.Handler {
 				seen := make(map[string]struct{}, len(list))
 
 				for _, im := range list {
-					id := im.ID // e.g. "sha256:..."
+					id := im.ID
 					seen[id] = struct{}{}
 					repo := "<none>"
 					tag := "none"
 
-					// Prefer live docker tags if present; otherwise fall back to stored mapping.
 					if len(im.RepoTags) > 0 && im.RepoTags[0] != "<none>:<none>" {
 						parts := strings.SplitN(im.RepoTags[0], ":", 2)
 						repo = parts[0]
@@ -339,19 +340,17 @@ func makeRouter() http.Handler {
 						}
 					}
 
-					// Upsert so we remember a repo/tag even after it dangles later.
 					_ = upsertImageTag(r.Context(), host, id, repo, tag)
 
 					items = append(items, row{
 						Repo:    repo,
 						Tag:     tag,
-						ID:      id, // full sha256 shown to UI
+						ID:      id,
 						Size:    humanSize(im.Size),
 						Created: time.Unix(im.Created, 0).Format(time.RFC3339),
 					})
 				}
 
-				// Cleanup: drop rows we didn't see this time (image deleted from host)
 				_ = cleanupImageTags(r.Context(), host, seen)
 
 				writeJSON(w, http.StatusOK, map[string]any{"items": items})
@@ -390,7 +389,6 @@ func makeRouter() http.Handler {
 				out := make([]res, 0, len(body.IDs))
 
 				for _, id := range body.IDs {
-					// NOTE: RemoveOptions lives in the image pkg with newer Docker SDKs
 					_, err := cli.ImageRemove(r.Context(), id, image.RemoveOptions{
 						Force:         body.Force,
 						PruneChildren: true,
@@ -402,7 +400,6 @@ func makeRouter() http.Handler {
 					out = append(out, res{ID: id, Ok: true})
 				}
 
-				// best-effort: drop rows for those IDs from persistence
 				_, _ = db.Exec(r.Context(),
 					`DELETE FROM image_tags WHERE host_name=$1 AND image_id = ANY($2::text[])`,
 					host, body.IDs,
@@ -836,12 +833,12 @@ func makeRouter() http.Handler {
 
 				eff, _ := shouldAutoApply(r.Context(), id)
 				writeJSON(w, http.StatusOK, map[string]any{
-					"id":                   id,
-					"iac_enabled":          body.IacEnabled,
-					"auto_devops":          body.AutoDevOps,
-					"auto_devops_inherit":  body.AutoDevOpsInherit,
+					"id":                    id,
+					"iac_enabled":           body.IacEnabled,
+					"auto_devops":           body.AutoDevOps,
+					"auto_devops_inherit":   body.AutoDevOpsInherit,
 					"effective_auto_devops": eff,
-					"status":               "ok",
+					"status":                "ok",
 				})
 			})
 
@@ -909,7 +906,6 @@ func makeRouter() http.Handler {
 
 				var data []byte
 				if decrypt {
-					// require explicit confirmation + server-side allow
 					if !envBool("DDUI_ALLOW_SOPS_DECRYPT", "false") {
 						http.Error(w, "decrypt disabled on server", http.StatusForbidden)
 						return
@@ -918,7 +914,6 @@ func makeRouter() http.Handler {
 						http.Error(w, "confirmation required", http.StatusForbidden)
 						return
 					}
-					// run sops -d
 					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 					defer cancel()
 					cmd := exec.CommandContext(ctx, "sops", "-d", full)
@@ -950,7 +945,7 @@ func makeRouter() http.Handler {
 					Path    string `json:"path"`
 					Content string `json:"content"`
 					Sops    bool   `json:"sops,omitempty"`
-					Role    string `json:"role,omitempty"` // compose|env|script|other
+					Role    string `json:"role,omitempty"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					http.Error(w, "bad json", http.StatusBadRequest)
@@ -1094,16 +1089,17 @@ func makeRouter() http.Handler {
 					}
 				}
 
-				// async deploy with timeout + logging
-				go func(stackID int64) {
+				// async deploy with timeout + logging; mark manual flag in context
+				go func(stackID int64, manual bool) {
 					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 					defer cancel()
+					ctx = context.WithValue(ctx, ctxManualKey{}, manual)
 					if err := deployStack(ctx, stackID); err != nil {
 						log.Printf("deploy: stack %d failed: %v", stackID, err)
 						return
 					}
 					log.Printf("deploy: stack %d ok", stackID)
-				}(id)
+				}(id, manual)
 
 				writeJSON(w, http.StatusAccepted, map[string]any{
 					"status":  "queued",
@@ -1191,7 +1187,7 @@ func parseDurationDefault(s string, def time.Duration) time.Duration {
 
 // safe path join under repo root
 func joinUnder(root, rel string) (string, error) {
-	clean := filepath.Clean("/" + rel) // force absolute-clean then strip
+	clean := filepath.Clean("/" + rel)
 	clean = strings.TrimPrefix(clean, "/")
 	full := filepath.Join(root, clean)
 	r, err := filepath.Rel(root, full)
@@ -1319,26 +1315,46 @@ func setGlobalDevopsApply(ctx context.Context, v *bool) error {
 	return setAppSetting(ctx, "devops_apply", "false")
 }
 
-// host_settings: per-host overrides (migration 013)
+// host_settings override helpers with **fallback** to app_settings if host_settings table is missing.
 func getHostDevopsOverride(ctx context.Context, host string) (*bool, error) {
 	var val *bool
-	err := db.QueryRow(ctx, `SELECT auto_apply_override FROM host_settings WHERE host_name=$1`, host).Scan(&val)
-	if err != nil {
-		return nil, nil // treat as absent
+	// Try dedicated table first
+	if err := db.QueryRow(ctx, `SELECT auto_apply_override FROM host_settings WHERE host_name=$1`, host).Scan(&val); err == nil {
+		return val, nil
 	}
-	return val, nil
+	// Fallback to namespaced app_settings
+	if s, ok := getAppSetting(ctx, "host:"+host+":devops_apply"); ok {
+		b := isTrueish(s)
+		return &b, nil
+	}
+	return nil, nil
 }
 func setHostDevopsOverride(ctx context.Context, host string, v *bool) error {
+	// Try dedicated table
 	if v == nil {
-		_, err := db.Exec(ctx, `DELETE FROM host_settings WHERE host_name=$1`, host)
-		return err
+		// Clear override
+		_, _ = db.Exec(ctx, `DELETE FROM host_settings WHERE host_name=$1`, host) // best effort
+		_ = delAppSetting(ctx, "host:"+host+":devops_apply")
+		return nil
 	}
-	_, err := db.Exec(ctx, `
+	if _, err := db.Exec(ctx, `
 		INSERT INTO host_settings (host_name, auto_apply_override)
 		VALUES ($1,$2)
 		ON CONFLICT (host_name) DO UPDATE SET auto_apply_override=EXCLUDED.auto_apply_override, updated_at=now()
-	`, host, *v)
-	return err
+	`, host, *v); err == nil {
+		// Also mirror to app_settings for resiliency
+		if *v {
+			_ = setAppSetting(ctx, "host:"+host+":devops_apply", "true")
+		} else {
+			_ = setAppSetting(ctx, "host:"+host+":devops_apply", "false")
+		}
+		return nil
+	}
+	// If the host_settings table is missing, use app_settings only
+	if *v {
+		return setAppSetting(ctx, "host:"+host+":devops_apply", "true")
+	}
+	return setAppSetting(ctx, "host:"+host+":devops_apply", "false")
 }
 
 // shouldAutoApply resolves: global -> host override -> stack override

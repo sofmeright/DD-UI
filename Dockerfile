@@ -1,8 +1,18 @@
 # --- UI build ---
 FROM node:20-alpine AS ui
 WORKDIR /ui
-COPY ui/package*.json ./
-RUN npm ci --no-audit --no-fund
+
+# copy lockfile if it exists
+COPY ui/package.json ui/package-lock.json* ./
+
+# use npm ci if lockfile is present; otherwise, npm install
+RUN sh -c 'if [ -f package-lock.json ]; then \
+  npm ci --no-audit --no-fund; \
+else \
+  echo "No package-lock.json found; running npm install"; \
+  npm install --no-audit --no-fund; \
+fi'
+
 COPY ui/ .
 RUN npm run build
 

@@ -261,15 +261,15 @@ type MergedStack = {
   rows: MergedRow[];
   iacId?: number;
   hasIac: boolean;
-  hasContent?: boolean; // NEW: Track if stack has any compose files or services
+  hasContent?: boolean;
 };
 
 function ActionBtn({
   title, onClick, icon: Icon, disabled=false
 }: { title: string; onClick: ()=>void; icon: any; disabled?: boolean }) {
   return (
-    <Button size="icon" variant="ghost" className="h-7 w-7" title={title} onClick={onClick} disabled={disabled}>
-      <Icon className="h-3 w-3 text-slate-200" />
+    <Button size="icon" variant="ghost" className="h-6 w-6 shrink-0" title={title} onClick={onClick} disabled={disabled}>
+      <Icon className="h-3.5 w-3.5 text-slate-200" />
     </Button>
   );
 }
@@ -300,7 +300,6 @@ function HostStacksView({
         body: JSON.stringify({ action }),
       });
       onSync();
-      // quick optimistic UI: mark restarting/paused/etc locally
       setStacks(prev => prev.map(s => ({
         ...s,
         rows: s.rows.map(r => r.name === ctr
@@ -361,8 +360,6 @@ function HostStacksView({
           const is = iacByStack.get(sname);
           const services: IacService[] = Array.isArray(is?.services) ? (is!.services as IacService[]) : [];
           const hasIac = !!is && (services.length > 0 || !!is.compose);
-          
-          // NEW: Check if stack has actual content (compose file or services)
           const hasContent = !!is && (!!is.compose || services.length > 0);
 
           const rows: MergedRow[] = [];
@@ -430,7 +427,7 @@ function HostStacksView({
             rows,
             iacId: is?.id,
             hasIac,
-            hasContent, // NEW
+            hasContent,
           });
         }
 
@@ -553,28 +550,20 @@ function HostStacksView({
         <Card key={`${host.name}:${s.name}:${idx}`} className="bg-slate-900/50 border-slate-800 rounded-xl">
           <CardHeader className="pb-2 flex flex-row items-center justify-between">
             <div className="space-y-1">
-              <CardTitle className="text-xl text-white">
+              <CardTitle className="text-lg text-white">
                 <button className="hover:underline" onClick={() => onOpenStack(s.name, s.iacId)}>
                   {s.name}
                 </button>
               </CardTitle>
+              {/* condensed: show only drift status under the title */}
               <div className="flex items-center gap-2">
                 {driftBadge(s.drift)}
-                <Badge variant="outline" className="border-slate-700 text-slate-300">{s.deployKind || "unknown"}</Badge>
-                <Badge variant="outline" className="border-slate-700 text-slate-300">pull: {s.hasIac ? (s.pullPolicy || "—") : "—"}</Badge>
-                {s.hasIac ? (
-                  s.sops ? (
-                    <Badge className="bg-indigo-900/40 border-indigo-700/40 text-indigo-200">SOPS</Badge>
-                  ) : (
-                    <Badge variant="outline" className="border-slate-700 text-slate-300">no SOPS</Badge>
-                  )
-                ) : (
-                  <Badge variant="outline" className="border-slate-700 text-slate-300">No IaC</Badge>
-                )}
+                {s.hasIac ? null : <Badge variant="outline" className="border-slate-700 text-slate-300">No IaC</Badge>}
               </div>
             </div>
+            {/* keep controls but make them compact */}
             <div className="flex items-center gap-2">
-              <span className="text-sm text-slate-300">Auto DevOps</span>
+              <span className="text-xs text-slate-400">Auto DevOps</span>
               <Switch
                 checked={!!s.iacEnabled}
                 onCheckedChange={(v) => handleToggleAuto(idx, !!v)}
@@ -594,82 +583,106 @@ function HostStacksView({
           </CardHeader>
           <CardContent className="pt-0">
             <div className="overflow-x-auto rounded-lg border border-slate-800">
-              <table className="w-full text-sm table-fixed">
+              {/* condensed table: no fixed column widths, tighter paddings */}
+              <table className="w-full text-xs table-fixed">
                 <thead className="bg-slate-900/70 text-slate-300">
-                  <tr>
-                    <th className="p-3 text-left w-64">Name</th>
-                    <th className="p-3 text-left w-44">State</th>
-                    <th className="p-3 text-left w-[28rem]">Image</th>
-                    <th className="p-3 text-left w-44">Created</th>
-                    <th className="p-3 text-left w-40">IP Address</th>
-                    <th className="p-3 text-left w-64">Published Ports</th>
-                    <th className="p-3 text-left w-40">Owner</th>
-                    <th className="p-3 text-left w-[30rem]">Actions</th>
+                  <tr className="whitespace-nowrap">
+                    <th className="px-2 py-2 text-left">Name</th>
+                    <th className="px-2 py-2 text-left">State</th>
+                    <th className="px-2 py-2 text-left">Image</th>
+                    <th className="px-2 py-2 text-left">Created</th>
+                    <th className="px-2 py-2 text-left">IP</th>
+                    <th className="px-2 py-2 text-left">Published Ports</th>
+                    <th className="px-2 py-2 text-left">Owner</th>
+                    <th className="px-2 py-2 text-left">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {(s.rows.filter(r => matchRow(r, hostQuery))).map((r, i) => (
-                    <tr key={i} className="border-t border-slate-800 hover:bg-slate-900/40">
-                      <td className="p-3 font-medium text-slate-200 truncate">{r.name}</td>
-                      <td className="p-3 text-slate-300"><StatePill state={r.state} /></td>
-                      <td className="p-3 text-slate-300">
-                        <div className="flex items-center gap-2">
-                          <div className="max-w-[28rem] truncate" title={r.imageRun || ""}>{r.imageRun || "—"}</div>
-                          {r.imageIac && (
-                            <>
-                              <ChevronRight className="h-4 w-4 text-slate-500" />
-                              <div
-                                className={`max-w-[28rem] truncate ${r.drift ? "text-amber-300" : "text-slate-300"}`}
-                                title={r.imageIac}
-                              >
-                                {r.imageIac}
-                              </div>
-                            </>
-                          )}
-                        </div>
-                      </td>
-                      <td className="p-3 text-slate-300">{r.created || "—"}</td>
-                      <td className="p-3 text-slate-300">{r.ip || "—"}</td>
-                      <td className="p-3 text-slate-300 align-top w-64">
-                        <div className="max-w-64 whitespace-pre-line leading-tight">
-                          {r.portsText || "—"}
-                        </div>
-                      </td>
-                      <td className="p-3 text-slate-300">{r.owner || "—"}</td>
-                      <td className="p-2">
-                        <div className="grid grid-cols-4 gap-1 w-fit">
-                          <ActionBtn title="Play" icon={Play} onClick={() => doCtrAction(r.name, "start")} />
-                          <ActionBtn title="Stop" icon={Square} onClick={() => doCtrAction(r.name, "stop")} />
-                          <ActionBtn title="Kill" icon={ZapOff} onClick={() => doCtrAction(r.name, "kill")} />
-                          <ActionBtn title="Restart" icon={RotateCw} onClick={() => doCtrAction(r.name, "restart")} />
-                          <ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />
-                          <ActionBtn title="Resume" icon={PlayCircle} onClick={() => doCtrAction(r.name, "unpause")} />
-                          <ActionBtn title="Remove" icon={Trash2} onClick={() => doCtrAction(r.name, "remove")} />
-                          <div className="col-span-1" />
-                          <ActionBtn title="Logs" icon={FileText} onClick={() => openLogs(r.name)} />
-                          <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
-                          <ActionBtn title="Stats" icon={Activity} onClick={async () => {
-                            try {
-                              const r2 = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(r.name)}/stats`, { credentials: "include" });
-                              const txt = await r2.text();
-                              setLogModal({ ctr: `${r.name} (stats)`, text: txt });
-                            } catch {
-                              setLogModal({ ctr: `${r.name} (stats)`, text: "(failed to load stats)" });
-                            }
-                          }} />
-                          <ActionBtn title="Console" icon={Terminal} onClick={() => alert("Console attach: coming soon")} disabled />
-                        </div>
-                      </td>
-                    </tr>
-                  ))}
+                  {(s.rows.filter(r => matchRow(r, hostQuery))).map((r, i) => {
+                    const st = (r.state || "").toLowerCase();
+                    const isRunning = st.includes("running") || st.includes("up") || st.includes("healthy") || st.includes("restarting");
+                    const isPaused = st.includes("paused");
+                    return (
+                      <tr key={i} className="border-t border-slate-800 hover:bg-slate-900/40 align-top">
+                        <td className="px-2 py-1.5 font-medium text-slate-200 truncate">{r.name}</td>
+                        <td className="px-2 py-1.5 text-slate-300"><StatePill state={r.state} /></td>
+                        <td className="px-2 py-1.5 text-slate-300">
+                          <div className="flex items-center gap-2">
+                            <div className="truncate" title={r.imageRun || ""}>{r.imageRun || "—"}</div>
+                            {r.imageIac && (
+                              <>
+                                <ChevronRight className="h-4 w-4 text-slate-500" />
+                                <div
+                                  className={`truncate ${r.drift ? "text-amber-300" : "text-slate-300"}`}
+                                  title={r.imageIac}
+                                >
+                                  {r.imageIac}
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-300">{r.created || "—"}</td>
+                        <td className="px-2 py-1.5 text-slate-300">{r.ip || "—"}</td>
+                        <td className="px-2 py-1.5 text-slate-300 align-top">
+                          <div className="whitespace-pre-line leading-tight">
+                            {r.portsText || "—"}
+                          </div>
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-300">{r.owner || "—"}</td>
+                        <td className="px-2 py-1">
+                          {/* compact toolbar */}
+                          <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap py-0.5">
+                            {!isRunning && !isPaused && (
+                              <ActionBtn title="Start" icon={Play} onClick={() => doCtrAction(r.name, "start")} />
+                            )}
+                            {isRunning && (
+                              <ActionBtn title="Stop" icon={Square} onClick={() => doCtrAction(r.name, "stop")} />
+                            )}
+                            {(isRunning || isPaused) && (
+                              <ActionBtn title="Restart" icon={RotateCw} onClick={() => doCtrAction(r.name, "restart")} />
+                            )}
+                            {isRunning && !isPaused && (
+                              <ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />
+                            )}
+                            {isPaused && (
+                              <ActionBtn title="Resume" icon={PlayCircle} onClick={() => doCtrAction(r.name, "unpause")} />
+                            )}
+
+                            <span className="mx-1 h-4 w-px bg-slate-700/60" />
+
+                            <ActionBtn title="Logs" icon={FileText} onClick={() => openLogs(r.name)} />
+                            <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
+                            <ActionBtn
+                              title="Stats"
+                              icon={Activity}
+                              onClick={async () => {
+                                try {
+                                  const r2 = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(r.name)}/stats`, { credentials: "include" });
+                                  const txt = await r2.text();
+                                  setLogModal({ ctr: `${r.name} (stats)`, text: txt });
+                                } catch {
+                                  setLogModal({ ctr: `${r.name} (stats)`, text: "(failed to load stats)" });
+                                }
+                              }}
+                            />
+
+                            <span className="mx-1 h-4 w-px bg-slate-700/60" />
+
+                            <ActionBtn title="Kill" icon={ZapOff} onClick={() => doCtrAction(r.name, "kill")} />
+                            <ActionBtn title="Remove" icon={Trash2} onClick={() => doCtrAction(r.name, "remove")} />
+
+                            <ActionBtn title="Console (soon)" icon={Terminal} onClick={() => {}} disabled />
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
                   {(!s.rows || s.rows.filter(r => matchRow(r, hostQuery)).length === 0) && (
-                    <tr><td className="p-4 text-slate-500" colSpan={8}>No containers or services.</td></tr>
+                    <tr><td className="p-3 text-slate-500" colSpan={8}>No containers or services.</td></tr>
                   )}
                 </tbody>
               </table>
-            </div>
-            <div className="pt-2 text-xs text-slate-400">
-              Tip: click the stack title to open the full compare & editor view.
             </div>
           </CardContent>
         </Card>
@@ -757,7 +770,13 @@ type MiniEditorProps = {
 
 function MiniEditor({
   id, initialPath, stackId, ensureStack, refresh,
-}: MiniEditorProps) {
+}: {
+  id: string;
+  initialPath: string;
+  stackId?: number;
+  ensureStack: () => Promise<number>;
+  refresh: () => void;
+}) {
   const [path, setPath] = useState(initialPath);
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(false);
@@ -791,15 +810,17 @@ function MiniEditor({
     return () => { cancel = true; };
   }, [stackId, path]);
 
-  async function saveFile() {
+  // NOTE: accept a force flag so callers aren’t dependent on async state
+  async function saveFile(forceSops?: boolean) {
     setLoading(true); setErr(null);
     try {
       const idToUse = stackId ?? await ensureStack();
+      const sopsFlag = forceSops ?? sops;
       const r = await fetch(`/api/iac/stacks/${idToUse}/file`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, content, sops }),
+        body: JSON.stringify({ path, content, sops: sopsFlag }),
       });
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
       refresh();
@@ -836,11 +857,11 @@ function MiniEditor({
     if (!stackId) { setErr("Create the stack by saving a file first."); return; }
     if (sops) { setErr("File is already marked as SOPS."); return; }
     if (!confirm("Encrypt this file with SOPS? This action cannot be undone locally.")) return;
-    
+
     setLoading(true); setErr(null);
     try {
       setSops(true);
-      await saveFile(); // This will trigger SOPS encryption on the server
+      await saveFile(true);
     } catch (e: any) {
       setSops(false);
       setErr(e?.message || "Failed to encrypt");
@@ -849,7 +870,10 @@ function MiniEditor({
     }
   }
 
-  const isSopsFile = path.toLowerCase().includes('_secret.env') || path.toLowerCase().includes('_private.env') || sops;
+  const isSopsFile =
+    path.toLowerCase().includes('_secret.env') ||
+    path.toLowerCase().includes('_private.env') ||
+    sops;
 
   return (
     <Card className="bg-slate-900/40 border-slate-800 h-full flex flex-col">
@@ -861,12 +885,12 @@ function MiniEditor({
           <Input value={path} onChange={e => setPath(e.target.value)} placeholder="docker-compose/host/stack/compose.yaml" className="flex-1" />
           <div className="flex gap-1">
             {isSopsFile && (
-              <Button onClick={revealSops} variant="outline" className="border-indigo-700 text-indigo-200" title="Decrypt and reveal SOPS content">
+              <Button onClick={revealSops} variant="outline" className="border-indigo-700 text-indigo-200" title="Decrypt and reveal SOPS content" disabled={loading}>
                 <Shield className="h-4 w-4 mr-1" />SOPS Reveal
               </Button>
             )}
             {!sops && !isSopsFile && (
-              <Button onClick={encryptSops} variant="outline" className="border-amber-700 text-amber-200" title="Encrypt this file with SOPS">
+              <Button onClick={encryptSops} variant="outline" className="border-amber-700 text-amber-200 disabled:opacity-60" title="Encrypt this file with SOPS" disabled={loading}>
                 <ShieldOff className="h-4 w-4 mr-1" />SOPS Encrypt
               </Button>
             )}
@@ -880,13 +904,14 @@ function MiniEditor({
           value={content}
           onChange={e => setContent(e.target.value)}
           placeholder={loading ? "Loading…" : "File content…"}
+          disabled={loading}
         />
         <div className="flex items-center justify-between shrink-0">
           <label className="text-sm text-slate-300 inline-flex items-center gap-2">
             <input type="checkbox" checked={sops} onChange={e => setSops(e.target.checked)} />
             Mark as SOPS file
           </label>
-          <Button onClick={saveFile} disabled={loading}><Save className="h-4 w-4 mr-1" /> Save</Button>
+          <Button onClick={() => saveFile()} disabled={loading}><Save className="h-4 w-4 mr-1" /> Save</Button>
         </div>
         <div className="text-xs text-slate-500 -mt-2">
           Files ending with <code>_private.env</code> or <code>_secret.env</code> will auto-encrypt with SOPS (if the server has a key).
@@ -993,14 +1018,13 @@ function StackDetailView({
       }
     }
   
-    // Check if stack has content before enabling
     if (checked && files.length === 0) {
       alert("This stack needs compose files or services before Auto DevOps can be enabled. Add content first.");
       return;
     }
   
     setAutoDevOps(checked);
-    const r = await fetch(`/api/iac/stacks/${id}`, {
+    await fetch(`/api/iac/stacks/${id}`, {
       method: "PATCH",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
@@ -1061,7 +1085,10 @@ function StackDetailView({
           />
           {stackIacId ? (
             <>
-              <Button onClick={refreshFiles} variant="outline" className="border-slate-700">
+              <Button onClick={() => {
+                // refresh files list explicitly
+                (async () => { await refreshFiles(); })();
+              }} variant="outline" className="border-slate-700">
                 <RefreshCw className="h-4 w-4 mr-1" /> Refresh
               </Button>
               <Button onClick={deleteStack} variant="outline" className="border-rose-700 text-rose-200">
@@ -1276,7 +1303,7 @@ function StackDetailView({
   );
 }
 
-/* ==================== Images/Networks/Volumes with Sorting + Bulk Delete ==================== */
+/* ==================== Images/Networks/Volumes with Sorting ==================== */
 
 function HostPicker({
   hosts, activeHost, setActiveHost,
@@ -1331,28 +1358,22 @@ function ImagesView({ hosts }: { hosts: Host[] }) {
   const [rows, setRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [sort, setSort] = useState<{ key: string; direction: 'asc' | 'desc' }>({ key: 'repo', direction: 'asc' });
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const allSelected = rows.length > 0 && selected.size === rows.length;
 
   useEffect(() => {
     if (!hostName) return;
     (async () => {
       setLoading(true);
-      try {
-        const r = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/images`, { credentials: "include" });
-        const j = await r.json();
-        setRows(j.items || []);
-        setSelected(new Set());
-      } finally {
-        setLoading(false);
-      }
+      const r = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/images`, { credentials: "include" });
+      const j = await r.json();
+      setRows(j.items || []);
+      setLoading(false);
     })();
   }, [hostName]);
 
   const sortedRows = useMemo(() => {
     return [...rows].sort((a, b) => {
-      const aVal = (a[sort.key] || '').toString();
-      const bVal = (b[sort.key] || '').toString();
+      const aVal = a[sort.key] || '';
+      const bVal = b[sort.key] || '';
       const result = aVal.localeCompare(bVal);
       return sort.direction === 'asc' ? result : -result;
     });
@@ -1365,84 +1386,31 @@ function ImagesView({ hosts }: { hosts: Host[] }) {
     }));
   };
 
-  const toggleOne = (id: string) => {
-    setSelected(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id); else next.add(id);
-      return next;
-    });
-  };
-  const toggleAll = () => {
-    if (allSelected) {
-      setSelected(new Set());
-    } else {
-      setSelected(new Set(rows.map((r:any) => r.id)));
-    }
-  };
-
-  async function bulkDelete(force = true) {
-    if (selected.size === 0) return;
-    if (!confirm(`Delete ${selected.size} image(s) from ${hostName}?`)) return;
-    const ids = Array.from(selected);
-    const r = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/images/delete`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ids, force }),
-    });
-    if (!r.ok) {
-      const txt = await r.text();
-      alert(`Delete failed: ${txt}`);
-      return;
-    }
-    const r2 = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/images`, { credentials: "include" });
-    const j2 = await r2.json();
-    setRows(j2.items || []);
-    setSelected(new Set());
-  }
-
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <div className="text-lg font-semibold text-white">Images</div>
-        <div className="flex items-center gap-3">
-          <Button
-            variant="outline"
-            className="border-rose-700 text-rose-200 disabled:opacity-50"
-            disabled={selected.size === 0}
-            onClick={() => bulkDelete(true)}
-            title="Force delete selected images"
-          >
-            <Trash2 className="h-4 w-4 mr-1" /> Delete selected
-          </Button>
-          <HostPicker hosts={hosts} activeHost={hostName} setActiveHost={setHostName} />
-        </div>
+        <HostPicker hosts={hosts} activeHost={hostName} setActiveHost={setHostName} />
       </div>
       <div className="overflow-hidden rounded-xl border border-slate-800">
         <table className="w-full text-sm">
           <thead className="bg-slate-900/70 text-slate-300">
             <tr>
-              <th className="p-2 text-left w-10">
-                <input type="checkbox" checked={allSelected} onChange={toggleAll} />
-              </th>
               <SortableHeader sortKey="repo" currentSort={sort} onSort={handleSort}>Repository</SortableHeader>
               <SortableHeader sortKey="tag" currentSort={sort} onSort={handleSort}>Tag</SortableHeader>
-              <SortableHeader sortKey="id" currentSort={sort} onSort={handleSort}>Image ID (sha256)</SortableHeader>
+              <SortableHeader sortKey="id" currentSort={sort} onSort={handleSort}>ID</SortableHeader>
               <SortableHeader sortKey="size" currentSort={sort} onSort={handleSort}>Size</SortableHeader>
               <SortableHeader sortKey="created" currentSort={sort} onSort={handleSort}>Created</SortableHeader>
             </tr>
           </thead>
           <tbody>
-            {loading && <tr><td className="p-3 text-slate-500" colSpan={6}>Loading…</td></tr>}
-            {(!loading && sortedRows.length === 0) && <tr><td className="p-3 text-slate-500" colSpan={6}>No images.</td></tr>}
+            {loading && <tr><td className="p-3 text-slate-500" colSpan={5}>Loading…</td></tr>}
+            {(!loading && sortedRows.length === 0) && <tr><td className="p-3 text-slate-500" colSpan={5}>No images.</td></tr>}
             {sortedRows.map((im, i) => (
               <tr key={i} className="border-t border-slate-800 hover:bg-slate-900/40">
-                <td className="p-2">
-                  <input type="checkbox" checked={selected.has(im.id)} onChange={() => toggleOne(im.id)} />
-                </td>
-                <td className="p-2 text-slate-300">{im.repo || "<none>"}</td>
-                <td className="p-2 text-slate-300">{im.tag || "none"}</td>
-                <td className="p-2 text-slate-300 font-mono text-xs break-all">{im.id}</td>
+                <td className="p-2 text-slate-300">{im.repo || "—"}</td>
+                <td className="p-2 text-slate-300">{im.tag || "—"}</td>
+                <td className="p-2 text-slate-300 font-mono">{im.id?.slice(7, 19) || "—"}</td>
                 <td className="p-2 text-slate-300">{im.size || "—"}</td>
                 <td className="p-2 text-slate-300">{im.created || "—"}</td>
               </tr>
@@ -1459,28 +1427,22 @@ function NetworksView({ hosts }: { hosts: Host[] }) {
   const [rows, setRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [sort, setSort] = useState<{ key: string; direction: 'asc' | 'desc' }>({ key: 'name', direction: 'asc' });
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const allSelected = rows.length > 0 && selected.size === rows.length;
 
   useEffect(() => {
     if (!hostName) return;
     (async () => {
       setLoading(true);
-      try {
-        const r = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/networks`, { credentials: "include" });
-        const j = await r.json();
-        setRows(j.items || []);
-        setSelected(new Set());
-      } finally {
-        setLoading(false);
-      }
+      const r = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/networks`, { credentials: "include" });
+      const j = await r.json();
+      setRows(j.items || []);
+      setLoading(false);
     })();
   }, [hostName]);
 
   const sortedRows = useMemo(() => {
     return [...rows].sort((a, b) => {
-      const aVal = (a[sort.key] || '').toString();
-      const bVal = (b[sort.key] || '').toString();
+      const aVal = a[sort.key] || '';
+      const bVal = b[sort.key] || '';
       const result = aVal.localeCompare(bVal);
       return sort.direction === 'asc' ? result : -result;
     });
@@ -1493,62 +1455,16 @@ function NetworksView({ hosts }: { hosts: Host[] }) {
     }));
   };
 
-  const toggleOne = (name: string) => {
-    setSelected(prev => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name); else next.add(name);
-      return next;
-    });
-  };
-  const toggleAll = () => {
-    if (allSelected) setSelected(new Set());
-    else setSelected(new Set(rows.map((r:any) => r.name)));
-  };
-
-  async function bulkDelete() {
-    if (selected.size === 0) return;
-    if (!confirm(`Delete ${selected.size} network(s) from ${hostName}?`)) return;
-    const names = Array.from(selected);
-    const r = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/networks/delete`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ names }),
-    });
-    if (!r.ok) {
-      const txt = await r.text();
-      alert(`Delete failed: ${txt}`);
-      return;
-    }
-    const r2 = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/networks`, { credentials: "include" });
-    const j2 = await r2.json();
-    setRows(j2.items || []);
-    setSelected(new Set());
-  }
-
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <div className="text-lg font-semibold text-white">Networks</div>
-        <div className="flex items-center gap-3">
-          <Button
-            variant="outline"
-            className="border-rose-700 text-rose-200 disabled:opacity-50"
-            disabled={selected.size === 0}
-            onClick={bulkDelete}
-          >
-            <Trash2 className="h-4 w-4 mr-1" /> Delete selected
-          </Button>
-          <HostPicker hosts={hosts} activeHost={hostName} setActiveHost={setHostName} />
-        </div>
+        <HostPicker hosts={hosts} activeHost={hostName} setActiveHost={setHostName} />
       </div>
       <div className="overflow-hidden rounded-xl border border-slate-800">
         <table className="w-full text-sm">
           <thead className="bg-slate-900/70 text-slate-300">
             <tr>
-              <th className="p-2 text-left w-10">
-                <input type="checkbox" checked={allSelected} onChange={toggleAll} />
-              </th>
               <SortableHeader sortKey="name" currentSort={sort} onSort={handleSort}>Name</SortableHeader>
               <SortableHeader sortKey="driver" currentSort={sort} onSort={handleSort}>Driver</SortableHeader>
               <SortableHeader sortKey="scope" currentSort={sort} onSort={handleSort}>Scope</SortableHeader>
@@ -1556,13 +1472,10 @@ function NetworksView({ hosts }: { hosts: Host[] }) {
             </tr>
           </thead>
           <tbody>
-            {loading && <tr><td className="p-3 text-slate-500" colSpan={5}>Loading…</td></tr>}
-            {(!loading && sortedRows.length === 0) && <tr><td className="p-3 text-slate-500" colSpan={5}>No networks.</td></tr>}
+            {loading && <tr><td className="p-3 text-slate-500" colSpan={4}>Loading…</td></tr>}
+            {(!loading && sortedRows.length === 0) && <tr><td className="p-3 text-slate-500" colSpan={4}>No networks.</td></tr>}
             {sortedRows.map((n, i) => (
               <tr key={i} className="border-t border-slate-800 hover:bg-slate-900/40">
-                <td className="p-2">
-                  <input type="checkbox" checked={selected.has(n.name)} onChange={() => toggleOne(n.name)} />
-                </td>
                 <td className="p-2 text-slate-300">{n.name}</td>
                 <td className="p-2 text-slate-300">{n.driver}</td>
                 <td className="p-2 text-slate-300">{n.scope}</td>
@@ -1581,28 +1494,22 @@ function VolumesView({ hosts }: { hosts: Host[] }) {
   const [rows, setRows] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
   const [sort, setSort] = useState<{ key: string; direction: 'asc' | 'desc' }>({ key: 'name', direction: 'asc' });
-  const [selected, setSelected] = useState<Set<string>>(new Set());
-  const allSelected = rows.length > 0 && selected.size === rows.length;
 
   useEffect(() => {
     if (!hostName) return;
     (async () => {
       setLoading(true);
-      try {
-        const r = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/volumes`, { credentials: "include" });
-        const j = await r.json();
-        setRows(j.items || []);
-        setSelected(new Set());
-      } finally {
-        setLoading(false);
-      }
+      const r = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/volumes`, { credentials: "include" });
+      const j = await r.json();
+      setRows(j.items || []);
+      setLoading(false);
     })();
   }, [hostName]);
 
   const sortedRows = useMemo(() => {
     return [...rows].sort((a, b) => {
-      const aVal = (a[sort.key] || '').toString();
-      const bVal = (b[sort.key] || '').toString();
+      const aVal = a[sort.key] || '';
+      const bVal = b[sort.key] || '';
       const result = aVal.localeCompare(bVal);
       return sort.direction === 'asc' ? result : -result;
     });
@@ -1615,62 +1522,16 @@ function VolumesView({ hosts }: { hosts: Host[] }) {
     }));
   };
 
-  const toggleOne = (name: string) => {
-    setSelected(prev => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name); else next.add(name);
-      return next;
-    });
-  };
-  const toggleAll = () => {
-    if (allSelected) setSelected(new Set());
-    else setSelected(new Set(rows.map((r:any) => r.name)));
-  };
-
-  async function bulkDelete(force = true) {
-    if (selected.size === 0) return;
-    if (!confirm(`Delete ${selected.size} volume(s) from ${hostName}?`)) return;
-    const names = Array.from(selected);
-    const r = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/volumes/delete`, {
-      method: "POST",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ names, force }),
-    });
-    if (!r.ok) {
-      const txt = await r.text();
-      alert(`Delete failed: ${txt}`);
-      return;
-    }
-    const r2 = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/volumes`, { credentials: "include" });
-    const j2 = await r2.json();
-    setRows(j2.items || []);
-    setSelected(new Set());
-  }
-
   return (
     <div className="space-y-3">
       <div className="flex items-center justify-between">
         <div className="text-lg font-semibold text-white">Volumes</div>
-        <div className="flex items-center gap-3">
-          <Button
-            variant="outline"
-            className="border-rose-700 text-rose-200 disabled:opacity-50"
-            disabled={selected.size === 0}
-            onClick={() => bulkDelete(true)}
-          >
-            <Trash2 className="h-4 w-4 mr-1" /> Delete selected
-          </Button>
-          <HostPicker hosts={hosts} activeHost={hostName} setActiveHost={setHostName} />
-        </div>
+        <HostPicker hosts={hosts} activeHost={hostName} setActiveHost={setHostName} />
       </div>
       <div className="overflow-hidden rounded-xl border border-slate-800">
         <table className="w-full text-sm">
           <thead className="bg-slate-900/70 text-slate-300">
             <tr>
-              <th className="p-2 text-left w-10">
-                <input type="checkbox" checked={allSelected} onChange={toggleAll} />
-              </th>
               <SortableHeader sortKey="name" currentSort={sort} onSort={handleSort}>Name</SortableHeader>
               <SortableHeader sortKey="driver" currentSort={sort} onSort={handleSort}>Driver</SortableHeader>
               <SortableHeader sortKey="mountpoint" currentSort={sort} onSort={handleSort}>Mountpoint</SortableHeader>
@@ -1678,13 +1539,10 @@ function VolumesView({ hosts }: { hosts: Host[] }) {
             </tr>
           </thead>
           <tbody>
-            {loading && <tr><td className="p-3 text-slate-500" colSpan={5}>Loading…</td></tr>}
-            {(!loading && sortedRows.length === 0) && <tr><td className="p-3 text-slate-500" colSpan={5}>No volumes.</td></tr>}
+            {loading && <tr><td className="p-3 text-slate-500" colSpan={4}>Loading…</td></tr>}
+            {(!loading && sortedRows.length === 0) && <tr><td className="p-3 text-slate-500" colSpan={4}>No volumes.</td></tr>}
             {sortedRows.map((v, i) => (
               <tr key={i} className="border-t border-slate-800 hover:bg-slate-900/40">
-                <td className="p-2">
-                  <input type="checkbox" checked={selected.has(v.name)} onChange={() => toggleOne(v.name)} />
-                </td>
                 <td className="p-2 text-slate-300">{v.name}</td>
                 <td className="p-2 text-slate-300">{v.driver}</td>
                 <td className="p-2 text-slate-300 font-mono text-xs">{v.mountpoint}</td>

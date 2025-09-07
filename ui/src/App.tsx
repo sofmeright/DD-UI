@@ -1,3 +1,4 @@
+// ui/src/App.tsx
 import React, { useEffect, useMemo, useState } from "react";
 import LeftNav from "@/components/LeftNav";
 import LoginGate from "@/components/LoginGate";

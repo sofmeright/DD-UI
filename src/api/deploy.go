@@ -19,10 +19,8 @@ type ctxManualKey struct{}
 // then runs `docker compose up -d` with the staged compose files.
 // Originals are never modified and plaintext only lives in the stage dir.
 //
-// IMPORTANT: This function now **guards** non-manual invocations behind
-// shouldAutoApply(ctx, stackID). Any code path that calls deployStack directly
-// will respect the global/host/stack Auto DevOps toggles unless the caller
-// sets context.WithValue(ctx, ctxManualKey{}, true).
+// IMPORTANT: Non-manual invocations are **gated** by shouldAutoApply(ctx, stackID).
+// Manual invocations bypass Auto DevOps (still require files to exist).
 func deployStack(ctx context.Context, stackID int64) error {
 	// Auto-DevOps gate (unless manual override)
 	if man, _ := ctx.Value(ctxManualKey{}).(bool); !man {
@@ -36,7 +34,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 		}
 	}
 
-	// Figure out the working dir for compose (stack root on disk)
+	// Working dir for compose (stack root on disk)
 	root, err := getRepoRootForStack(ctx, stackID)
 	if err != nil {
 		return err
@@ -47,20 +45,20 @@ func deployStack(ctx context.Context, stackID int64) error {
 		return errors.New("deploy: stack has no rel_path")
 	}
 
-	// Prepare staged tree (scope/host-or-group/stack/buildID/rel_path)
+	// Stage files for compose
 	stageDir, stagedComposes, cleanup, derr := stageStackForCompose(ctx, stackID)
 	if derr != nil {
 		return derr
 	}
 	defer func() { if cleanup != nil { cleanup() } }()
 
-	// If nothing to deploy, keep previous "no-op" behavior.
+	// Nothing to deploy? No-op (kept for clarity)
 	if len(stagedComposes) == 0 {
 		log.Printf("deploy: stack %d: no compose files tracked; skipping", stackID)
 		return nil
 	}
 
-	// Build: docker compose -f <compose...> up -d --remove-orphans
+	// docker compose -f <files...> up -d --remove-orphans
 	args := []string{"compose"}
 	for _, f := range stagedComposes {
 		args = append(args, "-f", f)

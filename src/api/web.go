@@ -77,10 +77,10 @@ func makeRouter() http.Handler {
 				})
 			})
 
-			// PATCH global value: { "value": true|false } or { "value": null } to clear override (revert to env)
+			// PATCH global: { "value": true|false } or { "value": null } to clear to ENV
 			priv.Patch("/devops/apply", func(w http.ResponseWriter, r *http.Request) {
 				var body struct {
-					Value *bool `json:"value"` // nil removes DB override
+					Value *bool `json:"value"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					http.Error(w, "bad json", http.StatusBadRequest)
@@ -116,7 +116,6 @@ func makeRouter() http.Handler {
 			})
 
 			// PATCH host override: { "value": true|false } or { "value": null } to clear
-			// Robust: falls back to app_settings if host_settings table is absent.
 			priv.Patch("/hosts/{name}/devops/apply", func(w http.ResponseWriter, r *http.Request) {
 				host := chi.URLParam(r, "name")
 				var body struct {
@@ -131,6 +130,54 @@ func makeRouter() http.Handler {
 					return
 				}
 				ov, _ := getHostDevopsOverride(r.Context(), host)
+				glob, _ := getAppSettingBool(r.Context(), "devops_apply")
+				if glob == nil {
+					d := envBool("DDUI_DEVOPS_APPLY", "false")
+					glob = &d
+				}
+				eff := *glob
+				if ov != nil {
+					eff = *ov
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"override": ov, "effective": eff, "status": "ok"})
+			})
+
+			/* ---------- Group-level DevOps Apply override ---------- */
+
+			// GET group override + effective (group override if set, else global)
+			priv.Get("/groups/{name}/devops/apply", func(w http.ResponseWriter, r *http.Request) {
+				group := chi.URLParam(r, "name")
+				ov, _ := getGroupDevopsOverride(r.Context(), group)
+				glob, _ := getAppSettingBool(r.Context(), "devops_apply")
+				if glob == nil {
+					d := envBool("DDUI_DEVOPS_APPLY", "false")
+					glob = &d
+				}
+				eff := *glob
+				if ov != nil {
+					eff = *ov
+				}
+				writeJSON(w, http.StatusOK, map[string]any{
+					"override": ov,   // null means inherit
+					"effective": eff, // bool
+				})
+			})
+
+			// PATCH group override: { "value": true|false } or { "value": null } to clear
+			priv.Patch("/groups/{name}/devops/apply", func(w http.ResponseWriter, r *http.Request) {
+				group := chi.URLParam(r, "name")
+				var body struct {
+					Value *bool `json:"value"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				if err := setGroupDevopsOverride(r.Context(), group, body.Value); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				ov, _ := getGroupDevopsOverride(r.Context(), group)
 				glob, _ := getAppSettingBool(r.Context(), "devops_apply")
 				if glob == nil {
 					d := envBool("DDUI_DEVOPS_APPLY", "false")
@@ -232,7 +279,7 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 			})
 
-			// Logs (simple, non-follow; UI may show as text)
+			// Logs (simple, non-follow)
 			priv.Get("/hosts/{name}/containers/{ctr}/logs", func(w http.ResponseWriter, r *http.Request) {
 				host := chi.URLParam(r, "name")
 				ctr := chi.URLParam(r, "ctr")
@@ -285,7 +332,7 @@ func makeRouter() http.Handler {
 				_, _ = w.Write([]byte(txt))
 			})
 
-			// Images (with repo/tag persistence + cleanup)
+			// Images
 			priv.Get("/hosts/{name}/images", func(w http.ResponseWriter, r *http.Request) {
 				host := chi.URLParam(r, "name")
 				h, err := GetHostByName(r.Context(), host)
@@ -306,7 +353,6 @@ func makeRouter() http.Handler {
 					return
 				}
 
-				// Load any previously-known repo/tag values for this host.
 				stored, _ := getImageTagMap(r.Context(), host)
 
 				type row struct {
@@ -356,7 +402,7 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"items": items})
 			})
 
-			// Bulk delete images by ID (optionally force)
+			// Bulk delete images
 			priv.Post("/hosts/{name}/images/delete", func(w http.ResponseWriter, r *http.Request) {
 				host := chi.URLParam(r, "name")
 				h, err := GetHostByName(r.Context(), host)
@@ -441,7 +487,7 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"items": items})
 			})
 
-			// Bulk delete networks by name
+			// Delete networks
 			priv.Post("/hosts/{name}/networks/delete", func(w http.ResponseWriter, r *http.Request) {
 				host := chi.URLParam(r, "name")
 				h, err := GetHostByName(r.Context(), host)
@@ -517,7 +563,7 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"items": items})
 			})
 
-			// Bulk delete volumes by name (with optional force)
+			// Delete volumes
 			priv.Post("/hosts/{name}/volumes/delete", func(w http.ResponseWriter, r *http.Request) {
 				host := chi.URLParam(r, "name")
 				h, err := GetHostByName(r.Context(), host)
@@ -789,8 +835,8 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"stack": row})
 			})
 
-			// Patch IaC stack (decoupled):
-			//   { "iac_enabled": true|false }              -> updates ONLY iac_enabled
+			// Patch IaC stack (decoupled + compat):
+			//   { "iac_enabled": true|false }              -> updates ONLY iac_enabled; **compat:** if AutoDevOps* not provided, we mirror this to auto_apply_override
 			//   { "auto_devops": true|false }             -> sets stack auto_apply_override to value
 			//   { "auto_devops_inherit": true }           -> clears stack override (inherit)
 			priv.Patch("/iac/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -807,12 +853,14 @@ func makeRouter() http.Handler {
 					return
 				}
 
-				// Update iac_enabled only (no coupling)
+				// Update iac_enabled only (decoupled)
+				var touchedIac bool
 				if body.IacEnabled != nil {
 					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET iac_enabled=$1 WHERE id=$2`, *body.IacEnabled, id); err != nil {
 						http.Error(w, err.Error(), http.StatusBadRequest)
 						return
 					}
+					touchedIac = true
 				}
 
 				// Clear override if requested
@@ -829,6 +877,13 @@ func makeRouter() http.Handler {
 						http.Error(w, err.Error(), http.StatusBadRequest)
 						return
 					}
+				}
+
+				// **Compatibility path**:
+				// If caller only sent iac_enabled, treat it as an Auto DevOps toggle too,
+				// so existing UI switches control Auto DevOps until the UI is updated.
+				if touchedIac && body.AutoDevOps == nil && (body.AutoDevOpsInherit == nil || !*body.AutoDevOpsInherit) {
+					_, _ = db.Exec(r.Context(), `UPDATE iac_stacks SET auto_apply_override=$1 WHERE id=$2`, *body.IacEnabled, id)
 				}
 
 				eff, _ := shouldAutoApply(r.Context(), id)
@@ -945,7 +1000,7 @@ func makeRouter() http.Handler {
 					Path    string `json:"path"`
 					Content string `json:"content"`
 					Sops    bool   `json:"sops,omitempty"`
-					Role    string `json:"role,omitempty"`
+					Role    string `json:"role,omitempty"` // compose|env|script|other
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					http.Error(w, "bad json", http.StatusBadRequest)
@@ -1050,8 +1105,7 @@ func makeRouter() http.Handler {
 			})
 
 			// Deploy endpoint
-			// - Manual deploys: POST .../deploy?manual=1  -> always allowed
-			// - Auto/background: POST .../deploy         -> only if shouldAutoApply == true
+			// - Manual deploys: **default** (for UI). Pass ?auto=1 for background/auto callers.
 			priv.Post("/iac/stacks/{id}/deploy", func(w http.ResponseWriter, r *http.Request) {
 				idStr := chi.URLParam(r, "id")
 				id, err := strconv.ParseInt(idStr, 10, 64)
@@ -1071,8 +1125,10 @@ func makeRouter() http.Handler {
 					return
 				}
 
-				manual := isTrueish(r.URL.Query().Get("manual"))
+				// Manual by default (UI-friendly). Auto callers pass ?auto=1 explicitly.
+				manual := !isTrueish(r.URL.Query().Get("auto"))
 
+				// Gate only if NOT manual
 				if !manual {
 					allowed, aerr := shouldAutoApply(r.Context(), id)
 					if aerr != nil {
@@ -1187,7 +1243,7 @@ func parseDurationDefault(s string, def time.Duration) time.Duration {
 
 // safe path join under repo root
 func joinUnder(root, rel string) (string, error) {
-	clean := filepath.Clean("/" + rel)
+	clean := filepath.Clean("/" + rel) // force absolute-clean then strip
 	clean = strings.TrimPrefix(clean, "/")
 	full := filepath.Join(root, clean)
 	r, err := filepath.Rel(root, full)
@@ -1270,7 +1326,7 @@ func isTrueish(s string) bool {
 	return false
 }
 
-// app_settings: simple KV store (migration 013)
+// app_settings: simple KV store
 func getAppSetting(ctx context.Context, key string) (string, bool) {
 	var v string
 	err := db.QueryRow(ctx, `SELECT value FROM app_settings WHERE key=$1`, key).Scan(&v)
@@ -1315,49 +1371,52 @@ func setGlobalDevopsApply(ctx context.Context, v *bool) error {
 	return setAppSetting(ctx, "devops_apply", "false")
 }
 
-// host_settings override helpers with **fallback** to app_settings if host_settings table is missing.
+// host_settings: per-host overrides
 func getHostDevopsOverride(ctx context.Context, host string) (*bool, error) {
 	var val *bool
-	// Try dedicated table first
-	if err := db.QueryRow(ctx, `SELECT auto_apply_override FROM host_settings WHERE host_name=$1`, host).Scan(&val); err == nil {
-		return val, nil
+	err := db.QueryRow(ctx, `SELECT auto_apply_override FROM host_settings WHERE host_name=$1`, host).Scan(&val)
+	if err != nil {
+		return nil, nil // treat as absent
 	}
-	// Fallback to namespaced app_settings
-	if s, ok := getAppSetting(ctx, "host:"+host+":devops_apply"); ok {
-		b := isTrueish(s)
-		return &b, nil
-	}
-	return nil, nil
+	return val, nil
 }
 func setHostDevopsOverride(ctx context.Context, host string, v *bool) error {
-	// Try dedicated table
 	if v == nil {
-		// Clear override
-		_, _ = db.Exec(ctx, `DELETE FROM host_settings WHERE host_name=$1`, host) // best effort
-		_ = delAppSetting(ctx, "host:"+host+":devops_apply")
-		return nil
+		_, err := db.Exec(ctx, `DELETE FROM host_settings WHERE host_name=$1`, host)
+		return err
 	}
-	if _, err := db.Exec(ctx, `
+	_, err := db.Exec(ctx, `
 		INSERT INTO host_settings (host_name, auto_apply_override)
 		VALUES ($1,$2)
 		ON CONFLICT (host_name) DO UPDATE SET auto_apply_override=EXCLUDED.auto_apply_override, updated_at=now()
-	`, host, *v); err == nil {
-		// Also mirror to app_settings for resiliency
-		if *v {
-			_ = setAppSetting(ctx, "host:"+host+":devops_apply", "true")
-		} else {
-			_ = setAppSetting(ctx, "host:"+host+":devops_apply", "false")
-		}
-		return nil
-	}
-	// If the host_settings table is missing, use app_settings only
-	if *v {
-		return setAppSetting(ctx, "host:"+host+":devops_apply", "true")
-	}
-	return setAppSetting(ctx, "host:"+host+":devops_apply", "false")
+	`, host, *v)
+	return err
 }
 
-// shouldAutoApply resolves: global -> host override -> stack override
+// group_settings: per-group overrides
+func getGroupDevopsOverride(ctx context.Context, group string) (*bool, error) {
+	var val *bool
+	err := db.QueryRow(ctx, `SELECT auto_apply_override FROM group_settings WHERE group_name=$1`, group).Scan(&val)
+	if err != nil {
+		return nil, nil // treat as absent
+	}
+	return val, nil
+}
+func setGroupDevopsOverride(ctx context.Context, group string, v *bool) error {
+	if v == nil {
+		_, err := db.Exec(ctx, `DELETE FROM group_settings WHERE group_name=$1`, group)
+		return err
+	}
+	_, err := db.Exec(ctx, `
+		INSERT INTO group_settings (group_name, auto_apply_override)
+		VALUES ($1,$2)
+		ON CONFLICT (group_name) DO UPDATE SET auto_apply_override=EXCLUDED.auto_apply_override, updated_at=now()
+	`, group, *v)
+	return err
+}
+
+// shouldAutoApply resolves effective Auto DevOps policy:
+// global -> (host|group) override -> stack override
 func shouldAutoApply(ctx context.Context, stackID int64) (bool, error) {
 	// Base: global
 	global, _ := getGlobalDevopsApply(ctx)
@@ -1375,10 +1434,14 @@ func shouldAutoApply(ctx context.Context, stackID int64) (bool, error) {
 
 	eff := global
 
-	// Host override (only for host-scoped stacks)
-	if strings.EqualFold(scopeKind, "host") {
+	switch strings.ToLower(scopeKind) {
+	case "host":
 		if hov, _ := getHostDevopsOverride(ctx, scopeName); hov != nil {
 			eff = *hov
+		}
+	case "group":
+		if gov, _ := getGroupDevopsOverride(ctx, scopeName); gov != nil {
+			eff = *gov
 		}
 	}
 

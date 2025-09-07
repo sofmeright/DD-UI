@@ -680,6 +680,82 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"id": id, "rel_path": rel})
 			})
 
+			// ---- NEW: Get a single IaC stack (for UI sync)
+			priv.Get("/iac/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {
+				idStr := chi.URLParam(r, "id")
+				id, _ := strconv.ParseInt(idStr, 10, 64)
+
+				var row struct {
+					ID         int64  `json:"id"`
+					RepoID     int64  `json:"repo_id"`
+					ScopeKind  string `json:"scope_kind"`
+					ScopeName  string `json:"scope_name"`
+					StackName  string `json:"stack_name"`
+					RelPath    string `json:"rel_path"`
+					IacEnabled bool   `json:"iac_enabled"`
+					DeployKind string `json:"deploy_kind"`
+					SopsStatus string `json:"sops_status"`
+					UpdatedAt  string `json:"updated_at"`
+				}
+				var updatedAt time.Time
+				err := db.QueryRow(r.Context(), `
+					SELECT id, repo_id, scope_kind::text, scope_name, stack_name, rel_path,
+					       iac_enabled, deploy_kind::text, sops_status::text, updated_at
+					FROM iac_stacks
+					WHERE id=$1
+				`, id).Scan(
+					&row.ID, &row.RepoID, &row.ScopeKind, &row.ScopeName, &row.StackName, &row.RelPath,
+					&row.IacEnabled, &row.DeployKind, &row.SopsStatus, &updatedAt,
+				)
+				if err != nil {
+					http.Error(w, "not found", http.StatusNotFound)
+					return
+				}
+				row.UpdatedAt = updatedAt.Format(time.RFC3339)
+				writeJSON(w, http.StatusOK, map[string]any{"stack": row})
+			})
+
+			// ---- NEW: Patch IaC stack (toggle Auto DevOps)
+			// Accepts any of: { "iac_enabled": true|false }, { "enabled": ... }, { "auto_devops": ... }
+			priv.Patch("/iac/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {
+				idStr := chi.URLParam(r, "id")
+				id, _ := strconv.ParseInt(idStr, 10, 64)
+
+				var body struct {
+					IacEnabled *bool `json:"iac_enabled,omitempty"`
+					Enabled    *bool `json:"enabled,omitempty"`
+					AutoDevOps *bool `json:"auto_devops,omitempty"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				var v *bool
+				if body.IacEnabled != nil {
+					v = body.IacEnabled
+				} else if body.Enabled != nil {
+					v = body.Enabled
+				} else if body.AutoDevOps != nil {
+					v = body.AutoDevOps
+				}
+				if v == nil {
+					http.Error(w, "no supported fields to update", http.StatusBadRequest)
+					return
+				}
+
+				_, err := db.Exec(r.Context(), `UPDATE iac_stacks SET iac_enabled=$1 WHERE id=$2`, *v, id)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+
+				writeJSON(w, http.StatusOK, map[string]any{
+					"id":          id,
+					"iac_enabled": *v,
+					"status":      "ok",
+				})
+			})
+
 			// Delete a stack (optionally delete files too)
 			// DELETE /api/iac/stacks/{id}?delete_files=1
 			priv.Delete("/iac/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {

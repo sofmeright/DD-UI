@@ -14,7 +14,8 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-// We try to decrypt when we have AGE private key material.
+/* ---------------- SOPS helpers ---------------- */
+
 func hasSopsKeys() bool {
 	if strings.TrimSpace(os.Getenv("SOPS_AGE_KEY")) != "" {
 		return true
@@ -27,184 +28,126 @@ func hasSopsKeys() bool {
 	return false
 }
 
-// quick content sniff for .yaml/.yml/.json files
-func looksSopsStructured(content string) bool {
-	// very loose; good enough for routing to sops -d
-	return strings.Contains(content, "\nsops:") || strings.Contains(content, "\"sops\"")
-}
-
-// Returns (pathToUse, cleanupFn, wasDecrypted, error)
-func decryptIfNeeded(ctx context.Context, full string) (string, func(), bool, error) {
-	cleanup := func() {}
-	// If we have no keys, we can't decrypt. Just return the original path.
-	if !hasSopsKeys() {
-		return full, cleanup, false, nil
-	}
-
-	low := strings.ToLower(full)
-	inputType := ""
-	if strings.HasSuffix(low, ".env") {
-		inputType = "dotenv"
-	}
-
-	// Optimistic: even if heuristics don't trigger, try sops -d (ignore "not encrypted" errors)
-	args := []string{"-d"}
-	if inputType == "dotenv" {
-		args = append(args, "--input-type", "dotenv")
-	}
-	args = append(args, full)
-
-	dctx, cancel := context.WithTimeout(ctx, 10*time.Second)
-	defer cancel()
-
-	cmd := exec.CommandContext(dctx, "sops", args...)
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		outStr := strings.ToLower(string(out))
-		if strings.Contains(outStr, "file is not encrypted") || strings.Contains(outStr, "sops metadata not found") {
-			return full, cleanup, false, nil
+// Read plaintext for file `full`. If SOPS can decrypt it, return decrypted bytes;
+// if it's not encrypted, return the plain bytes. `inputType` is "" or "dotenv".
+func readDecryptedOrPlain(ctx context.Context, full, inputType string) ([]byte, bool, error) {
+	tryDecrypt := hasSopsKeys()
+	if tryDecrypt {
+		args := []string{"-d"}
+		if inputType == "dotenv" {
+			args = append(args, "--input-type", "dotenv")
 		}
-		return "", cleanup, false, fmt.Errorf("sops decrypt failed for %s: %v: %s", full, err, strings.TrimSpace(string(out)))
-	}
+		args = append(args, full)
 
-	tmpDir := os.TempDir()
-	base := filepath.Base(full)
-	tmpPath := filepath.Join(tmpDir, ".ddui-dec-"+base)
-	if err := os.WriteFile(tmpPath, out, 0o600); err != nil {
-		return "", cleanup, false, fmt.Errorf("write temp decrypted file: %w", err)
+		dctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+
+		out, err := exec.CommandContext(dctx, "sops", args...).CombinedOutput()
+		if err == nil {
+			return out, true, nil
+		}
+		low := strings.ToLower(string(out))
+		if strings.Contains(low, "file is not encrypted") || strings.Contains(low, "sops metadata not found") {
+			// fall through to plain read
+		} else {
+			return nil, false, fmt.Errorf("sops decrypt failed for %s: %v: %s", full, err, strings.TrimSpace(string(out)))
+		}
 	}
-	cleanup = func() { _ = os.Remove(tmpPath) }
-	return tmpPath, cleanup, true, nil
+	b, rerr := os.ReadFile(full)
+	return b, false, rerr
 }
 
-// rewriteComposeWithDecryptedEnvFiles creates a temp directory, copies the compose
-// YAML into it, and rewrites any services[*].env_file (string or list) to point to
-// decrypted (or plain-copied) temp files. It returns the new compose path and a cleanup().
-func rewriteComposeWithDecryptedEnvFiles(ctx context.Context, composePath string) (string, func(), error) {
-	cleanup := func() {}
+func shortHash(s string) string {
+	sum := sha1.Sum([]byte(s))
+	return hex.EncodeToString(sum[:8])
+}
 
-	b, err := os.ReadFile(composePath)
-	if err != nil {
-		return "", cleanup, err
-	}
+func materializeFile(workspace, srcPath string, content []byte) (abs string, err error) {
+	name := fmt.Sprintf("%s-%s", shortHash(srcPath), filepath.Base(srcPath))
+	abs = filepath.Join(workspace, name)
+	return abs, os.WriteFile(abs, content, 0o600)
+}
 
+/* --------- Compose overlay (no edits to original) --------- */
+
+// parseEnvFileRefs extracts service->env_file refs (as string lists) from a compose YAML blob.
+func parseEnvFileRefs(yml []byte) (map[string][]string, error) {
 	var doc map[string]any
-	if err := yaml.Unmarshal(b, &doc); err != nil {
-		// Not YAML? Just return original (Compose may still accept it).
-		return composePath, cleanup, nil
+	if err := yaml.Unmarshal(yml, &doc); err != nil {
+		return nil, err
 	}
-
-	// Create a temp project dir to hold rewritten compose + env copies
-	tmpDir, err := os.MkdirTemp("", "ddui-compose-")
-	if err != nil {
-		return "", cleanup, err
-	}
-	cleanup = func() { _ = os.RemoveAll(tmpDir) }
-
-	baseDir := filepath.Dir(composePath)
-
-	// Helper: ensure a referenced env file is materialized in tmpDir (decrypted if needed),
-	// and return a relative filename we can put back into YAML.
-	type envCopy struct {
-		rel string
-	}
-	materializeEnv := func(ref string) (envCopy, error) {
-		target := ref
-		if !filepath.IsAbs(target) {
-			target = filepath.Join(baseDir, target)
-		}
-		use := target
-		if hasSopsKeys() {
-			dec, decClr, decOK, derr := decryptIfNeeded(ctx, target)
-			if derr != nil {
-				return envCopy{}, derr
-			}
-			if decOK {
-				defer decClr() // we copy the content below; temp from decrypt can be discarded when function exits
-				use = dec
-			}
-		}
-		content, rerr := os.ReadFile(use)
-		if rerr != nil {
-			return envCopy{}, rerr
-		}
-		// stable unique name inside tmpDir to avoid collisions
-		h := sha1.Sum([]byte(target))
-		name := filepath.Base(target)
-		dst := filepath.Join(tmpDir, fmt.Sprintf("%s.%s", hex.EncodeToString(h[:8]), name))
-		if err := os.WriteFile(dst, content, 0o600); err != nil {
-			return envCopy{}, err
-		}
-		return envCopy{rel: filepath.Base(dst)}, nil
-	}
-
-	// Walk services -> env_file
+	out := map[string][]string{}
 	svcs, _ := doc["services"].(map[string]any)
-	if svcs != nil {
-		for _, v := range svcs {
-			m, _ := v.(map[string]any)
-			if m == nil {
-				continue
+	for name, raw := range svcs {
+		m, _ := raw.(map[string]any)
+		if m == nil {
+			continue
+		}
+		var refs []string
+		switch v := m["env_file"].(type) {
+		case string:
+			if strings.TrimSpace(v) != "" {
+				refs = []string{v}
 			}
-			if ef, ok := m["env_file"]; ok {
-				switch t := ef.(type) {
-				case string:
-					cp, err := materializeEnv(t)
-					if err != nil {
-						return "", cleanup, err
-					}
-					m["env_file"] = cp.rel
-				case []any:
-					out := make([]any, 0, len(t))
-					for _, item := range t {
-						s, _ := item.(string)
-						if strings.TrimSpace(s) == "" {
-							continue
-						}
-						cp, err := materializeEnv(s)
-						if err != nil {
-							return "", cleanup, err
-						}
-						out = append(out, cp.rel)
-					}
-					m["env_file"] = out
+		case []any:
+			for _, it := range v {
+				if s, ok := it.(string); ok && strings.TrimSpace(s) != "" {
+					refs = append(refs, s)
 				}
 			}
 		}
-	}
-
-	// Write modified compose into tmpDir
-	outBytes, _ := yaml.Marshal(doc)
-	newCompose := filepath.Join(tmpDir, filepath.Base(composePath))
-	if err := os.WriteFile(newCompose, outBytes, 0o600); err != nil {
-		return "", cleanup, err
-	}
-
-	return newCompose, cleanup, nil
-}
-
-// Returns compose files and env files (absolute paths) ready for docker compose,
-// plus a cleanup() that removes any temp decrypted files we created.
-//
-// Notes:
-//  - Compose files themselves may be SOPS-encrypted: we decrypt them first.
-//  - Any services[*].env_file entries are rewritten to point to decrypted temp copies.
-//  - We still include the default <stackDir>/.env for variable substitution.
-func prepareStackFilesForCompose(ctx context.Context, stackID int64) (composes []string, envs []string, cleanup func(), err error) {
-	cleanups := []func(){}
-
-	cleanup = func() {
-		for _, f := range cleanups {
-			f()
+		if len(refs) > 0 {
+			out[name] = refs
 		}
 	}
+	return out, nil
+}
+
+// buildOverrideYAML builds a minimal compose override with only env_file overrides.
+func buildOverrideYAML(envMap map[string][]string) ([]byte, error) {
+	if len(envMap) == 0 {
+		return nil, nil
+	}
+	type svc struct {
+		EnvFile []string `yaml:"env_file,omitempty"`
+	}
+	type root struct {
+		Version  string           `yaml:"version,omitempty"`
+		Services map[string]*svc  `yaml:"services"`
+	}
+	doc := root{Services: map[string]*svc{}}
+	for name, refs := range envMap {
+		// Absolute paths only (we materialize decrypted copies and point to them)
+		doc.Services[name] = &svc{EnvFile: refs}
+	}
+	return yaml.Marshal(doc)
+}
+
+/* -------- Public: Compose inputs with SOPS auto-decrypt -------- */
+
+// prepareStackFilesForCompose returns:
+//   - composes: original compose file paths + one extra override file (last) if needed
+//   - envs:     decrypted copies of substitution .env files to pass via --env-file
+//   - cleanup:  removes the temporary workspace
+//
+// Design:
+//   • Original compose files are NOT modified.
+//   • We generate a tiny override compose (last -f) that replaces services[*].env_file
+//     with absolute paths to decrypted temp copies.
+//   • Substitution .env files (IaC files with role=env + default <stackDir>/.env)
+//     are decrypted to temp and passed via repeated --env-file flags.
+func prepareStackFilesForCompose(ctx context.Context, stackID int64) (composes []string, envs []string, cleanup func(), err error) {
+	workspace, err := os.MkdirTemp("", "ddui-deploy-")
+	if err != nil {
+		return nil, nil, func() {}, err
+	}
+	cleanup = func() { _ = os.RemoveAll(workspace) }
 
 	root, err := getRepoRootForStack(ctx, stackID)
 	if err != nil {
 		return nil, nil, cleanup, err
 	}
-
-	// Figure out the stack directory (for default .env)
+	// stack dir (for default .env interpolation)
 	var rel string
 	_ = db.QueryRow(ctx, `SELECT rel_path FROM iac_stacks WHERE id=$1`, stackID).Scan(&rel)
 	stackDir := ""
@@ -214,104 +157,116 @@ func prepareStackFilesForCompose(ctx context.Context, stackID int64) (composes [
 		}
 	}
 
-	// role: compose|env|script|other
-	rows, err := db.Query(ctx, `SELECT role, rel_path, COALESCE(sops,false) FROM iac_stack_files WHERE stack_id=$1`, stackID)
+	// Gather tracked files
+	rows, err := db.Query(ctx, `SELECT role, rel_path FROM iac_stack_files WHERE stack_id=$1`, stackID)
 	if err != nil {
 		return nil, nil, cleanup, err
 	}
 	defer rows.Close()
 
-	type rec struct {
-		role string
-		path string
-		sops bool
-	}
+	type rec struct{ role, path string }
 	var files []rec
 	for rows.Next() {
 		var role, rp string
-		var sops bool
-		if err := rows.Scan(&role, &rp, &sops); err != nil {
+		if err := rows.Scan(&role, &rp); err != nil {
 			return nil, nil, cleanup, err
 		}
 		full, jerr := joinUnder(root, rp)
 		if jerr != nil {
 			return nil, nil, cleanup, jerr
 		}
-		files = append(files, rec{role: strings.ToLower(role), path: full, sops: sops})
+		files = append(files, rec{role: strings.ToLower(role), path: full})
 	}
 
-	// Deduplicate by original path
-	composeSeen := map[string]bool{}
-	envSeen := map[string]bool{}
-
+	// 1) Original compose files (unchanged)
+	var composePaths []string
 	for _, f := range files {
-		switch f.role {
-		case "compose":
-			// 1) decrypt compose file if needed
-			use := f.path
-			if hasSopsKeys() {
-				dec, clr, decOK, derr := decryptIfNeeded(ctx, f.path)
+		if f.role == "compose" {
+			composePaths = append(composePaths, f.path)
+		}
+	}
+	composes = append(composes, composePaths...) // keep original order
+
+	// 2) Service env_file overrides (decrypt each, point override to abs temp copies)
+	overrideMap := map[string][]string{} // service -> []abs paths (decrypted)
+	for _, cpath := range composePaths {
+		// Read compose (decrypt if SOPS-structured)
+		plain, _, rerr := readDecryptedOrPlain(ctx, cpath, "")
+		if rerr != nil {
+			return nil, nil, cleanup, rerr
+		}
+		refMap, perr := parseEnvFileRefs(plain)
+		if perr != nil {
+			return nil, nil, cleanup, perr
+		}
+		if len(refMap) == 0 {
+			continue
+		}
+		baseDir := filepath.Dir(cpath)
+		for svc, refs := range refMap {
+			for _, ref := range refs {
+				target := ref
+				if !filepath.IsAbs(target) {
+					target = filepath.Join(baseDir, ref)
+				}
+				content, _, derr := readDecryptedOrPlain(ctx, target, "dotenv")
 				if derr != nil {
-					cleanup()
-					return nil, nil, nil, derr
+					return nil, nil, cleanup, derr
 				}
-				if decOK {
-					cleanups = append(cleanups, clr)
-					use = dec
+				tmpAbs, werr := materializeFile(workspace, target, content)
+				if werr != nil {
+					return nil, nil, cleanup, werr
 				}
+				overrideMap[svc] = append(overrideMap[svc], tmpAbs)
 			}
-			// 2) rewrite compose to point env_file entries to decrypted copies
-			newCompose, rwClr, rerr := rewriteComposeWithDecryptedEnvFiles(ctx, use)
-			if rerr != nil {
-				cleanup()
-				return nil, nil, nil, rerr
-			}
-			cleanups = append(cleanups, rwClr)
-			if !composeSeen[f.path] {
-				composes = append(composes, newCompose)
-				composeSeen[f.path] = true
-			}
-		case "env":
-			// These are env files referenced via global --env-file for substitution.
-			use := f.path
-			if hasSopsKeys() {
-				dec, clr, decOK, derr := decryptIfNeeded(ctx, f.path)
-				if derr != nil {
-					cleanup()
-					return nil, nil, nil, derr
-				}
-				if decOK {
-					cleanups = append(cleanups, clr)
-					use = dec
-				}
-			}
-			if !envSeen[f.path] {
-				envs = append(envs, use)
-				envSeen[f.path] = true
-			}
-		default:
-			// scripts/other not passed to compose directly
 		}
 	}
 
-	// Include default <stackDir>/.env (for substitution) even if not tracked in IaC.
+	// If we have any service env overrides, write a single override file and append it last.
+	if len(overrideMap) > 0 {
+		ovYAML, merr := buildOverrideYAML(overrideMap)
+		if merr != nil {
+			return nil, nil, cleanup, merr
+		}
+		ovPath := filepath.Join(workspace, "override.envfiles.yaml")
+		if err := os.WriteFile(ovPath, ovYAML, 0o600); err != nil {
+			return nil, nil, cleanup, err
+		}
+		composes = append(composes, ovPath) // must be last so it overrides originals
+	}
+
+	// 3) Substitution envs: include IaC role=env and default <stackDir>/.env
+	seen := map[string]bool{}
+	for _, f := range files {
+		if f.role != "env" {
+			continue
+		}
+		if seen[f.path] {
+			continue
+		}
+		content, _, derr := readDecryptedOrPlain(ctx, f.path, "dotenv")
+		if derr != nil {
+			return nil, nil, cleanup, derr
+		}
+		tmpAbs, werr := materializeFile(workspace, f.path, content)
+		if werr != nil {
+			return nil, nil, cleanup, werr
+		}
+		envs = append(envs, tmpAbs)
+		seen[f.path] = true
+	}
 	if stackDir != "" {
 		defEnv := filepath.Join(stackDir, ".env")
-		if _, statErr := os.Stat(defEnv); statErr == nil && !envSeen[defEnv] {
-			use := defEnv
-			if hasSopsKeys() {
-				dec, clr, decOK, derr := decryptIfNeeded(ctx, defEnv)
-				if derr != nil {
-					cleanup()
-					return nil, nil, nil, derr
-				}
-				if decOK {
-					cleanups = append(cleanups, clr)
-					use = dec
-				}
+		if _, statErr := os.Stat(defEnv); statErr == nil && !seen[defEnv] {
+			content, _, derr := readDecryptedOrPlain(ctx, defEnv, "dotenv")
+			if derr != nil {
+				return nil, nil, cleanup, derr
 			}
-			envs = append(envs, use)
-			envSeen[defEnv] = true
+			tmpAbs, werr := materializeFile(workspace, defEnv, content)
+			if werr != nil {
+				return nil, nil, cleanup, werr
+			}
+			envs = append(envs, tmpAbs)
 		}
 	}
 

@@ -315,8 +315,9 @@ func makeRouter() http.Handler {
 				out := make([]res, 0, len(body.IDs))
 
 				for _, id := range body.IDs {
-					_, err := cli.ImageRemove(ctx, imgID, image.RemoveOptions{
-						Force:         true,
+					// NOTE: RemoveOptions lives in the image pkg with newer Docker SDKs
+					_, err := cli.ImageRemove(r.Context(), id, image.RemoveOptions{
+						Force:         body.Force,
 						PruneChildren: true,
 					})
 					if err != nil {
@@ -327,7 +328,10 @@ func makeRouter() http.Handler {
 				}
 
 				// best-effort: drop rows for those IDs from persistence
-				_, _ = db.Exec(r.Context(), `DELETE FROM image_tags WHERE host_name=$1 AND image_id = ANY($2::text[])`, host, body.IDs)
+				_, _ = db.Exec(r.Context(),
+					`DELETE FROM image_tags WHERE host_name=$1 AND image_id = ANY($2::text[])`,
+					host, body.IDs,
+				)
 
 				writeJSON(w, http.StatusOK, map[string]any{"results": out})
 			})

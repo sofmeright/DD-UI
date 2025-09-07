@@ -1,19 +1,22 @@
 # --- UI build ---
 FROM node:20-alpine AS ui
 WORKDIR /ui
-COPY ui/package.json ./
-RUN npm install --no-audit --no-fund
+COPY ui/package*.json ./
+RUN npm ci --no-audit --no-fund
 COPY ui/ .
 RUN npm run build
 
 # --- Go build ---
-FROM golang:1.23-alpine AS api
+FROM golang:1.24-alpine AS api
 WORKDIR /src/api
 COPY src/api/go.mod ./
 RUN go mod download
 COPY src/api/ .
+ARG TARGETOS
+ARG TARGETARCH
 RUN go mod tidy
-RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o /bin/ddui
+# fallback to linux/amd64 if buildx args aren’t provided
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o /bin/ddui
 
 # --- Runtime ---
 FROM debian:bookworm-slim
@@ -26,6 +29,7 @@ LABEL maintainer="SoFMeRight <sofmeright@gmail.com>" \
       org.opencontainers.image.licenses="GPL-3.0"
 
 # Base deps (curl for healthcheck + downloads; ssh for DOCKER_HOST=ssh://; tzdata; ca-certs)
+ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ca-certificates curl openssh-client tzdata \
       && rm -rf /var/lib/apt/lists/*
@@ -63,12 +67,19 @@ RUN set -eux; \
 
 # Install SOPS (v3.10.2)
 RUN set -eux; \
-    curl -fsSL -o /usr/local/bin/sops https://github.com/getsops/sops/releases/download/v3.10.2/sops-v3.10.2.linux.amd64; \
+    curl -fsSL -o /usr/local/bin/sops \
+      https://github.com/getsops/sops/releases/download/v3.10.2/sops-v3.10.2.linux.amd64; \
     chmod +x /usr/local/bin/sops
+
+RUN docker --version && docker compose version && sops --version
 
 WORKDIR /home/ddui
 COPY --from=api /bin/ddui /usr/local/bin/ddui
 COPY --from=ui /ui/dist ./ui/dist
+
+# (optional, rootless mode?)
+# RUN useradd -r -u 10001 -g root ddui
+# USER ddui
 
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \

@@ -57,6 +57,34 @@ func readDecryptedOrPlain(ctx context.Context, full, inputType string) ([]byte, 
 	return b, false, rerr
 }
 
+// Drop SOPS metadata keys from dotenv content and normalize "export KEY=..." to "KEY=...".
+func filterDotenvSopsKeys(b []byte) []byte {
+	lines := strings.Split(string(b), "\n")
+	out := make([]string, 0, len(lines))
+	for _, ln := range lines {
+		t := strings.TrimSpace(ln)
+		if t == "" || strings.HasPrefix(t, "#") {
+			out = append(out, ln)
+			continue
+		}
+		s := strings.TrimSpace(strings.TrimPrefix(t, "export "))
+		eq := strings.IndexByte(s, '=')
+		if eq <= 0 {
+			// not a KEY=VAL line; keep as-is
+			out = append(out, ln)
+			continue
+		}
+		key := strings.TrimSpace(s[:eq])
+		// strip SOPS metadata lines (sops_age__..., sops_mac, sops_version, etc.)
+		if strings.HasPrefix(strings.ToLower(key), "sops_") {
+			continue
+		}
+		val := s[eq+1:]
+		out = append(out, fmt.Sprintf("%s=%s", key, val))
+	}
+	return []byte(strings.Join(out, "\n"))
+}
+
 func shortHash(s string) string {
 	sum := sha1.Sum([]byte(s))
 	return hex.EncodeToString(sum[:8])
@@ -213,6 +241,7 @@ func prepareStackFilesForCompose(ctx context.Context, stackID int64) (composes [
 				if derr != nil {
 					return nil, nil, cleanup, derr
 				}
+				content = filterDotenvSopsKeys(content)  
 				tmpAbs, werr := materializeFile(workspace, target, content)
 				if werr != nil {
 					return nil, nil, cleanup, werr
@@ -248,6 +277,7 @@ func prepareStackFilesForCompose(ctx context.Context, stackID int64) (composes [
 		if derr != nil {
 			return nil, nil, cleanup, derr
 		}
+		content = filterDotenvSopsKeys(content)  
 		tmpAbs, werr := materializeFile(workspace, f.path, content)
 		if werr != nil {
 			return nil, nil, cleanup, werr
@@ -262,6 +292,7 @@ func prepareStackFilesForCompose(ctx context.Context, stackID int64) (composes [
 			if derr != nil {
 				return nil, nil, cleanup, derr
 			}
+			content = filterDotenvSopsKeys(content)  
 			tmpAbs, werr := materializeFile(workspace, defEnv, content)
 			if werr != nil {
 				return nil, nil, cleanup, werr

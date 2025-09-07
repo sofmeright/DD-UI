@@ -208,7 +208,7 @@ func makeRouter() http.Handler {
 				_, _ = w.Write([]byte(txt))
 			})
 
-			// Images
+			// Images (with repo/tag persistence + cleanup)
 			priv.Get("/hosts/{name}/images", func(w http.ResponseWriter, r *http.Request) {
 				host := chi.URLParam(r, "name")
 				h, err := GetHostByName(r.Context(), host)
@@ -228,33 +228,108 @@ func makeRouter() http.Handler {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
+
+				// Load any previously-known repo/tag values for this host.
+				stored, _ := getImageTagMap(r.Context(), host)
+
 				type row struct {
 					Repo    string `json:"repo"`
 					Tag     string `json:"tag"`
-					ID      string `json:"id"`
+					ID      string `json:"id"` // full sha256
 					Size    string `json:"size"`
 					Created string `json:"created"`
 				}
 				var items []row
+				seen := make(map[string]struct{}, len(list))
+
 				for _, im := range list {
+					id := im.ID // e.g. "sha256:..."
+					seen[id] = struct{}{}
 					repo := "<none>"
-					tag := "<none>"
-					if len(im.RepoTags) > 0 {
+					tag := "none"
+
+					// Prefer live docker tags if present; otherwise fall back to stored mapping.
+					if len(im.RepoTags) > 0 && im.RepoTags[0] != "<none>:<none>" {
 						parts := strings.SplitN(im.RepoTags[0], ":", 2)
 						repo = parts[0]
 						if len(parts) == 2 {
 							tag = parts[1]
 						}
+					} else if prev, ok := stored[id]; ok {
+						if strings.TrimSpace(prev[0]) != "" {
+							repo = prev[0]
+						}
+						if strings.TrimSpace(prev[1]) != "" {
+							tag = prev[1]
+						}
 					}
+
+					// Upsert so we remember a repo/tag even after it dangles later.
+					_ = upsertImageTag(r.Context(), host, id, repo, tag)
+
 					items = append(items, row{
 						Repo:    repo,
 						Tag:     tag,
-						ID:      im.ID,
+						ID:      id, // full sha256 shown to UI
 						Size:    humanSize(im.Size),
 						Created: time.Unix(im.Created, 0).Format(time.RFC3339),
 					})
 				}
+
+				// Cleanup: drop rows we didn't see this time (image deleted from host)
+				_ = cleanupImageTags(r.Context(), host, seen)
+
 				writeJSON(w, http.StatusOK, map[string]any{"items": items})
+			})
+
+			// Bulk delete images by ID (optionally force)
+			priv.Post("/hosts/{name}/images/delete", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				h, err := GetHostByName(r.Context(), host)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer cli.Close()
+
+				var body struct {
+					IDs   []string `json:"ids"`
+					Force bool     `json:"force"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				if len(body.IDs) == 0 {
+					http.Error(w, "ids required", http.StatusBadRequest)
+					return
+				}
+
+				type res struct {
+					ID  string `json:"id"`
+					Ok  bool   `json:"ok"`
+					Err string `json:"err,omitempty"`
+				}
+				out := make([]res, 0, len(body.IDs))
+
+				for _, id := range body.IDs {
+					_, err := cli.ImageRemove(r.Context(), id, types.ImageRemoveOptions{
+						Force:         body.Force,
+						PruneChildren: true,
+					})
+					if err != nil {
+						out = append(out, res{ID: id, Ok: false, Err: err.Error()})
+						continue
+					}
+					out = append(out, res{ID: id, Ok: true})
+				}
+
+				// best-effort: drop rows for those IDs from persistence
+				_, _ = db.Exec(r.Context(), `DELETE FROM image_tags WHERE host_name=$1 AND image_id = ANY($2::text[])`, host, body.IDs)
+
+				writeJSON(w, http.StatusOK, map[string]any{"results": out})
 			})
 
 			// Networks
@@ -290,6 +365,48 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"items": items})
 			})
 
+			// Bulk delete networks by name
+			priv.Post("/hosts/{name}/networks/delete", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				h, err := GetHostByName(r.Context(), host)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer cli.Close()
+
+				var body struct {
+					Names []string `json:"names"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				if len(body.Names) == 0 {
+					http.Error(w, "names required", http.StatusBadRequest)
+					return
+				}
+
+				type res struct {
+					Name string `json:"name"`
+					Ok   bool   `json:"ok"`
+					Err  string `json:"err,omitempty"`
+				}
+				out := make([]res, 0, len(body.Names))
+
+				for _, n := range body.Names {
+					if err := cli.NetworkRemove(r.Context(), n); err != nil {
+						out = append(out, res{Name: n, Ok: false, Err: err.Error()})
+						continue
+					}
+					out = append(out, res{Name: n, Ok: true})
+				}
+
+				writeJSON(w, http.StatusOK, map[string]any{"results": out})
+			})
+
 			// Volumes
 			priv.Get("/hosts/{name}/volumes", func(w http.ResponseWriter, r *http.Request) {
 				host := chi.URLParam(r, "name")
@@ -322,6 +439,49 @@ func makeRouter() http.Handler {
 					items = append(items, row{v.Name, v.Driver, v.Mountpoint, created})
 				}
 				writeJSON(w, http.StatusOK, map[string]any{"items": items})
+			})
+
+			// Bulk delete volumes by name (with optional force)
+			priv.Post("/hosts/{name}/volumes/delete", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				h, err := GetHostByName(r.Context(), host)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer cli.Close()
+
+				var body struct {
+					Names []string `json:"names"`
+					Force bool     `json:"force"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				if len(body.Names) == 0 {
+					http.Error(w, "names required", http.StatusBadRequest)
+					return
+				}
+
+				type res struct {
+					Name string `json:"name"`
+					Ok   bool   `json:"ok"`
+					Err  string `json:"err,omitempty"`
+				}
+				out := make([]res, 0, len(body.Names))
+
+				for _, v := range body.Names {
+					if err := cli.VolumeRemove(r.Context(), v, body.Force); err != nil {
+						out = append(out, res{Name: v, Ok: false, Err: err.Error()})
+						continue
+					}
+					out = append(out, res{Name: v, Ok: true})
+				}
+
+				writeJSON(w, http.StatusOK, map[string]any{"results": out})
 			})
 
 			// Trigger on-demand scan for a single host
@@ -591,7 +751,7 @@ func makeRouter() http.Handler {
 						http.Error(w, "confirmation required", http.StatusForbidden)
 						return
 					}
-					// run `sops -d`
+					// run sops -d
 					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
 					defer cancel()
 					cmd := exec.CommandContext(ctx, "sops", "-d", full)
@@ -856,6 +1016,56 @@ func joinUnder(root, rel string) (string, error) {
 		return "", errors.New("outside root")
 	}
 	return full, nil
+}
+
+// --- Image repo/tag persistence helpers ---
+
+// upsertImageTag updates or inserts the repo/tag for (host,image_id) and bumps last_seen.
+func upsertImageTag(ctx context.Context, host, id, repo, tag string) error {
+	_, err := db.Exec(ctx, `
+		INSERT INTO image_tags (host_name, image_id, repo, tag)
+		VALUES ($1, $2, $3, $4)
+		ON CONFLICT (host_name, image_id)
+		DO UPDATE SET repo=EXCLUDED.repo, tag=EXCLUDED.tag, last_seen=now();
+	`, host, id, repo, tag)
+	return err
+}
+
+// getImageTagMap returns stored repo/tag by image_id for a host.
+func getImageTagMap(ctx context.Context, host string) (map[string][2]string, error) {
+	rows, err := db.Query(ctx, `SELECT image_id, repo, tag FROM image_tags WHERE host_name=$1`, host)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := make(map[string][2]string)
+	for rows.Next() {
+		var id, repo, tag string
+		if err := rows.Scan(&id, &repo, &tag); err != nil {
+			return nil, err
+		}
+		out[id] = [2]string{repo, tag}
+	}
+	return out, nil
+}
+
+// cleanupImageTags removes DB rows for images we didn't see in the latest list.
+func cleanupImageTags(ctx context.Context, host string, keepIDs map[string]struct{}) error {
+	// Build a temp table in-memory via UNNEST for efficient diff
+	ids := make([]string, 0, len(keepIDs))
+	for id := range keepIDs {
+		ids = append(ids, id)
+	}
+	_, err := db.Exec(ctx, `
+		DELETE FROM image_tags t
+		WHERE t.host_name = $1
+		  AND NOT EXISTS (
+		    SELECT 1
+		    FROM UNNEST($2::text[]) AS u(id)
+		    WHERE u.id = t.image_id
+		  );
+	`, host, ids)
+	return err
 }
 
 func humanSize(b int64) string {

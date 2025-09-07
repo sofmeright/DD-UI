@@ -1,14 +1,74 @@
-import { useEffect, useState } from "react";
+// ui/src/StackDetailView.tsx
+import React, { useEffect, useState } from "react";
+import {
+  ArrowLeft, Eye, EyeOff, RotateCw, RefreshCw, Trash2, Shield, ShieldOff, FileText, Plus
+} from "lucide-react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
-import { ArrowLeft, Eye, EyeOff, RefreshCw, RotateCw, Trash2 } from "lucide-react";
-import Fact from "@/components/Fact";
-import MiniEditor from "@/editors/MiniEditor";
-import { ApiContainer, Host, IacFileMeta, InspectOut } from "@/types";
-import { formatDT } from "@/utils/format";
 
+/* ===== Types ===== */
+type Host = { name: string; address?: string; groups?: string[] };
+type InspectOut = {
+  id: string; name: string; image: string; state: string; health?: string; created: string;
+  cmd?: string[]; entrypoint?: string[]; env?: Record<string, string>; labels?: Record<string, string>;
+  restart_policy?: string;
+  ports?: { published?: string; target?: string; protocol?: string }[];
+  volumes?: { source?: string; target?: string; mode?: string; rw?: boolean }[];
+  networks?: string[];
+};
+type IacFileMeta = {
+  role: string; rel_path: string; sops: boolean; sha256_hex: string; size_bytes: number; updated_at: string;
+};
+type ApiContainer = {
+  name: string; image: string; state: string; status: string;
+  compose_project?: string; stack?: string | null;
+};
+
+/* ===== Small UI bits ===== */
+function Fact({ label, value }: { label: string; value: React.ReactNode }) {
+  return (
+    <div className="flex items-start gap-3">
+      <div className="shrink-0 text-xs uppercase tracking-wide text-slate-400 w-28">{label}</div>
+      <div className="text-slate-300 min-w-0 break-words">{value}</div>
+    </div>
+  );
+}
+function PortsBlock({ ports }: { ports?: InspectOut["ports"] }) {
+  const list = ports || [];
+  if (!list.length) return <div className="text-sm text-slate-500">No port bindings.</div>;
+  return (
+    <div className="space-y-1 text-sm">
+      {list.map((p, i) => (
+        <div key={i} className="text-slate-300">
+          {(p.published ? p.published + " → " : "")}{p.target}{p.protocol ? "/" + p.protocol : ""}
+        </div>
+      ))}
+    </div>
+  );
+}
+function VolsBlock({ vols }: { vols?: InspectOut["volumes"] }) {
+  const list = vols || [];
+  if (!list.length) return <div className="text-sm text-slate-500">No mounts.</div>;
+  return (
+    <div className="space-y-1 text-sm">
+      {list.map((m, i) => (
+        <div key={i} className="text-slate-300">
+          <span className="font-mono">{m.source}</span> → <span className="font-mono">{m.target}</span>
+          {m.mode ? ` (${m.mode}${m.rw === false ? ", ro" : ""})` : (m.rw === false ? " (ro)" : "")}
+        </div>
+      ))}
+    </div>
+  );
+}
+function formatDT(s?: string) {
+  if (!s) return "—";
+  const d = new Date(s); return isNaN(d.getTime()) ? s : d.toLocaleString();
+}
+
+/* ===== Mini editor ===== */
 function EnvRow({ k, v, forceShow }: { k: string; v: string; forceShow?: boolean }) {
   const [show, setShow] = useState(false);
   const showEff = forceShow || show;
@@ -28,38 +88,158 @@ function EnvRow({ k, v, forceShow }: { k: string; v: string; forceShow?: boolean
   );
 }
 
-function PortsBlock({ ports }: { ports?: InspectOut["ports"] }) {
-  const list = ports || [];
-  if (!list.length) return <div className="text-sm text-slate-500">No port bindings.</div>;
+function MiniEditor({
+  id, initialPath, stackId, ensureStack, refresh,
+}: {
+  id: string; initialPath: string; stackId?: number;
+  ensureStack: () => Promise<number>; refresh: () => void;
+}) {
+  const [path, setPath] = useState(initialPath);
+  const [content, setContent] = useState("");
+  const [loading, setLoading] = useState(false);
+  const [sops, setSops] = useState(false);
+  const [decryptView, setDecryptView] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => { setPath(initialPath); setContent(""); setErr(null); setDecryptView(false); }, [initialPath]);
+
+  useEffect(() => {
+    let cancel = false;
+    (async () => {
+      if (!stackId) return;
+      setLoading(true); setErr(null);
+      try {
+        const url = `/api/iac/stacks/${stackId}/file?path=${encodeURIComponent(path)}`;
+        const r = await fetch(url, { credentials: "include" });
+        if (!r.ok) {
+          if (r.status !== 404) throw new Error(`${r.status} ${r.statusText}`);
+          setContent("");
+        } else {
+          const txt = await r.text();
+          if (!cancel) setContent(txt);
+        }
+      } catch (e: any) {
+        if (!cancel) setErr(e?.message || "Failed to load");
+      } finally {
+        if (!cancel) setLoading(false);
+      }
+    })();
+    return () => { cancel = true; };
+  }, [stackId, path]);
+
+  async function saveFile(forceSops?: boolean) {
+    setLoading(true); setErr(null);
+    try {
+      const idToUse = stackId ?? await ensureStack();
+      const sopsFlag = forceSops ?? sops;
+      const r = await fetch(`/api/iac/stacks/${idToUse}/file`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ path, content, sops: sopsFlag }),
+      });
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      refresh();
+    } catch (e: any) {
+      setErr(e?.message || "Failed to save");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function revealSops() {
+    if (!stackId) { setErr("Create the stack by saving a file first."); return; }
+    setDecryptView(true);
+    setLoading(true); setErr(null);
+    try {
+      const url = `/api/iac/stacks/${stackId}/file?path=${encodeURIComponent(path)}&decrypt=1`;
+      const r = await fetch(url, {
+        credentials: "include",
+        headers: { "X-Confirm-Reveal": "yes" },
+      });
+      const txt = await r.text();
+      if (!r.ok) throw new Error(txt || `${r.status} ${r.statusText}`);
+      setContent(txt);
+    } catch (e: any) {
+      setErr(e?.message || "Failed to decrypt");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  async function encryptSops() {
+    if (!stackId) { setErr("Create the stack by saving a file first."); return; }
+    if (sops) { setErr("File is already marked as SOPS."); return; }
+    if (!confirm("Encrypt this file with SOPS? This action cannot be undone locally.")) return;
+    setLoading(true); setErr(null);
+    try {
+      setSops(true);
+      await saveFile(true);
+    } catch (e: any) {
+      setSops(false);
+      setErr(e?.message || "Failed to encrypt");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  const isSopsFile =
+    path.toLowerCase().includes("_secret.env") ||
+    path.toLowerCase().includes("_private.env") ||
+    sops;
+
   return (
-    <div className="space-y-1 text-sm">
-      {list.map((p, i) => (
-        <div key={i} className="text-slate-300">
-          {(p.published ? p.published + " → " : "")}{p.target}{p.protocol ? "/" + p.protocol : ""}
+    <Card className="bg-slate-900/40 border-slate-800 h-full flex flex-col">
+      <CardHeader className="pb-2 shrink-0">
+        <CardTitle className="text-sm text-slate-200">Editor</CardTitle>
+      </CardHeader>
+      <CardContent className="flex-1 min-h-0 flex flex-col gap-3">
+        <div className="flex gap-2 shrink-0">
+          <Input value={path} onChange={e => setPath(e.target.value)} placeholder="docker-compose/host/stack/compose.yaml" className="flex-1" />
+          <div className="flex gap-1">
+            {isSopsFile && (
+              <Button onClick={revealSops} variant="outline" className="border-indigo-700 text-indigo-200" title="Decrypt and reveal SOPS content" disabled={loading}>
+                <Shield className="h-4 w-4 mr-1" />SOPS Reveal
+              </Button>
+            )}
+            {!sops && !isSopsFile && (
+              <Button onClick={encryptSops} variant="outline" className="border-amber-700 text-amber-200 disabled:opacity-60" title="Encrypt this file with SOPS" disabled={loading}>
+                <ShieldOff className="h-4 w-4 mr-1" />SOPS Encrypt
+              </Button>
+            )}
+          </div>
         </div>
-      ))}
-    </div>
+        {err && <div className="text-xs text-rose-300 shrink-0">Error: {err}</div>}
+        {decryptView && <div className="text-xs text-amber-300 shrink-0">Warning: Decrypted secrets are visible in your browser until you navigate away.</div>}
+        <textarea
+          id={id}
+          className="w-full flex-1 min-h-0 text-sm bg-slate-950/50 border border-slate-800 rounded p-2 font-mono text-slate-200"
+          value={content}
+          onChange={e => setContent(e.target.value)}
+          placeholder={loading ? "Loading…" : "File content…"}
+          disabled={loading}
+        />
+        <div className="flex items-center justify-between shrink-0">
+          <label className="text-sm text-slate-300 inline-flex items-center gap-2">
+            <input type="checkbox" checked={sops} onChange={e => setSops(e.target.checked)} />
+            Mark as SOPS file
+          </label>
+          <Button onClick={() => saveFile()} disabled={loading}><FileText className="h-4 w-4 mr-1" /> Save</Button>
+        </div>
+        <div className="text-xs text-slate-500 -mt-2">
+          Files ending with <code>_private.env</code> or <code>_secret.env</code> will auto-encrypt with SOPS (if the server has a key).
+        </div>
+      </CardContent>
+    </Card>
   );
 }
 
-function VolsBlock({ vols }: { vols?: InspectOut["volumes"] }) {
-  const list = vols || [];
-  if (!list.length) return <div className="text-sm text-slate-500">No mounts.</div>;
-  return (
-    <div className="space-y-1 text-sm">
-      {list.map((m, i) => (
-        <div key={i} className="text-slate-300">
-          <span className="font-mono">{m.source}</span> → <span className="font-mono">{m.target}</span>
-          {m.mode ? ` (${m.mode}${m.rw === false ? ", ro" : ""})` : (m.rw === false ? " (ro)" : "")}
-        </div>
-      ))}
-    </div>
-  );
-}
-
-export default function StackDetailView({
+/* ===== Stack detail view ===== */
+export function StackDetailView({
   host, stackName, iacId, onBack,
-}: { host: Host; stackName: string; iacId?: number; onBack: ()=>void }) {
+}: {
+  host: Host; stackName: string; iacId?: number; onBack: ()=>void;
+}) {
   const [runtime, setRuntime] = useState<ApiContainer[]>([]);
   const [containers, setContainers] = useState<InspectOut[]>([]);
   const [files, setFiles] = useState<IacFileMeta[]>([]);
@@ -109,6 +289,7 @@ export default function StackDetailView({
       }
     })();
     return () => { cancel = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host.name, stackName, stackIacId]);
 
   async function ensureStack() {
@@ -138,18 +319,10 @@ export default function StackDetailView({
   async function toggleAutoDevOps(checked: boolean) {
     let id = stackIacId;
     if (!id) {
-      try {
-        id = await ensureStack();
-        setStackIacId(id);
-      } catch (e: any) {
-        alert(e?.message || "Unable to create stack for Auto DevOps");
-        return;
-      }
+      try { id = await ensureStack(); setStackIacId(id); }
+      catch (e: any) { alert(e?.message || "Unable to create stack for Auto DevOps"); return; }
     }
-    if (checked && files.length === 0) {
-      alert("This stack needs compose files or services before Auto DevOps can be enabled. Add content first.");
-      return;
-    }
+    if (checked && files.length === 0) { alert("This stack needs compose files or services before Auto DevOps can be enabled. Add content first."); return; }
     setAutoDevOps(checked);
     await fetch(`/api/iac/stacks/${id}`, {
       method: "PATCH",
@@ -174,7 +347,7 @@ export default function StackDetailView({
     }
   }
 
-  const hasContent = files.some(f => f.role === 'compose') || files.length > 0;
+  const hasContent = files.some(f => f.role === "compose") || files.length > 0;
 
   return (
     <div className="space-y-4">
@@ -185,8 +358,8 @@ export default function StackDetailView({
         <div className="ml-2 text-lg font-semibold text-white">Stack: {stackName}</div>
         <div className="ml-auto flex items-center gap-3">
           <Button onClick={deployNow} disabled={deploying || !hasContent} className="bg-emerald-800 hover:bg-emerald-900 text-white disabled:opacity-50">
-            <RotateCw className={`h-4 w-4 mr-1 ${deploying ? 'animate-spin' : ''}`} />
-            {deploying ? 'Deploying...' : 'Deploy'}
+            <RotateCw className={`h-4 w-4 mr-1 ${deploying ? "animate-spin" : ""}`} />
+            {deploying ? "Deploying..." : "Deploy"}
           </Button>
           <span className="text-sm text-slate-300">Auto DevOps</span>
           <Switch checked={autoDevOps} onCheckedChange={(v) => toggleAutoDevOps(!!v)} />
@@ -212,17 +385,27 @@ export default function StackDetailView({
           <Card className="bg-slate-900/50 border-slate-800">
             <CardHeader className="pb-2 flex items-center justify-between">
               <CardTitle className="text-slate-200 text-lg">Active Containers</CardTitle>
-              <Button size="sm" variant="outline" className="border-slate-700" onClick={() => setRevealEnvAll(v => !v)} title={revealEnvAll ? "Hide all env" : "Reveal all env"}>
-                {revealEnvAll ? <EyeOff className="h-4 w-4 mr-1" /> : <Eye className="h-4 w-4 mr-1" />} {revealEnvAll ? "Hide env" : "Reveal env"}
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-slate-700"
+                onClick={() => setRevealEnvAll(v => !v)}
+                title={revealEnvAll ? "Hide all env" : "Reveal all env"}
+              >
+                {revealEnvAll ? <EyeOff className="h-4 w-4 mr-1" /> : <Eye className="h-4 w-4 mr-1" />}
+                {revealEnvAll ? "Hide env" : "Reveal env"}
               </Button>
             </CardHeader>
             <CardContent className="space-y-3">
-              {containers.length === 0 && <div className="text-sm text-slate-500">No containers are currently running for this stack on {host.name}.</div>}
+              {containers.length === 0 && (
+                <div className="text-sm text-slate-500">No containers are currently running for this stack on {host.name}.</div>
+              )}
               {containers.map((c, i) => (
                 <div key={i} className="rounded-lg border border-slate-800 p-3">
                   <div className="flex items-center justify-between">
                     <div className="font-medium text-slate-200">{c.name}</div>
                   </div>
+
                   <div className="mt-2 grid md:grid-cols-2 gap-3">
                     <div className="space-y-2 md:pr-3 md:border-r md:border-slate-800">
                       <Fact label="CMD" value={<span className="font-mono">{(c.cmd || []).join(" ") || "—"}</span>} />
@@ -235,12 +418,15 @@ export default function StackDetailView({
                       <Fact label="Restart policy" value={c.restart_policy || "—"} />
                     </div>
                   </div>
+
                   <div className="mt-4 grid md:grid-cols-2 gap-3">
                     <div className="md:pr-3 md:border-r md:border-slate-800">
                       <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Environment</div>
                       {(!c.env || Object.keys(c.env).length === 0) && <div className="text-sm text-slate-500">No environment variables.</div>}
                       <div className="space-y-1">
-                        {Object.entries(c.env || {}).map(([k, v]) => (<EnvRow key={k} k={k} v={v} forceShow={revealEnvAll} />))}
+                        {Object.entries(c.env || {}).map(([k, v]) => (
+                          <EnvRow key={k} k={k} v={v} forceShow={revealEnvAll} />
+                        ))}
                       </div>
                     </div>
                     <div className="md:pl-3 md:border-l md:border-slate-800">
@@ -254,6 +440,7 @@ export default function StackDetailView({
                       ))}
                     </div>
                   </div>
+
                   <div className="mt-3">
                     <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Volumes</div>
                     <VolsBlock vols={c.volumes} />
@@ -271,7 +458,7 @@ export default function StackDetailView({
               <CardTitle className="text-slate-200 text-lg">IaC Files</CardTitle>
               {stackIacId && hasContent && (
                 <Button onClick={deployNow} disabled={deploying} size="sm" className="bg-emerald-800 hover:bg-emerald-900 text-white">
-                  <RotateCw className={`h-4 w-4 mr-1 ${deploying ? 'animate-spin' : ''}`} />
+                  <RotateCw className={`h-4 w-4 mr-1 ${deploying ? "animate-spin" : ""}`} />
                   Deploy
                 </Button>
               )}
@@ -282,12 +469,29 @@ export default function StackDetailView({
                   No IaC yet. Use the buttons below — the <b>first Save</b> will create the IaC stack automatically.
                 </div>
               )}
+
               <div className="flex items-center justify-between shrink-0">
                 <div className="text-slate-300 text-sm">{files.length} file(s)</div>
                 <div className="flex items-center gap-2">
-                  <Button size="sm" onClick={() => setEditPath(`docker-compose/${host.name}/${stackName}/docker-compose.yaml`)}>New compose</Button>
-                  <Button size="sm" variant="outline" className="border-slate-700" onClick={() => setEditPath(`docker-compose/${host.name}/${stackName}/.env`)}>New env</Button>
-                  <Button size="sm" variant="outline" className="border-slate-700" onClick={() => setEditPath(`docker-compose/${host.name}/${stackName}/deploy.sh`)}>New script</Button>
+                  <Button size="sm" onClick={() => setEditPath(`docker-compose/${host.name}/${stackName}/docker-compose.yaml`)}>
+                    <FileText className="h-4 w-4 mr-1" /> New compose
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-slate-700"
+                    onClick={() => setEditPath(`docker-compose/${host.name}/${stackName}/.env`)}
+                  >
+                    <Plus className="h-4 w-4 mr-1" /> New env
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-slate-700"
+                    onClick={() => setEditPath(`docker-compose/${host.name}/${stackName}/deploy.sh`)}
+                  >
+                    <Plus className="h-4 w-4 mr-1" /> New script
+                  </Button>
                 </div>
               </div>
 
@@ -313,12 +517,21 @@ export default function StackDetailView({
                         <td className="p-2 text-slate-300">{formatDT(f.updated_at)}</td>
                         <td className="p-2">
                           <div className="flex items-center gap-2">
-                            <Button size="sm" variant="outline" className="border-slate-700" onClick={() => setEditPath(f.rel_path)}>Edit</Button>
-                            <Button size="icon" variant="ghost" onClick={async () => {
-                              if (!stackIacId) return;
-                              const r = await fetch(`/api/iac/stacks/${stackIacId}/file?path=${encodeURIComponent(f.rel_path)}`, { method: "DELETE", credentials: "include" });
-                              if (r.ok) refreshFiles();
-                            }} title="Delete">
+                            <Button size="sm" variant="outline" className="border-slate-700" onClick={() => setEditPath(f.rel_path)}>
+                              Edit
+                            </Button>
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              onClick={async () => {
+                                if (!stackIacId) return;
+                                const r = await fetch(`/api/iac/stacks/${stackIacId}/file?path=${encodeURIComponent(f.rel_path)}`, {
+                                  method: "DELETE", credentials: "include"
+                                });
+                                if (r.ok) refreshFiles();
+                              }}
+                              title="Delete"
+                            >
                               <Trash2 className="h-4 w-4 text-rose-300" />
                             </Button>
                           </div>
@@ -326,7 +539,11 @@ export default function StackDetailView({
                       </tr>
                     ))}
                     {files.length === 0 && (
-                      <tr><td className="p-3 text-slate-500" colSpan={6}>No files yet. Add compose/env/script above.</td></tr>
+                      <tr>
+                        <td className="p-3 text-slate-500" colSpan={6}>
+                          No files yet. Add a compose/env/script above.
+                        </td>
+                      </tr>
                     )}
                   </tbody>
                 </table>

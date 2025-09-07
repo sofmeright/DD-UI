@@ -1,3 +1,4 @@
+// src/api/deploy.go
 package main
 
 import (
@@ -10,9 +11,10 @@ import (
 	"strings"
 )
 
-// deployStack tries to deploy a stack by running `docker compose up -d`.
-// It now auto-decrypts SOPS-protected compose/env files into temp files
-// (never overwriting your repo) whenever AGE keys are present.
+// deployStack stages a mirror of the stack into a scope-aware builds dir,
+// auto-decrypts any SOPS-protected env files into that stage (same names),
+// then runs `docker compose up -d` with the staged compose files.
+// Originals are never modified and plaintext only lives in the stage dir.
 func deployStack(ctx context.Context, stackID int64) error {
 	// Figure out the working dir for compose (stack root on disk)
 	root, err := getRepoRootForStack(ctx, stackID)
@@ -24,36 +26,28 @@ func deployStack(ctx context.Context, stackID int64) error {
 	if strings.TrimSpace(rel) == "" {
 		return errors.New("deploy: stack has no rel_path")
 	}
-	dir, err := joinUnder(root, rel)
-	if err != nil {
-		return err
-	}
-
-	// Collect compose & env files, transparently decrypting to temp files if needed.
-	composes, envs, decCleanup, derr := prepareStackFilesForCompose(ctx, stackID)
+	// Prepare staged tree (scope/host-or-group/stack/buildID/rel_path)
+	stageDir, stagedComposes, cleanup, derr := stageStackForCompose(ctx, stackID)
 	if derr != nil {
 		return derr
 	}
-	defer func() { if decCleanup != nil { decCleanup() } }()
+	defer func() { if cleanup != nil { cleanup() } }()
 
 	// If nothing to deploy, keep previous "no-op" behavior.
-	if len(composes) == 0 {
+	if len(stagedComposes) == 0 {
 		log.Printf("deploy: stack %d: no compose files tracked; skipping", stackID)
 		return nil
 	}
 
-	// Build: docker compose -f <compose...> --env-file <env...> up -d --remove-orphans
+	// Build: docker compose -f <compose...> up -d --remove-orphans
 	args := []string{"compose"}
-	for _, f := range composes {
+	for _, f := range stagedComposes {
 		args = append(args, "-f", f)
-	}
-	for _, e := range envs {
-		args = append(args, "--env-file", e)
 	}
 	args = append(args, "up", "-d", "--remove-orphans")
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	cmd.Dir = dir
+	cmd.Dir = stageDir
 	cmd.Env = os.Environ()
 
 	out, err := cmd.CombinedOutput()
@@ -62,6 +56,6 @@ func deployStack(ctx context.Context, stackID int64) error {
 		return fmt.Errorf("docker compose up failed: %v\n%s", err, string(out))
 	}
 
-	log.Printf("deploy: stack %d deployed (files=%d, envs=%d)", stackID, len(composes), len(envs))
+	log.Printf("deploy: stack %d deployed (compose=%d, stage=%s, repoRoot=%s)", stackID, len(stagedComposes), stageDir, root)
 	return nil
 }

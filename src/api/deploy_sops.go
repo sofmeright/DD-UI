@@ -6,6 +6,7 @@ import (
 	"crypto/sha1"
 	"encoding/hex"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -71,7 +72,6 @@ func filterDotenvSopsKeys(b []byte) []byte {
 		s := strings.TrimSpace(strings.TrimPrefix(t, "export "))
 		eq := strings.IndexByte(s, '=')
 		if eq <= 0 {
-			// not a KEY=VAL line; keep as-is
 			out = append(out, ln)
 			continue
 		}
@@ -91,13 +91,56 @@ func shortHash(s string) string {
 	return hex.EncodeToString(sum[:8])
 }
 
-func materializeFile(workspace, srcPath string, content []byte) (abs string, err error) {
-	name := fmt.Sprintf("%s-%s", shortHash(srcPath), filepath.Base(srcPath))
-	abs = filepath.Join(workspace, name)
-	return abs, os.WriteFile(abs, content, 0o600)
+/* ---------------- small fs helpers ---------------- */
+
+func ensureDir(path string, mode os.FileMode) error {
+	if err := os.MkdirAll(path, mode); err != nil {
+		return err
+	}
+	_ = os.Chmod(path, mode)
+	return nil
 }
 
-/* --------- Compose overlay (no edits to original) --------- */
+// safe join under a root (prevents escaping with ..)
+func joinUnderLocal(root, rel string) (string, error) {
+	clean := filepath.Clean("/" + rel)
+	clean = strings.TrimPrefix(clean, "/")
+	full := filepath.Join(root, clean)
+	r, err := filepath.Rel(root, full)
+	if err != nil || strings.HasPrefix(r, "..") {
+		return "", fmt.Errorf("outside root")
+	}
+	return full, nil
+}
+
+func writeFileSecure(dest string, content []byte, mode os.FileMode) error {
+	if err := ensureDir(filepath.Dir(dest), 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(dest, content, mode)
+}
+
+func copyRegularFile(src, dst string, mode os.FileMode) error {
+	if err := ensureDir(filepath.Dir(dst), 0o700); err != nil {
+		return err
+	}
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	out, err := os.OpenFile(dst, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, mode)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	return nil
+}
+
+/* --------- Compose helpers (parse env_file refs) --------- */
 
 // parseEnvFileRefs extracts service->env_file refs (as string lists) from a compose YAML blob.
 func parseEnvFileRefs(yml []byte) (map[string][]string, error) {
@@ -132,175 +175,184 @@ func parseEnvFileRefs(yml []byte) (map[string][]string, error) {
 	return out, nil
 }
 
-// buildOverrideYAML builds a minimal compose override with only env_file overrides.
-func buildOverrideYAML(envMap map[string][]string) ([]byte, error) {
-	if len(envMap) == 0 {
-		return nil, nil
-	}
-	type svc struct {
-		EnvFile []string `yaml:"env_file,omitempty"`
-	}
-	type root struct {
-		Version  string           `yaml:"version,omitempty"`
-		Services map[string]*svc  `yaml:"services"`
-	}
-	doc := root{Services: map[string]*svc{}}
-	for name, refs := range envMap {
-		// Absolute paths only (we materialize decrypted copies and point to them)
-		doc.Services[name] = &svc{EnvFile: refs}
-	}
-	return yaml.Marshal(doc)
-}
+/* -------- Public: scope-aware staging with SOPS auto-decrypt -------- */
 
-/* -------- Public: Compose inputs with SOPS auto-decrypt -------- */
-
-// prepareStackFilesForCompose returns:
-//   - composes: original compose file paths + one extra override file (last) if needed
-//   - envs:     decrypted copies of substitution .env files to pass via --env-file
-//   - cleanup:  removes the temporary workspace
-//
-// Design:
-//   • Original compose files are NOT modified.
-//   • We generate a tiny override compose (last -f) that replaces services[*].env_file
-//     with absolute paths to decrypted temp copies.
-//   • Substitution .env files (IaC files with role=env + default <stackDir>/.env)
-//     are decrypted to temp and passed via repeated --env-file flags.
-func prepareStackFilesForCompose(ctx context.Context, stackID int64) (composes []string, envs []string, cleanup func(), err error) {
-	workspace, err := os.MkdirTemp("", "ddui-deploy-")
-	if err != nil {
-		return nil, nil, func() {}, err
-	}
-	cleanup = func() { _ = os.RemoveAll(workspace) }
-
+// stageStackForCompose prepares a scope-aware staging directory that mirrors the IaC layout,
+// copying compose/scripts/other files verbatim and materializing any env files decrypted with
+// their original names/paths. It returns:
+//   - stageStackDir: the directory compose should run in (mirrors the stack's rel_path)
+//   - stagedComposes: absolute paths to compose files within the stage tree (pass with -f ...)
+//   - cleanup: removes the staging directory
+func stageStackForCompose(ctx context.Context, stackID int64) (stageStackDir string, stagedComposes []string, cleanup func(), err error) {
+	// Discover stack root + identity
 	root, err := getRepoRootForStack(ctx, stackID)
 	if err != nil {
-		return nil, nil, cleanup, err
+		return "", nil, func() {}, err
 	}
-	// stack dir (for default .env interpolation)
-	var rel string
-	_ = db.QueryRow(ctx, `SELECT rel_path FROM iac_stacks WHERE id=$1`, stackID).Scan(&rel)
-	stackDir := ""
-	if strings.TrimSpace(rel) != "" {
-		if d, jerr := joinUnder(root, rel); jerr == nil {
-			stackDir = d
+
+	var (
+		rel        string
+		scopeKind  string
+		scopeName  string
+		stackName  string
+	)
+	_ = db.QueryRow(ctx, `SELECT rel_path, scope_kind::text, scope_name, stack_name FROM iac_stacks WHERE id=$1`, stackID).
+		Scan(&rel, &scopeKind, &scopeName, &stackName)
+	if strings.TrimSpace(rel) == "" {
+		return "", nil, func() {}, fmt.Errorf("deploy: stack has no rel_path")
+	}
+
+	// Stage base: DDUI_BUILDS_DIR or system temp
+	base := strings.TrimSpace(os.Getenv("DDUI_BUILDS_DIR"))
+	if base == "" {
+		// a short-lived prefix under /tmp to make cleanups trivial
+		tmp, terr := os.MkdirTemp("", "ddui-builds-")
+		if terr != nil {
+			return "", nil, func() {}, terr
 		}
+		base = tmp
 	}
+	if err := ensureDir(base, 0o700); err != nil {
+		return "", nil, func() {}, err
+	}
+
+	// scope-aware leaf
+	scopeDir := filepath.Join(base, strings.ToLower(scopeKind), scopeName, stackName)
+	if err := ensureDir(scopeDir, 0o700); err != nil {
+		return "", nil, func() {}, err
+	}
+	buildID := time.Now().UTC().Format("20060102-150405") + "-" + shortHash(fmt.Sprintf("%d", time.Now().UnixNano()))
+	leaf := filepath.Join(scopeDir, buildID)
+	if err := ensureDir(leaf, 0o700); err != nil {
+		return "", nil, func() {}, err
+	}
+
+	// the working dir for compose (mirror original rel_path)
+	stageStackDir, err = joinUnderLocal(leaf, rel)
+	if err != nil {
+		return "", nil, func() {}, err
+	}
+	if err := ensureDir(stageStackDir, 0o700); err != nil {
+		return "", nil, func() {}, err
+	}
+
+	cleanup = func() { _ = os.RemoveAll(leaf) }
 
 	// Gather tracked files
 	rows, err := db.Query(ctx, `SELECT role, rel_path FROM iac_stack_files WHERE stack_id=$1`, stackID)
 	if err != nil {
-		return nil, nil, cleanup, err
+		return "", nil, cleanup, err
 	}
 	defer rows.Close()
 
-	type rec struct{ role, path string }
-	var files []rec
+	type rec struct{ role, relPath, srcAbs, dstAbs string }
+	var (
+		files          []rec
+		composePairs   = map[string]string{} // staged compose -> source compose (for ref resolution)
+	)
 	for rows.Next() {
 		var role, rp string
 		if err := rows.Scan(&role, &rp); err != nil {
-			return nil, nil, cleanup, err
+			return "", nil, cleanup, err
 		}
-		full, jerr := joinUnder(root, rp)
+		srcAbs, jerr := joinUnder(root, rp)
 		if jerr != nil {
-			return nil, nil, cleanup, jerr
+			return "", nil, cleanup, jerr
 		}
-		files = append(files, rec{role: strings.ToLower(role), path: full})
+		dstAbs, sj := joinUnderLocal(leaf, rp)
+		if sj != nil {
+			return "", nil, cleanup, sj
+		}
+		files = append(files, rec{role: strings.ToLower(role), relPath: rp, srcAbs: srcAbs, dstAbs: dstAbs})
 	}
 
-	// 1) Original compose files (unchanged)
-	var composePaths []string
+	// Copy files into stage:
+	//  - compose/scripts/other: copy plaintext (if compose is SOPS-encrypted, decrypt to plaintext)
+	//  - env: decrypt to plaintext and filter sops_* keys
 	for _, f := range files {
-		if f.role == "compose" {
-			composePaths = append(composePaths, f.path)
+		switch f.role {
+		case "env":
+			content, _, derr := readDecryptedOrPlain(ctx, f.srcAbs, "dotenv")
+			if derr != nil {
+				return "", nil, cleanup, derr
+			}
+			content = filterDotenvSopsKeys(content)
+			if err := writeFileSecure(f.dstAbs, content, 0o600); err != nil {
+				return "", nil, cleanup, err
+			}
+		case "compose":
+			plain, _, perr := readDecryptedOrPlain(ctx, f.srcAbs, "")
+			if perr != nil {
+				return "", nil, cleanup, perr
+			}
+			if err := writeFileSecure(f.dstAbs, plain, 0o644); err != nil {
+				return "", nil, cleanup, err
+			}
+			stagedComposes = append(stagedComposes, f.dstAbs)
+			composePairs[f.dstAbs] = f.srcAbs
+		default:
+			// scripts/other auxiliary files
+			if err := copyRegularFile(f.srcAbs, f.dstAbs, 0o644); err != nil {
+				return "", nil, cleanup, err
+			}
 		}
 	}
-	composes = append(composes, composePaths...) // keep original order
 
-	// 2) Service env_file overrides (decrypt each, point override to abs temp copies)
-	overrideMap := map[string][]string{} // service -> []abs paths (decrypted)
-	for _, cpath := range composePaths {
-		// Read compose (decrypt if SOPS-structured)
-		plain, _, rerr := readDecryptedOrPlain(ctx, cpath, "")
+	// Ensure project .env (default interpolation) is staged & decrypted if present
+	origStackDir, err := joinUnder(root, rel)
+	if err != nil {
+		return "", nil, cleanup, err
+	}
+	if b, err := os.ReadFile(filepath.Join(origStackDir, ".env")); err == nil && len(b) >= 0 {
+		plain, _, derr := readDecryptedOrPlain(ctx, filepath.Join(origStackDir, ".env"), "dotenv")
+		if derr == nil {
+			plain = filterDotenvSopsKeys(plain)
+			_ = writeFileSecure(filepath.Join(stageStackDir, ".env"), plain, 0o600)
+		}
+	}
+
+	// Also stage service env_file refs that may not be tracked (common pattern).
+	for stagedCompose, srcCompose := range composePairs {
+		// Parse from plaintext we already wrote
+		plain, rerr := os.ReadFile(stagedCompose)
 		if rerr != nil {
-			return nil, nil, cleanup, rerr
+			return "", nil, cleanup, rerr
 		}
 		refMap, perr := parseEnvFileRefs(plain)
 		if perr != nil {
-			return nil, nil, cleanup, perr
+			return "", nil, cleanup, perr
 		}
 		if len(refMap) == 0 {
 			continue
 		}
-		baseDir := filepath.Dir(cpath)
-		for svc, refs := range refMap {
+		origBase := filepath.Dir(srcCompose)
+		stageBase := filepath.Dir(stagedCompose)
+
+		for _, refs := range refMap {
 			for _, ref := range refs {
-				target := ref
-				if !filepath.IsAbs(target) {
-					target = filepath.Join(baseDir, ref)
+				if filepath.IsAbs(ref) {
+					// Can't safely redirect absolute paths without editing compose; log and skip.
+					// The original absolute path will be used by docker compose.
+					log.Printf("deploy: warning: absolute env_file path %q in %s cannot be staged transparently", ref, srcCompose)
+					continue
 				}
-				content, _, derr := readDecryptedOrPlain(ctx, target, "dotenv")
+				origEnv := filepath.Join(origBase, ref)
+				stageEnv, sj := joinUnderLocal(stageBase, ref)
+				if sj != nil {
+					return "", nil, cleanup, sj
+				}
+				content, _, derr := readDecryptedOrPlain(ctx, origEnv, "dotenv")
 				if derr != nil {
-					return nil, nil, cleanup, derr
+					// If missing, keep going (compose may handle it or it's optional)
+					continue
 				}
-				content = filterDotenvSopsKeys(content)  
-				tmpAbs, werr := materializeFile(workspace, target, content)
-				if werr != nil {
-					return nil, nil, cleanup, werr
+				content = filterDotenvSopsKeys(content)
+				if err := writeFileSecure(stageEnv, content, 0o600); err != nil {
+					return "", nil, cleanup, err
 				}
-				overrideMap[svc] = append(overrideMap[svc], tmpAbs)
 			}
 		}
 	}
 
-	// If we have any service env overrides, write a single override file and append it last.
-	if len(overrideMap) > 0 {
-		ovYAML, merr := buildOverrideYAML(overrideMap)
-		if merr != nil {
-			return nil, nil, cleanup, merr
-		}
-		ovPath := filepath.Join(workspace, "override.envfiles.yaml")
-		if err := os.WriteFile(ovPath, ovYAML, 0o600); err != nil {
-			return nil, nil, cleanup, err
-		}
-		composes = append(composes, ovPath) // must be last so it overrides originals
-	}
-
-	// 3) Substitution envs: include IaC role=env and default <stackDir>/.env
-	seen := map[string]bool{}
-	for _, f := range files {
-		if f.role != "env" {
-			continue
-		}
-		if seen[f.path] {
-			continue
-		}
-		content, _, derr := readDecryptedOrPlain(ctx, f.path, "dotenv")
-		if derr != nil {
-			return nil, nil, cleanup, derr
-		}
-		content = filterDotenvSopsKeys(content)  
-		tmpAbs, werr := materializeFile(workspace, f.path, content)
-		if werr != nil {
-			return nil, nil, cleanup, werr
-		}
-		envs = append(envs, tmpAbs)
-		seen[f.path] = true
-	}
-	if stackDir != "" {
-		defEnv := filepath.Join(stackDir, ".env")
-		if _, statErr := os.Stat(defEnv); statErr == nil && !seen[defEnv] {
-			content, _, derr := readDecryptedOrPlain(ctx, defEnv, "dotenv")
-			if derr != nil {
-				return nil, nil, cleanup, derr
-			}
-			content = filterDotenvSopsKeys(content)  
-			tmpAbs, werr := materializeFile(workspace, defEnv, content)
-			if werr != nil {
-				return nil, nil, cleanup, werr
-			}
-			envs = append(envs, tmpAbs)
-		}
-	}
-
-	return composes, envs, cleanup, nil
+	return stageStackDir, stagedComposes, cleanup, nil
 }

@@ -381,13 +381,14 @@ To encrypt, SOPS needs one or more **AGE recipients** (public keys). You have tw
 | `DDUI_DB_*`                             | —                       | Alternative DSN parts: host/port/name/user/pass_file/sslmode (see compose example)         |
 | `OIDC_ISSUER_URL`                       | —                       | Provider discovery URL (`…/.well-known/openid-configuration`)                               |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | —                       | OAuth client (secret supports `@/path` indirection)                                         |
+| `OIDC_CLIENT_ID_FILE` / `OIDC_CLIENT_SECRET_FILE` | —                       | Same function as above but passed in as a file for docker secrets funtionality.   |
 | `OIDC_REDIRECT_URL`                     | —                       | e.g. `http://localhost:8080/auth/callback`                                                  |
 | `OIDC_SCOPES`                           | `openid email profile`  | Space-separated scopes                                                                      |
 | `OIDC_ALLOWED_EMAIL_DOMAIN`             | empty                   | Restrict logins to a domain                                                                 |
 | `COOKIE_DOMAIN`                         | empty                   | e.g. `.example.com`                                                                         |
 | `COOKIE_SECURE`                         | inferred                | `true/false` (if unset, inferred from redirect URL scheme)                                  |
 | `DDUI_SESSION_SECRET`                        | —                       | Session/cookie HMAC secret. Generate via `DDUI_SESSION_SECRET="$(openssl rand -hex 64)"`         |
-| `DDUI_SESSION_SECRET_FILE`              | —                       | Same function as above but passed in as a file so the SESSION_SECRET value can be derived with docker secrets funtionality. |
+| `DDUI_SESSION_SECRET_FILE`              | —                       | Same function as above but passed in as a file for docker secrets funtionality.             |
 | `DDUI_UI_DIR`                           | `/home/ddui/ui/dist`    | Where built SPA is served from                                                              |
 | `UI_ORIGIN`                             | empty                   | Additional allowed CORS origin for the dev UI (`http://localhost:5173` is allowed by default) |
 | `DDUI_IAC_ROOT`                         | `/data`                 | IaC repository root                                                                         |

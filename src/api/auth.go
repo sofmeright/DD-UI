@@ -67,6 +67,7 @@ func env(k, def string) string {
 	return def
 }
 
+// Support "@/path" style and raw values.
 func readSecretMaybeFile(v string) (string, error) {
 	if v == "" {
 		return "", nil
@@ -82,15 +83,39 @@ func readSecretMaybeFile(v string) (string, error) {
 	return v, nil
 }
 
+// Read from ENV var or *_FILE path env var. Also accepts "@/path" in the value.
+func envOrFile(valueKey, fileKey string) (string, error) {
+	// 1) Direct value (supports "@/path" shorthand)
+	if raw := os.Getenv(valueKey); raw != "" {
+		return readSecretMaybeFile(raw)
+	}
+	// 2) File path via *_FILE
+	if fp := strings.TrimSpace(os.Getenv(fileKey)); fp != "" {
+		b, err := os.ReadFile(fp)
+		if err != nil {
+			return "", err
+		}
+		return strings.TrimSpace(string(b)), nil
+	}
+	return "", nil
+}
+
 func InitAuthFromEnv() error {
 	var err error
 
-	// Secrets can be given inline or as "@/path/to/file"
-	cs, err := readSecretMaybeFile(env("OIDC_CLIENT_SECRET", ""))
+	// ---- OIDC client credentials (allow *_FILE and "@/path")
+	clientID, err := envOrFile("OIDC_CLIENT_ID", "OIDC_CLIENT_ID_FILE")
 	if err != nil {
 		return err
 	}
-	sec, err := readSecretMaybeFile(env("SESSION_SECRET", ""))
+	clientSecret, err := envOrFile("OIDC_CLIENT_SECRET", "OIDC_CLIENT_SECRET_FILE")
+	if err != nil {
+		return err
+	}
+
+	// ---- Session secret (renamed: DDUI_SESSION_SECRET / DDUI_SESSION_SECRET_FILE)
+	// Compatibility with old SESSION_SECRET is intentionally dropped.
+	sec, err := envOrFile("DDUI_SESSION_SECRET", "DDUI_SESSION_SECRET_FILE")
 	if err != nil {
 		return err
 	}
@@ -117,20 +142,20 @@ func InitAuthFromEnv() error {
 	}
 
 	cfg = AuthConfig{
-		Issuer:                 env("OIDC_ISSUER_URL", ""),
-		ClientID:               env("OIDC_CLIENT_ID", ""),
-		ClientSecret:           cs,
-		RedirectURL:            redirect,
-		Scopes:                 scopes(env("OIDC_SCOPES", "openid email profile")),
-		SessionSecret:          []byte(sec),
-		AllowedDomain:          strings.ToLower(env("OIDC_ALLOWED_EMAIL_DOMAIN", "")),
-		SecureCookies:          secure,
-		CookieDomain:           env("COOKIE_DOMAIN", ""),
-		PostLogoutRedirectURL:  env("OIDC_POST_LOGOUT_REDIRECT_URL", ""),
+		Issuer:                env("OIDC_ISSUER_URL", ""),
+		ClientID:              clientID,
+		ClientSecret:          clientSecret,
+		RedirectURL:           redirect,
+		Scopes:                scopes(env("OIDC_SCOPES", "openid email profile")),
+		SessionSecret:         []byte(sec),
+		AllowedDomain:         strings.ToLower(env("OIDC_ALLOWED_EMAIL_DOMAIN", "")),
+		SecureCookies:         secure,
+		CookieDomain:          env("COOKIE_DOMAIN", ""),
+		PostLogoutRedirectURL: env("OIDC_POST_LOGOUT_REDIRECT_URL", ""),
 	}
 
 	if cfg.Issuer == "" || cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURL == "" {
-		return errors.New("OIDC_ISSUER_URL, OIDC_CLIENT_ID, OIDC_CLIENT_SECRET, OIDC_REDIRECT_URL are required")
+		return errors.New("OIDC_ISSUER_URL, OIDC_CLIENT_ID{/_FILE}, OIDC_CLIENT_SECRET{/_FILE}, OIDC_REDIRECT_URL are required")
 	}
 
 	// ---- OIDC wiring

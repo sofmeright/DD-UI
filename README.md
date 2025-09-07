@@ -239,8 +239,8 @@ secrets:
 ```.env
 OIDC_CLIENT_ID=
 OIDC_CLIENT_SECRET=
-# You can generate the Session Secret via SESSION_SECRET="$(openssl rand -hex 64)".
-SESSION_SECRET=
+# You can generate the Session Secret via DDUI_SESSION_SECRET="$(openssl rand -hex 64)".
+DDUI_SESSION_SECRET=
 POSTGRES_USER=
 POSTGRES_DB=
 # Optional: advertise your dev UI origin so CORS allows credentials
@@ -386,7 +386,8 @@ To encrypt, SOPS needs one or more **AGE recipients** (public keys). You have tw
 | `OIDC_ALLOWED_EMAIL_DOMAIN`             | empty                   | Restrict logins to a domain                                                                 |
 | `COOKIE_DOMAIN`                         | empty                   | e.g. `.example.com`                                                                         |
 | `COOKIE_SECURE`                         | inferred                | `true/false` (if unset, inferred from redirect URL scheme)                                  |
-| `SESSION_SECRET`                        | —                       | Session/cookie HMAC secret. Generate via `SESSION_SECRET="$(openssl rand -hex 64)"`         |
+| `DDUI_SESSION_SECRET`                        | —                       | Session/cookie HMAC secret. Generate via `DDUI_SESSION_SECRET="$(openssl rand -hex 64)"`         |
+| `DDUI_SESSION_SECRET_FILE`              | —                       | Same function as above but passed in as a file so the SESSION_SECRET value can be derived with docker secrets funtionality. |
 | `DDUI_UI_DIR`                           | `/home/ddui/ui/dist`    | Where built SPA is served from                                                              |
 | `UI_ORIGIN`                             | empty                   | Additional allowed CORS origin for the dev UI (`http://localhost:5173` is allowed by default) |
 | `DDUI_IAC_ROOT`                         | `/data`                 | IaC repository root                                                                         |

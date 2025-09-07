@@ -1,108 +1,21 @@
-import React, { useEffect, useMemo, useState } from "react";
-import {
-  ArrowLeft, RefreshCw, Plus, Search, ChevronRight, FileText, Bug,
-  Activity, ZapOff, Trash2, Terminal, Play, Square, Pause, PlayCircle, RotateCw,
-  Eye, EyeOff, ShieldCheck
-} from "lucide-react";
+import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
-import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import { ArrowLeft, ChevronRight, FileText, Activity, Bug, Pause, Play, PlayCircle, RefreshCw, RotateCw, Terminal, Trash2, ZapOff, Eye, EyeOff } from "lucide-react";
+import MetricCard from "@/components/MetricCard";
+import StatePill from "@/components/StatePill";
+import DriftBadge from "@/components/DriftBadge";
+import Fact from "@/components/Fact";
+import ActionBtn from "@/components/ActionBtn";
+import { ApiContainer, Host, IacService, IacStack, InspectOut, MergedRow, MergedStack } from "@/types";
+import { formatDT, formatPortsLines } from "@/utils/format";
 
-/* ===== Types ===== */
-type Host = { name: string; address?: string; groups?: string[] };
-type ApiContainer = {
-  name: string; image: string; state: string; status: string; owner?: string;
-  ports?: any; labels?: Record<string, string>; updated_at?: string; created_ts?: string;
-  ip_addr?: string; compose_project?: string; compose_service?: string; stack?: string | null;
-};
-type IacEnvFile = { path: string; sops: boolean };
-type IacService = {
-  id: number; stack_id: number; service_name: string; container_name?: string; image?: string;
-  labels: Record<string, string>; env_keys: string[]; env_files: IacEnvFile[];
-  ports: any[]; volumes: any[]; deploy: Record<string, any>;
-};
-type IacStack = {
-  id: number; name: string; scope_kind: string; scope_name: string;
-  deploy_kind: "compose" | "script" | "unmanaged" | string;
-  pull_policy?: string; sops_status: "all" | "partial" | "none" | string;
-  iac_enabled: boolean; rel_path: string; compose?: string; services: IacService[] | null | undefined;
-};
-
-/* ===== Small UI bits ===== */
-function StatePill({ state, health }: { state?: string; health?: string }) {
-  const s = (state || "").toLowerCase();
-  const h = (health || "").toLowerCase();
-  let classes = "border-slate-700 bg-slate-900 text-slate-300";
-  let text = state || "unknown";
-  if (h === "healthy") { classes = "border-emerald-700/60 bg-emerald-900/40 text-emerald-200"; text = "healthy"; }
-  else if (s.includes("running") || s.includes("up")) { classes = "border-emerald-700/60 bg-emerald-900/40 text-emerald-200"; }
-  else if (s.includes("restarting")) { classes = "border-amber-700/60 bg-amber-900/40 text-amber-200"; }
-  else if (s.includes("paused")) { classes = "border-sky-700/60 bg-sky-900/40 text-sky-200"; }
-  else if (s.includes("exited") || s.includes("dead")) { classes = "border-rose-700/60 bg-rose-900/40 text-rose-200"; }
-  return <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${classes}`}>{text}</span>;
-}
-function driftBadge(d: "in_sync" | "drift" | "unknown") {
-  if (d === "in_sync") return <Badge className="bg-emerald-900/40 border-emerald-700/40 text-emerald-200">In sync</Badge>;
-  if (d === "drift") return <Badge variant="destructive">Drift</Badge>;
-  return <Badge variant="outline" className="border-slate-700 text-slate-300">Unknown</Badge>;
-}
-function formatDT(s?: string) {
-  if (!s) return "—";
-  const d = new Date(s); return isNaN(d.getTime()) ? s : d.toLocaleString();
-}
-function formatPortsLines(ports: any): string[] {
-  const arr: any[] = Array.isArray(ports) ? ports : (ports && Array.isArray(ports.ports)) ? ports.ports : [];
-  const lines: string[] = [];
-  for (const p of arr) {
-    const ip = p.IP || p.Ip || p.ip || "";
-    const pub = p.PublicPort ?? p.publicPort;
-    const priv = p.PrivatePort ?? p.privatePort;
-    const typ = (p.Type ?? p.type ?? "").toString().toLowerCase() || "tcp";
-    if (priv) {
-      const left = pub ? `${ip ? ip + ":" : ""}${pub}` : "";
-      lines.push(`${left ? left + " → " : ""}${priv}/${typ}`);
-    }
-  }
-  return lines;
-}
-function ActionBtn({ title, onClick, icon: Icon, disabled=false }:{
-  title: string; onClick: ()=>void; icon: any; disabled?: boolean;
-}) {
-  return (
-    <Button size="icon" variant="ghost" className="h-6 w-6 shrink-0" title={title} onClick={onClick} disabled={disabled}>
-      <Icon className="h-3.5 w-3.5 text-slate-200" />
-    </Button>
-  );
-}
-
-/* ===== Main view ===== */
-export function HostStacksView({
+export default function HostStacksView({
   host, onBack, onSync, onOpenStack,
-}: {
-  host: Host;
-  onBack: () => void;
-  onSync: () => void;
-  onOpenStack: (stackName: string, iacId?: number) => void;
-}) {
-  type MergedRow = {
-    name: string; state: string; stack: string; imageRun?: string; imageIac?: string;
-    created?: string; ip?: string; portsText?: string; owner?: string; drift?: boolean;
-  };
-  type MergedStack = {
-    name: string;
-    drift: "in_sync" | "drift" | "unknown";
-    iacEnabled: boolean;
-    pullPolicy?: string;
-    sops?: boolean;
-    deployKind: string;
-    rows: MergedRow[];
-    iacId?: number;
-    hasIac: boolean;
-    hasContent?: boolean;
-  };
-
+}: { host: Host; onBack: () => void; onSync: ()=>void; onOpenStack: (stackName: string, iacId?: number)=>void }) {
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [stacks, setStacks] = useState<MergedStack[]>([]);
@@ -111,9 +24,8 @@ export function HostStacksView({
 
   function matchRow(r: MergedRow, q: string) {
     if (!q) return true;
-    const hay = [
-      r.name, r.state, r.stack, r.imageRun, r.imageIac, r.ip, r.portsText, r.owner
-    ].filter(Boolean).join(" ").toLowerCase();
+    const hay = [r.name, r.state, r.stack, r.imageRun, r.imageIac, r.ip, r.portsText, r.owner]
+      .filter(Boolean).join(" ").toLowerCase();
     return hay.includes(q.toLowerCase());
   }
 
@@ -138,7 +50,7 @@ export function HostStacksView({
                           action === "restart" ? "restarting" : r.state }
           : r)
       })));
-    } catch {
+    } catch (e) {
       alert("Action failed");
     }
   }
@@ -189,14 +101,16 @@ export function HostStacksView({
           const hasContent = !!is && (!!is.compose || services.length > 0);
 
           const rows: MergedRow[] = [];
-          const desiredImageFor = (c: ApiContainer): string | undefined => {
+
+          function desiredImageFor(c: ApiContainer): string | undefined {
             if (!is || services.length === 0) return undefined;
             const svc = services.find(x =>
               (c.compose_service && x.service_name === c.compose_service) ||
               (x.container_name && x.container_name === c.name)
             );
             return svc?.image || undefined;
-          };
+          }
+
           for (const c of rcs) {
             const portsLines = formatPortsLines((c as any).ports);
             const portsText = portsLines.join("\n");
@@ -237,7 +151,9 @@ export function HostStacksView({
           }
 
           let stackDrift: "in_sync" | "drift" | "unknown" = "unknown";
-          if (hasIac) stackDrift = rows.some(r => r.drift) ? "drift" : "in_sync";
+          if (hasIac) {
+            stackDrift = rows.some(r => r.drift) ? "drift" : "in_sync";
+          }
 
           merged.push({
             name: sname,
@@ -298,7 +214,9 @@ export function HostStacksView({
   function handleToggleAuto(sIndex: number, enabled: boolean) {
     const s = stacks[sIndex];
     if (!s.iacId || !s.hasContent) {
-      if (enabled) alert("This stack needs compose files or services before Auto DevOps can be enabled. Add content first.");
+      if (enabled) {
+        alert("This stack needs compose files or services before Auto DevOps can be enabled. Add content first.");
+      }
       return;
     }
     setStacks(prev => prev.map((row, i) => i === sIndex ? { ...row, iacEnabled: enabled } : row));
@@ -330,9 +248,7 @@ export function HostStacksView({
               <div className="text-slate-200 font-semibold">Logs: {logModal.ctr}</div>
               <Button size="sm" variant="outline" className="border-slate-700" onClick={() => setLogModal(null)}>Close</Button>
             </div>
-            <pre className="text-xs text-slate-300 bg-slate-900 border border-slate-800 rounded p-3 max-h-[60vh] overflow-auto whitespace-pre-wrap">
-{logModal.text}
-            </pre>
+            <pre className="text-xs text-slate-300 bg-slate-900 border border-slate-800 rounded p-3 max-h-[60vh] overflow-auto whitespace-pre-wrap">{logModal.text}</pre>
           </div>
         </div>
       )}
@@ -349,15 +265,15 @@ export function HostStacksView({
             <RefreshCw className="h-4 w-4 mr-1" /> Sync
           </Button>
           <Button onClick={createStackFlow} variant="outline" className="border-slate-700 text-slate-200">
-            <Plus className="h-4 w-4 mr-1" /> New Stack
+            <Eye className="hidden" /> {/* placeholder to avoid import shake issues */}
+            New Stack
           </Button>
           <div className="relative w-72">
-            <Search className="h-4 w-4 absolute left-3 top-1/2 -translate-y-1/2 text-slate-400" />
             <Input
               value={hostQuery}
               onChange={(e) => setHostQuery(e.target.value)}
               placeholder={`Search ${host.name}…`}
-              className="pl-9 bg-slate-900/50 border-slate-800 text-slate-200 placeholder:text-slate-500"
+              className="pl-3 bg-slate-900/50 border-slate-800 text-slate-200 placeholder:text-slate-500"
             />
           </div>
         </div>
@@ -376,7 +292,7 @@ export function HostStacksView({
                 </button>
               </CardTitle>
               <div className="flex items-center gap-2">
-                {driftBadge(s.drift)}
+                {DriftBadge(s.drift)}
                 <Badge variant="outline" className="border-slate-700 text-slate-300">{s.deployKind || "unknown"}</Badge>
                 <Badge variant="outline" className="border-slate-700 text-slate-300">pull: {s.hasIac ? (s.pullPolicy || "—") : "—"}</Badge>
                 {s.hasIac ? (
@@ -398,7 +314,12 @@ export function HostStacksView({
                 disabled={!s.iacId || !s.hasContent}
               />
               {s.iacId && (
-                <Button size="icon" variant="ghost" title="Delete IaC for this stack" onClick={() => deleteStackAt(idx)}>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  title="Delete IaC for this stack"
+                  onClick={() => deleteStackAt(idx)}
+                >
                   <Trash2 className="h-4 w-4 text-rose-300" />
                 </Button>
               )}
@@ -451,11 +372,21 @@ export function HostStacksView({
                         <td className="px-2 py-1.5 text-slate-300">{r.owner || "—"}</td>
                         <td className="px-2 py-1">
                           <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap py-0.5">
-                            {!isRunning && !isPaused && (<ActionBtn title="Start" icon={Play} onClick={() => doCtrAction(r.name, "start")} />)}
-                            {isRunning && (<ActionBtn title="Stop" icon={Square} onClick={() => doCtrAction(r.name, "stop")} />)}
-                            {(isRunning || isPaused) && (<ActionBtn title="Restart" icon={RotateCw} onClick={() => doCtrAction(r.name, "restart")} />)}
-                            {isRunning && !isPaused && (<ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />)}
-                            {isPaused && (<ActionBtn title="Resume" icon={PlayCircle} onClick={() => doCtrAction(r.name, "unpause")} />)}
+                            {!isRunning && !isPaused && (
+                              <ActionBtn title="Start" icon={Play} onClick={() => doCtrAction(r.name, "start")} />
+                            )}
+                            {isRunning && (
+                              <ActionBtn title="Stop" icon={Pause} onClick={() => doCtrAction(r.name, "stop")} />
+                            )}
+                            {(isRunning || isPaused) && (
+                              <ActionBtn title="Restart" icon={RotateCw} onClick={() => doCtrAction(r.name, "restart")} />
+                            )}
+                            {isRunning && !isPaused && (
+                              <ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />
+                            )}
+                            {isPaused && (
+                              <ActionBtn title="Resume" icon={PlayCircle} onClick={() => doCtrAction(r.name, "unpause")} />
+                            )}
 
                             <span className="mx-1 h-4 w-px bg-slate-700/60" />
 
@@ -479,6 +410,7 @@ export function HostStacksView({
 
                             <ActionBtn title="Kill" icon={ZapOff} onClick={() => doCtrAction(r.name, "kill")} />
                             <ActionBtn title="Remove" icon={Trash2} onClick={() => doCtrAction(r.name, "remove")} />
+
                             <ActionBtn title="Console (soon)" icon={Terminal} onClick={() => {}} disabled />
                           </div>
                         </td>
@@ -500,7 +432,7 @@ export function HostStacksView({
 
       <Card className="bg-slate-900/40 border-slate-800">
         <CardContent className="py-4 flex flex-wrap items-center gap-3 text-sm text-slate-300">
-          <ShieldCheck className="h-4 w-4" /> Security by default:
+          Security by default:
           <span className="px-2 py-1 rounded bg-slate-800/60 border border-slate-700">AGE key never persisted</span>
           <span className="px-2 py-1 rounded bg-slate-800/60 border border-slate-700">Decrypt to tmpfs only</span>
           <span className="px-2 py-1 rounded bg-slate-800/60 border border-slate-700">Redacted logs</span>

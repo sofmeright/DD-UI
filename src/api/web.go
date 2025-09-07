@@ -315,8 +315,8 @@ func makeRouter() http.Handler {
 				out := make([]res, 0, len(body.IDs))
 
 				for _, id := range body.IDs {
-					_, err := cli.ImageRemove(r.Context(), id, types.ImageRemoveOptions{
-						Force:         body.Force,
+					_, err := cli.ImageRemove(ctx, imgID, image.RemoveOptions{
+						Force:         true,
 						PruneChildren: true,
 					})
 					if err != nil {

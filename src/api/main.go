@@ -190,49 +190,8 @@ func startIacAutoScanner(ctx context.Context) {
      - When effective true: deploy stack (compose/script), which idempotently fixes drift & creates missing.
 */
 
-func parseDotEnv(path string) map[string]string {
-	b, err := os.ReadFile(path)
-	if err != nil { return nil }
-	out := map[string]string{}
-	for _, line := range strings.Split(string(b), "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") { continue }
-		if i := strings.Index(line, "="); i > 0 {
-			k := strings.TrimSpace(line[:i])
-			v := strings.TrimSpace(line[i+1:])
-			out[k] = strings.Trim(v, `"'`)
-		}
-	}
-	return out
-}
-func lookupDevOpsEnv(root string, rel string, scopeName string) (val string, ok bool) {
-	// global
-	if m := parseDotEnv(filepath.Join(root, ".env")); m != nil {
-		if v, ok := m["DDUI_DEVOPS_APPLY"]; ok { return v, true }
-	}
-	// host-level: dirname/scopeName/.env
-	baseDir := filepath.Dir(rel)
-	hostDir := filepath.Join(root, baseDir)
-	if m := parseDotEnv(filepath.Join(hostDir, ".env")); m != nil {
-		if v, ok := m["DDUI_DEVOPS_APPLY"]; ok { return v, true }
-	}
-	// stack-level: rel/.env
-	stackDir := filepath.Join(root, rel)
-	if m := parseDotEnv(filepath.Join(stackDir, ".env")); m != nil {
-		if v, ok := m["DDUI_DEVOPS_APPLY"]; ok { return v, true }
-	}
-	return "", false
-}
-func truthy(s string) bool {
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "1", "t", "true", "yes", "on":
-		return true
-	}
-	return false
-}
-
 func applyAutoDevOps(ctx context.Context) error {
-	rows, err := db.Query(ctx, `SELECT id, rel_path, scope_kind, scope_name, iac_enabled FROM iac_stacks`)
+	rows, err := db.Query(ctx, `SELECT id FROM iac_stacks`)
 	if err != nil {
 		return err
 	}
@@ -240,28 +199,25 @@ func applyAutoDevOps(ctx context.Context) error {
 
 	for rows.Next() {
 		var id int64
-		var rel, scopeKind, scopeName string
-		var dbEnabled bool
-		if err := rows.Scan(&id, &rel, &scopeKind, &scopeName, &dbEnabled); err != nil {
-			continue
-		}
-		root, err := getRepoRootForStack(ctx, id)
-		if err != nil {
-			continue
-		}
-		// precedence: .env overrides > DB flag > default(false)
-		if v, ok := lookupDevOpsEnv(root, rel, scopeName); ok {
-			if !truthy(v) {
-				// explicit disable
-				continue
-			}
-		} else if !dbEnabled {
+		if err := rows.Scan(&id); err != nil {
 			continue
 		}
 
-		// apply
-		actx, cancel := context.WithTimeout(ctx, 2*time.Minute)
-		_ = deployStack(actx, id) // best-effort; idempotent for compose
+		// Must have content (compose/services) or there's nothing to deploy
+		has, _ := stackHasContent(ctx, id)
+		if !has {
+			continue
+		}
+
+		// Respect the *effective* Auto DevOps policy (global env + DB overrides)
+		allowed, err := shouldAutoApply(ctx, id)
+		if err != nil || !allowed {
+			continue
+		}
+
+		// Kick the deploy (manual=false -> gated in deployStack, which is fine)
+		dctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		_ = deployStack(dctx, id) // best effort; idempotent for compose
 		cancel()
 	}
 	return nil

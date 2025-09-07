@@ -1,3 +1,4 @@
+-- src/api/migrations/013_image_tags.up.sql
 -- persist (host,image_id)->(repo,tag), keeping last/first seen
 CREATE TABLE IF NOT EXISTS image_tags (
   host_name   TEXT        NOT NULL,

@@ -419,14 +419,20 @@ To encrypt, SOPS needs one or more **AGE recipients** (public keys). You have tw
 | `DDUI_ALLOW_SOPS_DECRYPT`               | unset                   | Enable gated decrypt API (`true/1/yes/on`), requires `X-Confirm-Reveal: yes` header         |
 | `SOPS_AGE_KEY_FILE` / `SOPS_AGE_KEY`    | unset                   | AGE private key (file path or raw), enables server-side **decrypt**                         |
 | `SOPS_AGE_RECIPIENTS`                   | unset                   | Space-separated AGE recipients, enables **encrypt** even without `.sops.yaml`               |
-| `DDUI_SESSION_SECRET`                        | —                       | Session/cookie HMAC secret. Generate via `DDUI_SESSION_SECRET="$(openssl rand -hex 64)"`         |
+| `DDUI_SESSION_SECRET`                   | —                       | Session/cookie HMAC secret. Generate via `DDUI_SESSION_SECRET="$(openssl rand -hex 64)"`    |
 | `DDUI_SESSION_SECRET_FILE`              | —                       | Same function as above but passed in as a file for docker secrets funtionality.             |
 
 ### SSH Config
 
-| Variable                                | Default                 | Description                                                                                 |
-| --------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
-| `DDUI_SSH_*`                            | see compose example     | SSH-based runtime scans (user/port/use_sudo/known-hosts strict/key path)                    |
+| Variable              | Default | Description                                                                   |
+| --------------------- | ------- | ----------------------------------------------------------------------------- |
+| `SSH_USER`            | —       | Remote username.                                                              |
+| `SSH_PORT`            | —       | SSH port (e.g. `22`).                                                         |
+| `SSH_KEY`             | —       | Inline private key (OpenSSH/PEM). Preserve newlines; prefer file for secrets. |
+| `SSH_KEY_FILE`        | —       | Read private key from file (Docker secrets compatible).                       |
+| `SSH_USE_SUDO`        | —       | `true/false` — run remote commands via `sudo`.                                |
+| `SSH_STRICT_HOST_KEY` | —       | `true/false` — verify host key (disable to skip checks; not recommended).     |
+
 
 ### Auto DevOps
 

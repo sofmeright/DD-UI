@@ -158,6 +158,8 @@ services:
       - POSTGRES_DB=ddui
       - POSTGRES_USER=prplanit
       - POSTGRES_PASSWORD_FILE=/run/secrets/pg_pass
+    ports:
+      - 5432:5432
     volumes:
       - /opt/docker/ddui/postgres:/var/lib/postgresql/data
     secrets:
@@ -173,12 +175,27 @@ services:
     depends_on:
       ddui-postgres:
         condition: service_healthy
-    image: cr.pcfae.com/prplanit/ddui:v0.3.0
+    image: cr.pcfae.com/prplanit/ddui:v0.4.0
     ports:
       - "3000:8080"
-    env_file: .env
+    env_file: stack.env
     environment:
+      # General Config
       - DDUI_BIND=0.0.0.0:8080
+      - DDUI_DEFAULT_OWNER=kai.hamil@gmail.com
+      - DDUI_INVENTORY_PATH=/data/inventory
+      - DDUI_LOCAL_HOST=anchorage
+        # - UI_ORIGIN=
+      
+      # Authentication / OIDC
+        #- DDUI_COOKIE_DOMAIN=anchorage
+      - DDUI_COOKIE_SECURE=false
+      - OIDC_ISSUER_URL=https://sso.prplanit.com
+      - OIDC_REDIRECT_URL=http://anchorage:3000/auth/callback
+      - OIDC_SCOPES=openid email profile
+        # - OIDC_ALLOWED_EMAIL_DOMAIN # (optional; blocks others)
+      
+      # Database (Postgres) Configuration:
       - DDUI_DB_HOST=ddui-postgres
       - DDUI_DB_PORT=5432
       - DDUI_DB_NAME=ddui
@@ -186,39 +203,42 @@ services:
       - DDUI_DB_PASS_FILE=/run/secrets/pg_pass
       - DDUI_DB_SSLMODE=disable
       - DDUI_DB_MIGRATE=true
-      # - UI_ORIGIN=
-      # or provide a single DSN:
-      # - DDUI_DB_DSN=postgres://ddui:...@db:5432/ddui?sslmode=disable
-      # - DDUI_IAC_SCAN_AUTO=false
-      # - DDUI_IAC_SCAN_INTERVAL=90s
-      - DDUI_DEVOPS_APPLY=false
+        # or provide a single DSN:
+        # - DDUI_DB_DSN=postgres://ddui:...@db:5432/ddui?sslmode=disable
+
+      # Docker Connection Config
+      - DOCKER_CONNECTION_METHOD=local
+      
+      # Encryption / SOPS Config
       - DDUI_ALLOW_SOPS_DECRYPT=true
       - SOPS_AGE_KEY_FILE=/run/secrets/sops_age_key
-      # - SOPS_AGE_RECIPIENTS=age1abc... age1def...   # see SOPS section
-      # - DDUI_INVENTORY_PATH=/data/inventory
-      - DDUI_SCAN_KIND=local
-      - DDUI_SCAN_ROOT=/data/docker-compose
-      # SSH to each host for docker scans
-      - DDUI_SSH_USER=kai           # or a limited user in docker group
-      - DDUI_SSH_PORT=22
-      - DDUI_SSH_USE_SUDO=false      # true if your user needs sudo
-      - DDUI_SSH_STRICT_HOST_KEY=false
-      - DDUI_SSH_KEY=/run/secrets/ddui_ssh_key
-      # Scanner Settings
-      - DDUI_SCAN_AUTO=true
-      - DDUI_SCAN_ON_START=true
-      - DDUI_SCAN_INTERVAL=1m
-      - DDUI_SCAN_HOST_TIMEOUT=45s
-      - DDUI_SCAN_CONCURRENCY=3
-      # Remote & SSH Settings
-      - DDUI_LOCAL_HOST=anchorage
-      #- COOKIE_DOMAIN=anchorage
-      - COOKIE_SECURE=false
-      - OIDC_ISSUER_URL=https://sso.prplanit.com
-      - OIDC_REDIRECT_URL=http://anchorage:3000/auth/callback
-      - OIDC_SCOPES=openid email profile
-      # - OIDC_ALLOWED_EMAIL_DOMAIN # (optional; blocks others)
+      - DDUI_SESSION_SECRET_FILE=/run/secrets/session_secret
+      
+      # SSH Config
+      - SSH_USER=kai           # or a limited user in docker group
+      - SSH_PORT=22
+      - SSH_KEY_FILE=/run/secrets/ddui_ssh_key
+      - SSH_USE_SUDO=false      # true if your user needs sudo
+      - SSH_STRICT_HOST_KEY=false
+      
+      # Auto DevOps Config
+      - DDUI_DEVOPS_APPLY=true
+      
+      # Scanning Config - Docker Host(s) States
+      - DDUI_SCAN_DOCKER_AUTO=true
+      - DDUI_SCAN_DOCKER_INTERVAL=1m
+      - DDUI_SCAN_DOCKER_HOST_TIMEOUT=45s
+      - DDUI_SCAN_DOCKER_CONCURRENCY=3
+      - DDUI_SCAN_DOCKER_ON_START=true
+      - DDUI_SCAN_DOCKER_DEBUG=true
+      
+      # Scannning Config - IAC
+      - DDUI_IAC_ROOT=/data
+      - DDUI_IAC_DIRNAME=docker-compose
+      - DDUI_SCAN_IAC_AUTO=true
+      - DDUI_SCAN_IAC_INTERVAL=90s
     secrets:
+      - session_secret
       - pg_pass
       - ddui_ssh_key
       - sops_age_key
@@ -227,6 +247,8 @@ services:
       - /var/run/docker.sock:/var/run/docker.sock
 
 secrets:
+  session_secret:
+    file: /opt/docker/ddui/secrets/session_secret
   ddui_ssh_key:
     file: /opt/docker/ddui/secrets/id_ed25519   # your private key
   pg_pass:

@@ -182,7 +182,7 @@ services:
     environment:
       # General Config
       - DDUI_BIND=0.0.0.0:8080
-      - DDUI_DEFAULT_OWNER=kai.hamil@gmail.com
+      - DDUI_DEFAULT_OWNER= # <email/username> (not too important yet, nothing is implemented for this.)
       - DDUI_INVENTORY_PATH=/data/inventory
       - DDUI_LOCAL_HOST=anchorage
         # - UI_ORIGIN=

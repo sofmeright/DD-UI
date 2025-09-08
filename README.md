@@ -145,7 +145,9 @@ In production, the Go server serves the built UI; during dev it’s fine to run 
 ---
 
 ## Quick start (docker-compose)
-This brings up Postgres and the backend; you’ll build the UI and point the backend at it, or use the dev server.
+This is a working docker-compose example.
+Please edit the values to be specific to your deployment.
+Don't forget to create the secret files and add the correct values.
 
 ```yaml
 version: "3.8"

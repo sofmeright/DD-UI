@@ -175,7 +175,7 @@ services:
     depends_on:
       ddui-postgres:
         condition: service_healthy
-    image: cr.pcfae.com/prplanit/ddui:v0.4.0
+    image: prplanit/ddui:v0.4.0
     ports:
       - "3000:8080"
     env_file: stack.env

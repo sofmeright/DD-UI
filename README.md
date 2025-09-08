@@ -157,13 +157,13 @@ services:
     environment:
       - POSTGRES_DB=ddui
       - POSTGRES_USER=prplanit
-      - POSTGRES_PASSWORD_FILE=/run/secrets/pg_pass
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_pass
     ports:
       - 5432:5432
     volumes:
       - /opt/docker/ddui/postgres:/var/lib/postgresql/data
     secrets:
-      - pg_pass
+      - postgres_pass
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
       interval: 5s
@@ -175,7 +175,7 @@ services:
     depends_on:
       ddui-postgres:
         condition: service_healthy
-    image: prplanit/ddui:v0.4.0
+    image: cr.pcfae.com/prplanit/ddui:v0.4.0
     ports:
       - "3000:8080"
     env_file: stack.env
@@ -190,6 +190,8 @@ services:
       # Authentication / OIDC
         #- DDUI_COOKIE_DOMAIN=anchorage
       - DDUI_COOKIE_SECURE=false
+      - OIDC_CLIENT_ID_FILE=/run/secrets/oidc_client_secret
+      - OIDC_CLIENT_SECRET_FILE=/run/secrets/oidc_client_secret
       - OIDC_ISSUER_URL=https://sso.prplanit.com
       - OIDC_REDIRECT_URL=http://anchorage:3000/auth/callback
       - OIDC_SCOPES=openid email profile
@@ -200,7 +202,7 @@ services:
       - DDUI_DB_PORT=5432
       - DDUI_DB_NAME=ddui
       - DDUI_DB_USER=prplanit
-      - DDUI_DB_PASS_FILE=/run/secrets/pg_pass
+      - DDUI_DB_PASS_FILE=/run/secrets/postgres_pass
       - DDUI_DB_SSLMODE=disable
       - DDUI_DB_MIGRATE=true
         # or provide a single DSN:
@@ -217,7 +219,7 @@ services:
       # SSH Config
       - SSH_USER=kai           # or a limited user in docker group
       - SSH_PORT=22
-      - SSH_KEY_FILE=/run/secrets/ddui_ssh_key
+      - SSH_KEY_FILE=/run/secrets/ssh_key
       - SSH_USE_SUDO=false      # true if your user needs sudo
       - SSH_STRICT_HOST_KEY=false
       
@@ -238,23 +240,29 @@ services:
       - DDUI_SCAN_IAC_AUTO=true
       - DDUI_SCAN_IAC_INTERVAL=90s
     secrets:
+      - oidc_client_id
+      - oidc_client_secret
+      - postgres_pass
       - session_secret
-      - pg_pass
-      - ddui_ssh_key
       - sops_age_key
+      - ssh_key
     volumes:
       - /opt/docker/ddui/data:/data
       - /var/run/docker.sock:/var/run/docker.sock
 
 secrets:
+  oidc_client_id:
+    file: /opt/docker/ddui/secrets/oidc_client_id
+  oidc_client_secret:
+    file: /opt/docker/ddui/secrets/oidc_client_secret
+  postgres_pass:
+    file: /opt/docker/ddui/secrets/postgres_password
   session_secret:
     file: /opt/docker/ddui/secrets/session_secret
-  ddui_ssh_key:
-    file: /opt/docker/ddui/secrets/id_ed25519   # your private key
-  pg_pass:
-    file: /opt/docker/ddui/secrets/postgres_password.txt
   sops_age_key:
-    file: /opt/docker/ddui/secrets/sops_age_key.txt
+    file: /opt/docker/ddui/secrets/sops_age_key
+  ssh_key:
+    file: /opt/docker/ddui/secrets/id_ed25519   # your private key
 ```
 
 ### `.env` file

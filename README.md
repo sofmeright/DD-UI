@@ -479,8 +479,8 @@ To encrypt, SOPS needs one or more **AGE recipients** (public keys). You have tw
 | ------------------------ | ------- | --------------------------------------------------------------------------------------- |
 | `DDUI_SCAN_IAC_AUTO`     | `true`  | `true/false` — enable the periodic IaC (compose) scan scheduler.                        |
 | `DDUI_SCAN_IAC_INTERVAL` | `90s`   | How often to run IaC scans (Go duration, e.g. `30s`, `5m`, `1h`).                       |
-| `DDUI_IAC_ROOT`          | —       | Root path to scan for IaC (Docker Compose) files; recommended `/data/docker-compose`.   |
-| `DDUI_IAC_DIRNAME`       | `empty` | Optional subfolder under the root to scope scans; leave empty to use the root directly. |
+| `DDUI_IAC_ROOT`          | —       | Root path to scan for IaC (Docker Compose) files; recommended `/data`.   |
+| `DDUI_IAC_DIRNAME`       | `empty` | Optional subfolder under the root to scope scans; leave empty to use the root directly. "recommended: docker-compose" |
 
 ---
 

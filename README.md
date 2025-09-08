@@ -375,15 +375,25 @@ To encrypt, SOPS needs one or more **AGE recipients** (public keys). You have tw
 
 ## Environment Variables
 
+### General
+
+| Variable              | Default | Description                                                                                      |
+| --------------------- | ------- | ------------------------------------------------------------------------------------------------ |
+| `DDUI_DEFAULT_OWNER`  | —       | Default owner/team used when creating stacks or records (namespacing/attribution in the UI).     |
+| `DDUI_BUILDS_DIR`     | —       | Directory for build outputs and artifacts (e.g., generated bundles/manifests).                   |
+| `DDUI_INVENTORY_PATH` | —       | Path to the hosts inventory file (YAML/JSON) defining remote Docker targets.                     |
+| `DDUI_LOCAL_HOST`     | `""`    | Optional override for the local host name/label; leave empty to use the tool’s implicit/default. |
+| `DDUI_BIND`           | —       | Server bind address, e.g. `:8080` or `0.0.0.0:8080`.                                             |
+| `DDUI_UI_ORIGIN`                             | empty                   | Additional allowed CORS origin for the dev UI (`http://localhost:5173` is allowed by default) |
+| `DDUI_UI_DIR`                           | `/home/ddui/ui/dist`    | Where built SPA is served from                                                              |
+
+
 ### Auth / OIDC
 
 | Variable                                | Default                 | Description                                                                                 |
 | --------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
-| `DDUI_BIND`                             | `0.0.0.0:8080` (example)| Server bind address                                                                         |
 | `DDUI_COOKIE_DOMAIN`                    | empty                   | e.g. `.example.com`                                                                         |
 | `DDUI_COOKIE_SECURE`                    | inferred                | `true/false` (if unset, inferred from redirect URL scheme)                                  |
-| `DDUI_UI_DIR`                           | `/home/ddui/ui/dist`    | Where built SPA is served from                                                              |
-| `UI_ORIGIN`                             | empty                   | Additional allowed CORS origin for the dev UI (`http://localhost:5173` is allowed by default) |
 | `OIDC_ISSUER_URL`                       | —                       | Provider discovery URL (`…/.well-known/openid-configuration`)                               |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | —                       | OAuth client (secret supports `@/path` indirection)                                         |
 | `OIDC_CLIENT_ID_FILE` / `OIDC_CLIENT_SECRET_FILE` | —                       | Same function as above but passed in as a file for docker secrets funtionality.   |
@@ -412,6 +422,17 @@ To encrypt, SOPS needs one or more **AGE recipients** (public keys). You have tw
 | `DDUI_DB_PING_TIMEOUT`      | —       | Timeout for readiness/`PING` checks (duration, e.g. `2s`).                        |
 | `DDUI_DB_MIGRATE`           | —       | `true/false` — run schema migrations on startup.                                  |
 
+### Docker Connection Config
+
+| Variable                   | Default                | Description                                                                                                                                                     |
+| -------------------------- | ---------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `DOCKER_CONNECTION_METHOD` | `ssh`                  | How to connect to Docker: `ssh`, `tcp`, or `local` (Unix socket).                                                                                               |
+| `DOCKER_SOCK_PATH`         | `/var/run/docker.sock` | Path to local Docker socket (used when method=`local`).                                                                                                         |
+| `DOCKER_TCP_PORT`          | `2375`                 | Docker TCP port (used when method=`tcp`).                                                                                                                       |
+| `SSH_USER`                 | `root`                 | Remote user for SSH Docker connections (see **SSH (Remote)** for keys/port options).                                                                            |
+| `DOCKER_SSH_CMD`           | —                      | Advanced override: full SSH command (binary + flags). If set, it supersedes `SSH_*` vars. E.g. `ssh -i /run/secrets/ssh_key -p 22 -o StrictHostKeyChecking=no`. |
+
+
 ### Encryption & SOPS
 
 | Variable                                | Default                 | Description                                                                                 |
@@ -436,22 +457,30 @@ To encrypt, SOPS needs one or more **AGE recipients** (public keys). You have tw
 
 ### Auto DevOps
 
-| Variable                                | Default                 | Description                                                                                 |
-| --------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
-| `DDUI_SCAN_*`                           | see compose example     | Scan mode (local), root path, intervals, concurrency, host timeouts                         |
+| Variable                                | Default                 | Description                                                            |
+| --------------------------------------- | ----------------------- | ---------------------------------------------------------------------- |
+| `DDUI_DEVOPS_APPLY`                     | `true`                  | Enables Automated Deployments via IaC / DevOps                         |
 
 ### Scanning Docker
 
-| Variable                                | Default                 | Description                                                                                 |
-| --------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
-| `DDUI_SCAN_*`                           | see compose example     | Scan mode (local), root path, intervals, concurrency, host timeouts                         |
+| Variable                        | Default | Description                                                   |
+| ------------------------------- | ------- | ------------------------------------------------------------- |
+| `DDUI_SCAN_DOCKER_AUTO`         | `true`  | `true/false` — enable the periodic Docker scan scheduler.     |
+| `DDUI_SCAN_DOCKER_INTERVAL`     | `1m`    | How often to run scans (Go duration, e.g. `30s`, `5m`, `1h`). |
+| `DDUI_SCAN_DOCKER_HOST_TIMEOUT` | `45s`   | Per-host scan timeout (Go duration).                          |
+| `DDUI_SCAN_DOCKER_CONCURRENCY`  | `3`     | Max number of hosts scanned in parallel (integer).            |
+| `DDUI_SCAN_DOCKER_ON_START`     | `true`  | `true/false` — run an initial scan at startup.                |
+| `DDUI_SCAN_DOCKER_DEBUG`        | `false` | `true/false` — verbose logging for the Docker scanner.        |
+
 
 ### Scanning IaC
 
-| Variable                                | Default                 | Description                                                                                 |
-| --------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
-| `DDUI_IAC_ROOT`                         | `/data`                 | IaC repository root                                                                         |
-| `DDUI_IAC_DIRNAME`                      | `docker-compose`        | Folder inside root DDUI scans                                                               |
+| Variable                 | Default | Description                                                                             |
+| ------------------------ | ------- | --------------------------------------------------------------------------------------- |
+| `DDUI_SCAN_IAC_AUTO`     | `true`  | `true/false` — enable the periodic IaC (compose) scan scheduler.                        |
+| `DDUI_SCAN_IAC_INTERVAL` | `90s`   | How often to run IaC scans (Go duration, e.g. `30s`, `5m`, `1h`).                       |
+| `DDUI_IAC_ROOT`          | —       | Root path to scan for IaC (Docker Compose) files; recommended `/data/docker-compose`.   |
+| `DDUI_IAC_DIRNAME`       | `empty` | Optional subfolder under the root to scope scans; leave empty to use the root directly. |
 
 ---
 

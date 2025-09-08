@@ -49,7 +49,7 @@ func dockerURLFor(h HostRow) (string, string) {
 	if v := h.Vars["docker_host"]; v != "" {
 		return v, h.Vars["docker_ssh_cmd"]
 	}
-	kind := env("DDUI_SCAN_DOCKER_METHOD", "ssh") // ssh|tcp|local
+	kind := env("DOCKER_CONNECTION_METHOD", "ssh") // ssh|tcp|local
 	switch kind {
 	case "local":
 		sock := env("DOCKER_SOCK_PATH", "/var/run/docker.sock")

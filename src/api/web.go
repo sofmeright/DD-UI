@@ -34,7 +34,7 @@ func makeRouter() http.Handler {
 	r := chi.NewRouter()
 
 	// CORS – locked down for credentials
-	uiOrigin := strings.TrimSpace(env("UI_ORIGIN", ""))
+	uiOrigin := strings.TrimSpace(env("DDUI_UI_ORIGIN", ""))
 	allowedOrigins := []string{}
 	if uiOrigin != "" {
 		allowedOrigins = append(allowedOrigins, uiOrigin)

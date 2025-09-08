@@ -375,30 +375,77 @@ To encrypt, SOPS needs one or more **AGE recipients** (public keys). You have tw
 
 ## Environment Variables
 
+### Auth / OIDC
+
 | Variable                                | Default                 | Description                                                                                 |
 | --------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
-| `DATABASE_URL`                          | —                       | Postgres connection string                                                                  |
-| `DDUI_DB_*`                             | —                       | Alternative DSN parts: host/port/name/user/pass_file/sslmode (see compose example)         |
+| `DDUI_BIND`                             | `0.0.0.0:8080` (example)| Server bind address                                                                         |
+| `DDUI_COOKIE_DOMAIN`                    | empty                   | e.g. `.example.com`                                                                         |
+| `DDUI_COOKIE_SECURE`                    | inferred                | `true/false` (if unset, inferred from redirect URL scheme)                                  |
+| `DDUI_UI_DIR`                           | `/home/ddui/ui/dist`    | Where built SPA is served from                                                              |
+| `UI_ORIGIN`                             | empty                   | Additional allowed CORS origin for the dev UI (`http://localhost:5173` is allowed by default) |
 | `OIDC_ISSUER_URL`                       | —                       | Provider discovery URL (`…/.well-known/openid-configuration`)                               |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | —                       | OAuth client (secret supports `@/path` indirection)                                         |
 | `OIDC_CLIENT_ID_FILE` / `OIDC_CLIENT_SECRET_FILE` | —                       | Same function as above but passed in as a file for docker secrets funtionality.   |
 | `OIDC_REDIRECT_URL`                     | —                       | e.g. `http://localhost:8080/auth/callback`                                                  |
 | `OIDC_SCOPES`                           | `openid email profile`  | Space-separated scopes                                                                      |
 | `OIDC_ALLOWED_EMAIL_DOMAIN`             | empty                   | Restrict logins to a domain                                                                 |
-| `COOKIE_DOMAIN`                         | empty                   | e.g. `.example.com`                                                                         |
-| `COOKIE_SECURE`                         | inferred                | `true/false` (if unset, inferred from redirect URL scheme)                                  |
-| `DDUI_SESSION_SECRET`                        | —                       | Session/cookie HMAC secret. Generate via `DDUI_SESSION_SECRET="$(openssl rand -hex 64)"`         |
-| `DDUI_SESSION_SECRET_FILE`              | —                       | Same function as above but passed in as a file for docker secrets funtionality.             |
-| `DDUI_UI_DIR`                           | `/home/ddui/ui/dist`    | Where built SPA is served from                                                              |
-| `UI_ORIGIN`                             | empty                   | Additional allowed CORS origin for the dev UI (`http://localhost:5173` is allowed by default) |
-| `DDUI_IAC_ROOT`                         | `/data`                 | IaC repository root                                                                         |
-| `DDUI_IAC_DIRNAME`                      | `docker-compose`        | Folder inside root DDUI scans                                                               |
+
+### Database (Postgresql)
+
+| Variable                    | Default | Description                                                                       |
+| --------------------------- | ------- | --------------------------------------------------------------------------------- |
+| `DDUI_DB_DSN`               | —       | Full connection string, e.g. `postgres://user:pass@host:5432/db?sslmode=disable`. |
+| `DDUI_DB_HOST`              | —       | Hostname/IP of the database (used when DSN is not set).                           |
+| `DDUI_DB_PORT`              | —       | Database port, e.g. `5432`.                                                       |
+| `DDUI_DB_NAME`              | —       | Database name.                                                                    |
+| `DDUI_DB_USER`              | —       | Database user.                                                                    |
+| `DDUI_DB_PASS`              | —       | Database password (prefer `DDUI_DB_PASS_FILE` for secrets).                       |
+| `DDUI_DB_PASS_FILE`         | —       | Read password from file (Docker secrets compatible).                              |
+| `DDUI_DB_SSLMODE`           | —       | Postgres `sslmode` (`disable`, `require`, `verify-ca`, `verify-full`).            |
+| `DDUI_DB_MAX_CONNS`         | —       | Max open connections in the pool (integer).                                       |
+| `DDUI_DB_MIN_CONNS`         | —       | Minimum/idle pool size (integer).                                                 |
+| `DDUI_DB_CONN_MAX_LIFETIME` | —       | Max lifetime per connection (duration, e.g. `30m`).                               |
+| `DDUI_DB_CONN_MAX_IDLE`     | —       | Max idle time per connection (duration, e.g. `5m`).                               |
+| `DDUI_DB_HEALTH_PERIOD`     | —       | Interval between DB health checks (duration, e.g. `10s`).                         |
+| `DDUI_DB_CONNECT_TIMEOUT`   | —       | Dial/connect timeout (duration, e.g. `5s`).                                       |
+| `DDUI_DB_PING_TIMEOUT`      | —       | Timeout for readiness/`PING` checks (duration, e.g. `2s`).                        |
+| `DDUI_DB_MIGRATE`           | —       | `true/false` — run schema migrations on startup.                                  |
+
+### Encryption & SOPS
+
+| Variable                                | Default                 | Description                                                                                 |
+| --------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
 | `DDUI_ALLOW_SOPS_DECRYPT`               | unset                   | Enable gated decrypt API (`true/1/yes/on`), requires `X-Confirm-Reveal: yes` header         |
 | `SOPS_AGE_KEY_FILE` / `SOPS_AGE_KEY`    | unset                   | AGE private key (file path or raw), enables server-side **decrypt**                         |
 | `SOPS_AGE_RECIPIENTS`                   | unset                   | Space-separated AGE recipients, enables **encrypt** even without `.sops.yaml`               |
-| `DDUI_SCAN_*`                           | see compose example     | Scan mode (local), root path, intervals, concurrency, host timeouts                         |
+| `DDUI_SESSION_SECRET`                        | —                       | Session/cookie HMAC secret. Generate via `DDUI_SESSION_SECRET="$(openssl rand -hex 64)"`         |
+| `DDUI_SESSION_SECRET_FILE`              | —                       | Same function as above but passed in as a file for docker secrets funtionality.             |
+
+### SSH Config
+
+| Variable                                | Default                 | Description                                                                                 |
+| --------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
 | `DDUI_SSH_*`                            | see compose example     | SSH-based runtime scans (user/port/use_sudo/known-hosts strict/key path)                    |
-| `DDUI_BIND`                             | `0.0.0.0:8080` (example)| Server bind address                                                                         |
+
+### Auto DevOps
+
+| Variable                                | Default                 | Description                                                                                 |
+| --------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
+| `DDUI_SCAN_*`                           | see compose example     | Scan mode (local), root path, intervals, concurrency, host timeouts                         |
+
+### Scanning Docker
+
+| Variable                                | Default                 | Description                                                                                 |
+| --------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
+| `DDUI_SCAN_*`                           | see compose example     | Scan mode (local), root path, intervals, concurrency, host timeouts                         |
+
+### Scanning IaC
+
+| Variable                                | Default                 | Description                                                                                 |
+| --------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
+| `DDUI_IAC_ROOT`                         | `/data`                 | IaC repository root                                                                         |
+| `DDUI_IAC_DIRNAME`                      | `docker-compose`        | Folder inside root DDUI scans                                                               |
 
 ---
 

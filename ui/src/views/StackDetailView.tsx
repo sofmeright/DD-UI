@@ -4,7 +4,7 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { ArrowLeft, Eye, EyeOff, RefreshCw, RotateCw, Trash2 } from "lucide-react";
+import { ArrowLeft, ChevronRight, Eye, EyeOff, RefreshCw, RotateCw, Trash2 } from "lucide-react";
 import Fact from "@/components/Fact";
 import MiniEditor from "@/editors/MiniEditor";
 import { ApiContainer, Host, IacFileMeta, InspectOut } from "@/types";
@@ -54,6 +54,39 @@ function VolsBlock({ vols }: { vols?: InspectOut["volumes"] }) {
           {m.mode ? ` (${m.mode}${m.rw === false ? ", ro" : ""})` : (m.rw === false ? " (ro)" : "")}
         </div>
       ))}
+    </div>
+  );
+}
+
+function CollapsibleSection({
+  title,
+  count,
+  children,
+  defaultOpen = false,
+}: {
+  title: string;
+  count?: number;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="border border-slate-800 rounded-lg">
+      <button
+        type="button"
+        className="w-full flex items-center justify-between px-3 py-2 hover:bg-slate-900/40"
+        onClick={() => setOpen(o => !o)}
+        aria-expanded={open}
+      >
+        <div className="flex items-center gap-2">
+          <ChevronRight className={`h-4 w-4 text-slate-400 transition-transform ${open ? "rotate-90" : ""}`} />
+          <div className="text-xs uppercase tracking-wide text-slate-400">{title}</div>
+        </div>
+        {typeof count === "number" && (
+          <Badge variant="outline" className="border-slate-700 text-slate-300">{count}</Badge>
+        )}
+      </button>
+      {open && <div className="px-3 pb-3 pt-1">{children}</div>}
     </div>
   );
 }
@@ -236,48 +269,64 @@ export default function StackDetailView({
             </CardHeader>
             <CardContent className="space-y-3">
               {containers.length === 0 && <div className="text-sm text-slate-500">No containers are currently running for this stack on {host.name}.</div>}
-              {containers.map((c, i) => (
-                <div key={i} className="rounded-lg border border-slate-800 p-3">
-                  <div className="flex items-center justify-between">
-                    <div className="font-medium text-slate-200">{c.name}</div>
-                  </div>
-                  <div className="mt-2 grid md:grid-cols-2 gap-3">
-                    <div className="space-y-2 md:pr-3 md:border-r md:border-slate-800">
-                      <Fact label="CMD" value={<span className="font-mono">{(c.cmd || []).join(" ") || "—"}</span>} />
-                      <Fact label="ENTRYPOINT" value={<span className="font-mono">{(c.entrypoint || []).join(" ") || "—"}</span>} />
-                      <Fact label="Image" value={<span className="font-mono">{c.image || "—"}</span>} />
+              {containers.map((c, i) => {
+                const envCount = Object.keys(c.env || {}).length;
+                const labelCount = Object.keys(c.labels || {}).length;
+                const volCount = (c.volumes || []).length;
+                return (
+                  <div key={i} className="rounded-lg border border-slate-800 p-3 space-y-3">
+                    <div className="flex items-center justify-between">
+                      <div className="font-medium text-slate-200">{c.name}</div>
                     </div>
-                    <div className="space-y-2 md:pl-3 md:border-l md:border-slate-800">
-                      <Fact label="Networks" value={(c.networks || []).join(", ") || "—"} />
-                      <Fact label="Ports" value={<PortsBlock ports={c.ports} />} />
-                      <Fact label="Restart policy" value={c.restart_policy || "—"} />
-                    </div>
-                  </div>
-                  <div className="mt-4 grid md:grid-cols-2 gap-3">
-                    <div className="md:pr-3 md:border-r md:border-slate-800">
-                      <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Environment</div>
-                      {(!c.env || Object.keys(c.env).length === 0) && <div className="text-sm text-slate-500">No environment variables.</div>}
-                      <div className="space-y-1">
-                        {Object.entries(c.env || {}).map(([k, v]) => (<EnvRow key={k} k={k} v={v} forceShow={revealEnvAll} />))}
+
+                    {/* Top facts stay side-by-side for readability */}
+                    <div className="grid md:grid-cols-2 gap-3">
+                      <div className="space-y-2 md:pr-3 md:border-r md:border-slate-800">
+                        <Fact label="CMD" value={<span className="font-mono">{(c.cmd || []).join(" ") || "—"}</span>} />
+                        <Fact label="ENTRYPOINT" value={<span className="font-mono">{(c.entrypoint || []).join(" ") || "—"}</span>} />
+                        <Fact label="Image" value={<span className="font-mono">{c.image || "—"}</span>} />
+                      </div>
+                      <div className="space-y-2 md:pl-3 md:border-l md:border-slate-800">
+                        <Fact label="Networks" value={(c.networks || []).join(", ") || "—"} />
+                        <Fact label="Ports" value={<PortsBlock ports={c.ports} />} />
+                        <Fact label="Restart policy" value={c.restart_policy || "—"} />
                       </div>
                     </div>
-                    <div className="md:pl-3 md:border-l md:border-slate-800">
-                      <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Labels</div>
-                      {(!c.labels || Object.keys(c.labels).length === 0) && <div className="text-sm text-slate-500">No labels.</div>}
-                      {(Object.entries(c.labels || {}).sort(([a],[b]) => a.localeCompare(b))).map(([k,v]) => (
-                        <div key={k} className="flex items-center justify-between gap-2 text-sm">
-                          <div className="text-slate-300">{k}</div>
-                          <div className="text-slate-400 font-mono truncate max-w-[22rem]" title={v}>{v}</div>
-                        </div>
-                      ))}
+
+                    {/* Collapsible single-column sections */}
+                    <div className="space-y-2">
+                      <CollapsibleSection title="Environment" count={envCount} defaultOpen={false}>
+                        {envCount === 0 ? (
+                          <div className="text-sm text-slate-500">No environment variables.</div>
+                        ) : (
+                          <div className="space-y-1">
+                            {Object.entries(c.env || {}).map(([k, v]) => (<EnvRow key={k} k={k} v={v} forceShow={revealEnvAll} />))}
+                          </div>
+                        )}
+                      </CollapsibleSection>
+
+                      <CollapsibleSection title="Labels" count={labelCount} defaultOpen={false}>
+                        {labelCount === 0 ? (
+                          <div className="text-sm text-slate-500">No labels.</div>
+                        ) : (
+                          <div className="space-y-1">
+                            {(Object.entries(c.labels || {}).sort(([a],[b]) => a.localeCompare(b))).map(([k,v]) => (
+                              <div key={k} className="flex items-center justify-between gap-2 text-sm">
+                                <div className="text-slate-300">{k}</div>
+                                <div className="text-slate-400 font-mono truncate max-w-[22rem]" title={v}>{v}</div>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </CollapsibleSection>
+
+                      <CollapsibleSection title="Volumes" count={volCount} defaultOpen={false}>
+                        <VolsBlock vols={c.volumes} />
+                      </CollapsibleSection>
                     </div>
                   </div>
-                  <div className="mt-3">
-                    <div className="text-xs uppercase tracking-wide text-slate-400 mb-2">Volumes</div>
-                    <VolsBlock vols={c.volumes} />
-                  </div>
-                </div>
-              ))}
+                );
+              })}
             </CardContent>
           </Card>
         </div>

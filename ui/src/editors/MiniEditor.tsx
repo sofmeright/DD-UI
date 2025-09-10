@@ -87,11 +87,10 @@ export default function MiniEditor({
     }
     setLoading(true);
     try {
-      const url = new URL(`/api/iac/stacks/${stackId}/file`, window.location.origin);
-      url.searchParams.set("path", path);
-      if (opts?.decrypt) url.searchParams.set("decrypt", "1");
+      const params = new URLSearchParams({ path });
+      if (opts?.decrypt) params.set("decrypt", "1");
 
-      const r = await fetch(url.toString(), {
+      const r = await fetch(`/api/iac/stacks/${stackId}/file?${params.toString()}`, {
         credentials: "include",
         headers: opts?.decrypt ? { "X-Confirm-Reveal": "yes" } : undefined,
       });
@@ -105,7 +104,7 @@ export default function MiniEditor({
       setContent(txt);
     } catch (e) {
       // Keep failure soft to avoid interrupting editing flow
-      setContent(prev => prev); // no-op, preserve any local edits
+      setContent((prev) => prev); // no-op, preserve any local edits
       console.error("Editor load failed:", e);
     } finally {
       setLoading(false);
@@ -123,23 +122,45 @@ export default function MiniEditor({
     setLoading(true);
     try {
       const idToUse = stackId ?? (await ensureStack());
-      const r = await fetch(`/api/iac/stacks/${idToUse}/file`, {
+
+      // If the file is currently SOPS on disk, but the user turned SOPS OFF for save,
+      // and they're NOT in decrypted view, fetch decrypted content so we save plaintext.
+      let bodyContent = content;
+      if (!sopsOnSave && isSopsPersisted && !decryptedView) {
+        try {
+          const params = new URLSearchParams({ path, decrypt: "1" });
+          const rDec = await fetch(`/api/iac/stacks/${idToUse}/file?${params.toString()}`, {
+            credentials: "include",
+            headers: { "X-Confirm-Reveal": "yes" },
+          });
+          const txtDec = await rDec.text();
+          if (!rDec.ok) throw new Error(txtDec || `${rDec.status} ${rDec.statusText}`);
+          bodyContent = txtDec; // use decrypted plaintext for saving
+        } catch (e) {
+          // If decrypt failed, warn and proceed with editor content to avoid data loss.
+          alert("Couldn't load decrypted content; saving the current editor text instead.");
+        }
+      }
+
+      const resp = await fetch(`/api/iac/stacks/${idToUse}/file`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, content, sops: sopsOnSave }),
+        body: JSON.stringify({ path, content: bodyContent, sops: sopsOnSave }),
       });
 
-      const txt = await r.text();
-      if (!r.ok) throw new Error(txt || `${r.status} ${r.statusText}`);
+      const txt = await resp.text();
+      if (!resp.ok) throw new Error(txt || `${resp.status} ${resp.statusText}`);
 
       // The API returns { sops: boolean, ... } – update flags if we can parse it
       try {
         const j = JSON.parse(txt);
         if (typeof j?.sops === "boolean") {
           setIsSopsPersisted(j.sops);
-          // staying in same decrypted/raw view is okay; if we just encrypted and are in decrypted view,
-          // keep showing decrypted content; if we just turned off sops, decrypted view is same as raw anyway.
+          if (!j.sops && decryptedView) {
+            // No longer meaningful to keep "decrypted" view when file isn't SOPS on disk.
+            setDecryptedView(false);
+          }
         }
       } catch {
         // ignore parse issues; refresh will sync state
@@ -160,28 +181,25 @@ export default function MiniEditor({
     if (!(isSopsPersisted || sopsOnSave)) {
       return;
     }
-    setDecryptedView(v => !v);
+    setDecryptedView((v) => !v);
   }
 
   // Toggle encryption for future saves (also allows going back and forth).
   function toggleSopsOnSave() {
-    setSopsOnSave(v => !v);
-    // If we turn SOPS OFF but are currently in decrypted view, keep content as-is;
-    // future saves will store plaintext. If we turn SOPS ON, user can Save to encrypt.
+    setSopsOnSave((v) => !v);
+    // If we turn SOPS OFF while viewing decrypted, it's fine; future saves will store plaintext.
   }
 
   // Fullscreen helpers
   function toggleFullscreen() {
-    setFullscreen(f => !f);
+    setFullscreen((f) => !f);
   }
 
   return (
     <Card
       ref={containerRef}
       className={
-        (fullscreen
-          ? "fixed inset-0 z-50 m-0 rounded-none"
-          : "h-full") +
+        (fullscreen ? "fixed inset-0 z-50 m-0 rounded-none" : "h-full") +
         " bg-slate-900/40 border-slate-800 flex flex-col"
       }
     >
@@ -263,9 +281,6 @@ export default function MiniEditor({
             <Save className="h-4 w-4 mr-1" /> Save
           </Button>
         </div>
-
-        {/* No decrypted warning (intentionally removed per request) */}
-        {/* FYI: filenames ending with _private.env or _secret.env default SOPS on. */}
       </CardContent>
     </Card>
   );

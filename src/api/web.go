@@ -3,7 +3,10 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"io"
@@ -12,6 +15,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"sync"
@@ -26,6 +30,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
 	"github.com/gorilla/websocket"
+	"gopkg.in/yaml.v3"
 )
 
 type Health struct {
@@ -495,7 +500,7 @@ func makeRouter() http.Handler {
 						break
 					}
 					// Not running (probably ENOENT / 127) — close & try next
-					att.Close()
+					_ = att.Close()
 				}
 
 				if chosen == nil {
@@ -530,7 +535,7 @@ func makeRouter() http.Handler {
 								Rows int    `json:"rows"`
 							}
 							if err := json.Unmarshal(data, &msg); err == nil && strings.EqualFold(msg.Type, "resize") {
-								_ = cli.ContainerExecResize(context.Background(), execID, container.ResizeOptions{
+								_ = cli.ContainerExecResize(context.Background(), execID, types.ResizeOptions{
 									Width:  uint(msg.Cols),
 									Height: uint(msg.Rows),
 								})
@@ -1051,6 +1056,9 @@ func makeRouter() http.Handler {
 					Override   *bool   `json:"auto_apply_override"`
 					UpdatedAt  string  `json:"updated_at"`
 					Effective  bool    `json:"effective_auto_devops"`
+					// New:
+					FilesLatestEdit string `json:"files_latest_edit"`
+					FilesDigest     string `json:"files_digest"`
 				}
 				var updatedAt time.Time
 				err := db.QueryRow(r.Context(), `
@@ -1069,6 +1077,16 @@ func makeRouter() http.Handler {
 				row.UpdatedAt = updatedAt.Format(time.RFC3339)
 				eff, _ := shouldAutoApply(r.Context(), id)
 				row.Effective = eff
+
+				// compute latest edit + digest for determinism
+				latest, digest, _ := filesLatestAndDigest(r.Context(), id)
+				if !latest.IsZero() {
+					row.FilesLatestEdit = latest.Format(time.RFC3339)
+				} else {
+					row.FilesLatestEdit = ""
+				}
+				row.FilesDigest = digest
+
 				writeJSON(w, http.StatusOK, map[string]any{"stack": row})
 			})
 
@@ -1395,6 +1413,19 @@ func makeRouter() http.Handler {
 					"manual":  manual,
 					"allowed": true,
 				})
+			})
+
+			/* ---------- NEW: Desired Spec with SOPS-safe decryption & interpolation ---------- */
+
+			priv.Get("/iac/stacks/{id}/desired", func(w http.ResponseWriter, r *http.Request) {
+				idStr := chi.URLParam(r, "id")
+				stackID, _ := strconv.ParseInt(idStr, 10, 64)
+				spec, err := buildDesiredSpec(r.Context(), stackID)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, spec)
 			})
 		})
 	})
@@ -1745,4 +1776,380 @@ var wsUpgrader = websocket.Upgrader{
 		}
 		return false
 	},
+}
+
+/* ---------------------- Desired Spec builder (SOPS-aware) ---------------------- */
+
+type desiredSpec struct {
+	Project         string                         `json:"project"`
+	FilesDigest     string                         `json:"files_digest"`
+	FilesLatestEdit string                         `json:"files_latest_edit"`
+	Services        map[string]desiredServiceSpec  `json:"services"`
+}
+
+type desiredServiceSpec struct {
+	Service        string   `json:"service"`
+	Image          string   `json:"image"`
+	ContainerName  string   `json:"container_name,omitempty"`
+	ExpectedNames  []string `json:"expected_names,omitempty"` // if container_name empty
+	Ports          []string `json:"ports,omitempty"`
+	Volumes        []string `json:"volumes,omitempty"`
+	EnvKeys        []string `json:"env_keys,omitempty"` // keys only; no values returned
+}
+
+// Build desired spec for a stack by reading compose yaml(s) + .env, SOPS-decrypting where needed.
+// Does NOT reveal secret values; only returns trivial fields and env KEYS.
+func buildDesiredSpec(ctx context.Context, stackID int64) (*desiredSpec, error) {
+	// Load stack basic info
+	var scopeKind, scopeName, stackName, relPath string
+	if err := db.QueryRow(ctx, `SELECT scope_kind::text, scope_name, stack_name, rel_path FROM iac_stacks WHERE id=$1`, stackID).
+		Scan(&scopeKind, &scopeName, &stackName, &relPath); err != nil {
+		return nil, errors.New("stack not found")
+	}
+
+	root, err := getRepoRootForStack(ctx, stackID)
+	if err != nil {
+		return nil, err
+	}
+	baseDir, err := joinUnder(root, relPath)
+	if err != nil {
+		return nil, err
+	}
+
+	// Collect compose-role files
+	rows, err := db.Query(ctx, `SELECT rel_path, sops, sha256, updated_at FROM iac_files WHERE stack_id=$1 AND role='compose' ORDER BY rel_path`, stackID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type frow struct {
+		rel   string
+		sops  bool
+		sha   string
+		mtime time.Time
+	}
+	var compFiles []frow
+	for rows.Next() {
+		var rel, sha string
+		var sops bool
+		var mt time.Time
+		if err := rows.Scan(&rel, &sops, &sha, &mt); err != nil {
+			return nil, err
+		}
+		compFiles = append(compFiles, frow{rel: rel, sops: sops, sha: sha, mtime: mt})
+	}
+
+	latest, digest, _ := filesLatestAndDigest(ctx, stackID)
+
+	// Build env (Compose interpolation uses process env + .env in project dir)
+	envMap := map[string]string{}
+	for _, kv := range os.Environ() {
+		if i := strings.IndexByte(kv, '='); i > 0 {
+			envMap[kv[:i]] = kv[i+1:]
+		}
+	}
+	// `.env` lives alongside the main compose — try both yaml dirs and stack base
+	envCandidates := []string{
+		filepath.Join(baseDir, ".env"),
+	}
+	// Add per-compose directory .env candidates uniquely
+	seenEnv := map[string]struct{}{}
+	for _, cf := range compFiles {
+		full, err := joinUnder(root, cf.rel)
+		if err == nil {
+			dir := filepath.Dir(full)
+			p := filepath.Join(dir, ".env")
+			if _, ok := seenEnv[p]; !ok {
+				envCandidates = append(envCandidates, p)
+				seenEnv[p] = struct{}{}
+			}
+		}
+	}
+	for _, p := range envCandidates {
+		if b, err := readPossiblySopsFile(ctx, p, false /*dotenv*/); err == nil && len(b) > 0 {
+			mergeDotenv(envMap, string(b))
+		}
+	}
+
+	// Parse compose and gather services
+	services := map[string]desiredServiceSpec{}
+	for _, cf := range compFiles {
+		full, err := joinUnder(root, cf.rel)
+		if err != nil {
+			continue
+		}
+		cnt, err := readPossiblySopsFile(ctx, full, false)
+		if err != nil {
+			continue
+		}
+		// Interpolation happens before YAML parse in Compose; we emulate by resolving in the specific fields we extract.
+		var y any
+		if err := yaml.Unmarshal(cnt, &y); err != nil {
+			continue
+		}
+		m, _ := y.(map[string]any)
+		svcs, _ := m["services"].(map[string]any)
+		for svcName, raw := range svcs {
+			svcMap, _ := raw.(map[string]any)
+			if svcMap == nil {
+				continue
+			}
+			// image
+			image := strOf(svcMap["image"])
+			image = resolveVars(image, envMap)
+
+			// container_name (optional)
+			cn := strOf(svcMap["container_name"])
+			cn = resolveVars(cn, envMap)
+
+			// ports (string or object form; we try to keep them as simple strings for compare)
+			var ports []string
+			if lst, ok := asList(svcMap["ports"]); ok {
+				for _, v := range lst {
+					ports = append(ports, resolveVars(v, envMap))
+				}
+			}
+
+			// volumes (keep raw strings for compare)
+			var vols []string
+			if lst, ok := asList(svcMap["volumes"]); ok {
+				for _, v := range lst {
+					vols = append(vols, resolveVars(v, envMap))
+				}
+			}
+
+			// environment keys only (no values returned)
+			envKeys := envKeysOnly(svcMap["environment"])
+
+			// Expected names if container_name is empty - be tolerant (_ and -)
+			var expected []string
+			if strings.TrimSpace(cn) == "" {
+				project := stackName
+				svc := svcName
+				expected = []string{
+					project + "_" + svc + "_1",
+					project + "-" + svc + "-1",
+				}
+			}
+
+			// Merge (later files override earlier)
+			services[svcName] = desiredServiceSpec{
+				Service:       svcName,
+				Image:         image,
+				ContainerName: cn,
+				ExpectedNames: expected,
+				Ports:         ports,
+				Volumes:       vols,
+				EnvKeys:       envKeys,
+			}
+		}
+	}
+
+	return &desiredSpec{
+		Project:         stackName,
+		FilesDigest:     digest,
+		FilesLatestEdit: func() string { if latest.IsZero() { return "" }; return latest.Format(time.RFC3339) }(),
+		Services:        services,
+	}, nil
+}
+
+/* ---------------------- helpers for desired spec ---------------------- */
+
+// filesLatestAndDigest returns max(updated_at) across stack files and a combined sha256 of each file's stored sha256.
+func filesLatestAndDigest(ctx context.Context, stackID int64) (time.Time, string, error) {
+	rows, err := db.Query(ctx, `SELECT sha256, updated_at FROM iac_files WHERE stack_id=$1 ORDER BY updated_at DESC`, stackID)
+	if err != nil {
+		return time.Time{}, "", err
+	}
+	defer rows.Close()
+	var latest time.Time
+	h := sha256.New()
+	for rows.Next() {
+		var sha string
+		var mt time.Time
+		if err := rows.Scan(&sha, &mt); err != nil {
+			return time.Time{}, "", err
+		}
+		if mt.After(latest) {
+			latest = mt
+		}
+		h.Write([]byte(sha))
+	}
+	sum := hex.EncodeToString(h.Sum(nil))
+	return latest, sum, nil
+}
+
+// readPossiblySopsFile tries sops -d first; if that fails, falls back to plain read.
+// For dotenv files, we add "--input-type dotenv" to keep sops happy when encrypting.
+func readPossiblySopsFile(ctx context.Context, fullPath string, isDotenv bool) ([]byte, error) {
+	// If file missing plain, return error
+	if _, err := os.Stat(fullPath); err != nil {
+		return nil, err
+	}
+	// Try sops -d if binary is present
+	if pathInPath("sops") {
+		args := []string{"-d", fullPath}
+		if isDotenv {
+			args = []string{"-d", "--input-type", "dotenv", fullPath}
+		}
+		ctxTO, cancel := context.WithTimeout(ctx, 5*time.Second)
+		defer cancel()
+		out, err := exec.CommandContext(ctxTO, "sops", args...).CombinedOutput()
+		if err == nil && len(out) > 0 && !looksLikeBinary(out) {
+			return out, nil
+		}
+	}
+	// Fallback to plain
+	return os.ReadFile(fullPath)
+}
+
+func looksLikeBinary(b []byte) bool {
+	// treat as text if it has no NULs and is mostly printable
+	if bytes.IndexByte(b, 0) >= 0 {
+		return true
+	}
+	return false
+}
+
+func pathInPath(bin string) bool {
+	_, err := exec.LookPath(bin)
+	return err == nil
+}
+
+func mergeDotenv(dst map[string]string, content string) {
+	lines := strings.Split(content, "\n")
+	for _, ln := range lines {
+		ln = strings.TrimSpace(ln)
+		if ln == "" || strings.HasPrefix(ln, "#") {
+			continue
+		}
+		// allow 'export KEY=VAL'
+		if strings.HasPrefix(ln, "export ") {
+			ln = strings.TrimSpace(strings.TrimPrefix(ln, "export "))
+		}
+		// KEY=VAL (allow quotes)
+		if i := strings.IndexByte(ln, '='); i > 0 {
+			k := strings.TrimSpace(ln[:i])
+			v := strings.TrimSpace(ln[i+1:])
+			v = strings.Trim(v, `"'`)
+			if k != "" {
+				dst[k] = v
+			}
+		}
+	}
+}
+
+var varRe = regexp.MustCompile(`\$\{([A-Za-z_][A-Za-z0-9_]*)(?:(:?)-([^}]*))?\}`)
+
+// resolveVars supports ${VAR}, ${VAR-default}, ${VAR:-default} semantics.
+func resolveVars(s string, env map[string]string) string {
+	if s == "" {
+		return s
+	}
+	return varRe.ReplaceAllStringFunc(s, func(m string) string {
+		sub := varRe.FindStringSubmatch(m)
+		if len(sub) < 4 {
+			return ""
+		}
+		key := sub[1]
+		op := sub[2] // "" or ":" for ":-"
+		def := sub[3]
+		val, ok := env[key]
+		if !ok {
+			// not set: use default if provided
+			if def != "" {
+				return def
+			}
+			return ""
+		}
+		// ":" means treat empty as unset
+		if op == ":" && val == "" && def != "" {
+			return def
+		}
+		return val
+	})
+}
+
+func strOf(v any) string {
+	switch t := v.(type) {
+	case string:
+		return t
+	default:
+		return ""
+	}
+}
+
+func asList(v any) ([]string, bool) {
+	switch t := v.(type) {
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, it := range t {
+			if s, ok := it.(string); ok {
+				out = append(out, s)
+			} else if m, ok := it.(map[string]any); ok {
+				// compact mapping like {"target": "80", "published": "8080", "protocol":"tcp"} -> string form if we can
+				if s := stringifyMapPortOrVolume(m); s != "" {
+					out = append(out, s)
+				}
+			}
+		}
+		return out, true
+	case []string:
+		return t, true
+	case string:
+		return []string{t}, true
+	default:
+		return nil, false
+	}
+}
+
+func stringifyMapPortOrVolume(m map[string]any) string {
+	// very light best-effort; ports: published:target/proto
+	if tgt := strOf(m["target"]); tgt != "" {
+		pub := strOf(m["published"])
+		proto := strOf(m["protocol"])
+		s := ""
+		if pub != "" {
+			s = pub + ":"
+		}
+		s += tgt
+		if proto != "" {
+			s += "/" + proto
+		}
+		return s
+	}
+	// volumes "source:target[:mode]"
+	if src := strOf(m["source"]); src != "" {
+		tgt := strOf(m["target"])
+		mode := strOf(m["type"])
+		s := src + ":" + tgt
+		if mode != "" {
+			s += ":" + mode
+		}
+		return s
+	}
+	return ""
+}
+
+// env_keys from service.environment (mapping or list)
+func envKeysOnly(v any) []string {
+	keys := []string{}
+	switch t := v.(type) {
+	case map[string]any:
+		for k := range t {
+			keys = append(keys, k)
+		}
+	case []any:
+		for _, it := range t {
+			if s, ok := it.(string); ok {
+				if i := strings.IndexByte(s, '='); i > 0 {
+					keys = append(keys, s[:i])
+				} else if s != "" {
+					keys = append(keys, s)
+				}
+			}
+		}
+	}
+	return keys
 }

@@ -256,10 +256,6 @@ function ContainerCard({
           <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Ports</div>
           <div className="col-span-9"><PortsBlock ports={c.ports} /></div>
         </RowShell>
-        <RowShell index={2}>
-          <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Restart policy</div>
-          <div className="col-span-9 text-slate-300 text-sm">{c.restart_policy || "—"}</div>
-        </RowShell>
       </div>
 
       {/* GENERAL collapsible: ID, Created, Start time, CMD, ENTRYPOINT (no Name/Status) */}
@@ -281,19 +277,23 @@ function ContainerCard({
                 : "—"}
             </div>
           </RowShell>
-          <RowShell index={2}>
+          <RowShell index={3}>
+            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Restart policy</div>
+            <div className="col-span-9 text-slate-300 text-sm">{c.restart_policy || "—"}</div>
+          </RowShell>
+          <RowShell index={4}>
             <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">CMD</div>
             <div className="col-span-9">
               <ValueBox value={(c.cmd || []).join(" ") || "—"} />
             </div>
           </RowShell>
-          <RowShell index={3}>
+          <RowShell index={5}>
             <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">ENTRYPOINT</div>
             <div className="col-span-9">
               <ValueBox value={(c.entrypoint || []).join(" ") || "—"} />
             </div>
           </RowShell>
-          <RowShell index={4}>
+          <RowShell index={6}>
             <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">ID</div>
             <div
               className="col-span-9 text-slate-300 text-sm font-mono truncate"

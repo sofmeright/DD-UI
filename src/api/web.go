@@ -1789,7 +1789,8 @@ type desiredSpec struct {
 
 type desiredServiceSpec struct {
 	Service        string   `json:"service"`
-	Image          string   `json:"image"`
+	Image          string   `json:"image"`                     // canonical repo:tag (digest stripped, tag defaults to :latest)
+	ImageAlternates []string `json:"image_alternates,omitempty"` // other acceptable string forms (for tolerant drift compare)
 	ContainerName  string   `json:"container_name,omitempty"`
 	ExpectedNames  []string `json:"expected_names,omitempty"` // if container_name empty
 	Ports          []string `json:"ports,omitempty"`
@@ -1895,19 +1896,24 @@ func buildDesiredSpec(ctx context.Context, stackID int64) (*desiredSpec, error) 
 			if svcMap == nil {
 				continue
 			}
-			// image
-			image := strOf(svcMap["image"])
-			image = resolveVars(image, envMap)
+			// Build service-local env for interpolation (Compose doesn't do this, but we do for drift sanity)
+            svcEnv := envFromService(svcMap["environment"])
+            envSvc := mergeEnvs(envMap, svcEnv)
+
+            // image (resolve + canonicalize)
+            rawImage := strOf(svcMap["image"])
+            resolvedImage := resolveVars(rawImage, envSvc)
+            image := canonicalImage(resolvedImage)
+            imgAlts := imageAlternates(rawImage, image)
 
 			// container_name (optional)
-			cn := strOf(svcMap["container_name"])
-			cn = resolveVars(cn, envMap)
+			cn := resolveVars(strOf(svcMap["container_name"]), envSvc)
 
 			// ports (string or object form; we try to keep them as simple strings for compare)
 			var ports []string
 			if lst, ok := asList(svcMap["ports"]); ok {
 				for _, v := range lst {
-					ports = append(ports, resolveVars(v, envMap))
+					ports = append(ports, resolveVars(v, envSvc))
 				}
 			}
 
@@ -1915,28 +1921,21 @@ func buildDesiredSpec(ctx context.Context, stackID int64) (*desiredSpec, error) 
 			var vols []string
 			if lst, ok := asList(svcMap["volumes"]); ok {
 				for _, v := range lst {
-					vols = append(vols, resolveVars(v, envMap))
+					vols = append(vols, resolveVars(v, envSvc))
 				}
 			}
 
 			// environment keys only (no values returned)
 			envKeys := envKeysOnly(svcMap["environment"])
 
-			// Expected names if container_name is empty - be tolerant (_ and -)
-			var expected []string
-			if strings.TrimSpace(cn) == "" {
-				project := stackName
-				svc := svcName
-				expected = []string{
-					project + "_" + svc + "_1",
-					project + "-" + svc + "-1",
-				}
-			}
+			// Always compute tolerant expected names (even if container_name is present)
+            expected := expectedNamesFor(stackName, svcName, cn)
 
 			// Merge (later files override earlier)
 			services[svcName] = desiredServiceSpec{
 				Service:       svcName,
 				Image:         image,
+				ImageAlternates: imgAlts,
 				ContainerName: cn,
 				ExpectedNames: expected,
 				Ports:         ports,
@@ -1955,6 +1954,36 @@ func buildDesiredSpec(ctx context.Context, stackID int64) (*desiredSpec, error) 
 }
 
 /* ---------------------- helpers for desired spec ---------------------- */
+
+// Merge env maps (b overwrites a)
+func mergeEnvs(a, b map[string]string) map[string]string {
+	    out := make(map[string]string, len(a)+len(b))
+	    for k, v := range a { out[k] = v }
+	    for k, v := range b { out[k] = v }
+	    return out
+	}
+	
+	// Extract service-level env key->value (mapping or list with KEY=VAL). Only string values are included.
+	func envFromService(v any) map[string]string {
+	    out := map[string]string{}
+	    switch t := v.(type) {
+	    case map[string]any:
+	        for k, vv := range t {
+	            if s, ok := vv.(string); ok {
+	                out[k] = s
+	            }
+	        }
+	    case []any:
+	        for _, it := range t {
+	            if s, ok := it.(string); ok {
+	                if i := strings.IndexByte(s, '='); i > 0 {
+	                    out[s[:i]] = s[i+1:]
+	                }
+	            }
+	        }
+	    }
+	    return out
+	}
 
 // filesLatestAndDigest returns max(updated_at) across stack files and a combined sha256 of each file's stored sha256.
 func filesLatestAndDigest(ctx context.Context, stackID int64) (time.Time, string, error) {
@@ -2070,6 +2099,78 @@ func resolveVars(s string, env map[string]string) string {
 		return val
 	})
 }
+
+// canonicalImage normalizes to "repo:tag" (drop @digest, default :latest)
+func canonicalImage(s string) string {
+	    s = strings.TrimSpace(s)
+	    if s == "" { return s }
+	    // strip digest
+	    if i := strings.IndexByte(s, '@'); i > 0 {
+	        s = s[:i]
+	    }
+	    // if no tag specified and string contains a slash (repo) but no ':'
+	    if !strings.Contains(s, ":") {
+	        // Don't treat "localhost:5000/repo" port as tag: already contains ':'
+	        // Here we only add :latest if there's no tag after last slash.
+	        s = s + ":latest"
+	    } else {
+	        // Special case registry with port: ensure a tag exists after last slash
+	        // e.g. "localhost:5000/repo" (no tag) would have been handled above,
+	        // "localhost:5000/repo:tag" is fine.
+	    }
+	    return s
+	}
+	
+	// de-dup while preserving order
+	func uniq(ss []string) []string {
+	    seen := map[string]struct{}{}
+	    out := make([]string, 0, len(ss))
+	    for _, s := range ss {
+	        if s == "" { continue }
+	        if _, ok := seen[s]; ok { continue }
+	        seen[s] = struct{}{}
+	        out = append(out, s)
+	    }
+	    return out
+	}
+	
+	// imageAlternates returns a small tolerant set of strings that should be considered equal to the canonical image.
+	func imageAlternates(raw, canon string) []string {
+	    alts := []string{canon}
+	    // If raw was already canonical except for default tag expansion, include it too
+	    trimmed := strings.TrimSpace(raw)
+	    if trimmed != "" {
+	        // strip digest and resolve defaults if any remained
+	        base := canonicalImage(resolveVars(strings.SplitN(trimmed, "@", 2)[0], map[string]string{}))
+	        alts = append(alts, base)
+	    }
+	    return uniq(alts)
+	}
+	
+	// expectedNamesFor returns acceptable container names (explicit + compose defaults)
+	func expectedNamesFor(project, service, explicit string) []string {
+	    project = strings.TrimSpace(project)
+	    service  = strings.TrimSpace(service)
+	    out := []string{}
+	    if explicit != "" {
+	        out = append(out, explicit)
+	    }
+	    if project != "" && service != "" {
+	        // underscore and hyphen forms
+	        out = append(out,
+	            project+"_"+service+"_1",
+	            project+"-"+service+"-1",
+	        )
+	        // tolerate swapped separators in project/service too
+	        p2 := strings.ReplaceAll(project, "-", "_")
+	        s2 := strings.ReplaceAll(service, "-", "_")
+	        out = append(out, p2+"_"+s2+"_1")
+	        p3 := strings.ReplaceAll(project, "_", "-")
+	        s3 := strings.ReplaceAll(service, "_", "-")
+	        out = append(out, p3+"-"+s3+"-1")
+	    }
+	    return uniq(out)
+	}
 
 func strOf(v any) string {
 	switch t := v.(type) {

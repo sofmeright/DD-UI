@@ -1,7 +1,13 @@
 # <img src="ui/public/DDUI-Logo.png" alt="DDUI (Designated Driver UI)" width="35" height="35" /> DDUI (Designated Driver UI)
 > Declarative, security-first Docker orchestration. DDUI compares runtime state (containers on your hosts) to declared state (your IaC repo), shows drift, and puts encryption (SOPS/AGE) and DevOps ergonomics first.
 
-<img src="example/screenshots/DDUI-deployments-host.png" width="750" /><img src="example/screenshots/DDUI-deployments-stack.png" width="750" />
+<img src="example/screenshots/DDUI-Decrypted-Deployed.png" width="750" /><img src="example/screenshots/DDUI-Host-Stack_Detail-Collapsed.png" width="750" />
+<img src="example/screenshots/DDUI-Host-Stack_Detail-Expanded.png" width="750" /><img src="example/screenshots/DDUI-Host-Stacks.png" width="750" />
+<img src="example/screenshots/DDUI-Hosts.png" width="750" /><img src="example/screenshots/DDUI-Images.png" width="750" />
+<img src="example/screenshots/DDUI-Logs.png" width="750" /><img src="example/screenshots/DDUI-Networks.png" width="750" />
+<img src="example/screenshots/DDUI-Stack-Compose-Editor.png" width="750" /><img src="example/screenshots/DDUI-Stack-Encrypted.png" width="750" />
+<img src="example/screenshots/DDUI-Stats.png" width="750" /><img src="example/screenshots/DDUI-Terminal.png" width="750" />
+<img src="example/screenshots/DDUI-Volumes.png" width="750" />
 
 ---
 

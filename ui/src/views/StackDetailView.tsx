@@ -1,9 +1,10 @@
-import { useEffect, useState } from "react";
+// ui/src/views/StackDetailView.tsx
+import { useEffect, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { ArrowLeft, ChevronRight, Eye, EyeOff, RefreshCw, Trash2, Rocket } from "lucide-react";
+import { ArrowLeft, ChevronRight, Eye, EyeOff, RefreshCw, Trash2, Rocket, Square } from "lucide-react";
 import Fact from "@/components/Fact";
 import MiniEditor from "@/editors/MiniEditor";
 import StatePill from "@/components/StatePill";
@@ -370,7 +371,11 @@ export default function StackDetailView({
   const [editPath, setEditPath] = useState<string | null>(null);
   const [stackIacId, setStackIacId] = useState<number | undefined>(iacId);
   const [autoDevOps, setAutoDevOps] = useState<boolean>(false);
+
   const [deploying, setDeploying] = useState<boolean>(false);
+  const [watching, setWatching] = useState<boolean>(false);
+  const watchTimer = useRef<number | null>(null);
+  const watchUntil = useRef<number>(0);
 
   useEffect(() => { setAutoDevOps(false); }, [stackName]);
 
@@ -382,27 +387,37 @@ export default function StackDetailView({
     setFiles(j.files || []);
   }
 
-  // Load runtime + files
+  // Dedicated runtime refresh (containers + inspect)
+  async function refreshRuntime() {
+    try {
+      const rc = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`, { credentials: "include" });
+      if (rc.status === 401) { window.location.replace("/auth/login"); return; }
+      const contJson = await rc.json();
+      const runtimeAll: ApiContainer[] = (contJson.items || []) as ApiContainer[];
+      const my = runtimeAll.filter(c => (c.compose_project || c.stack || "(none)") === stackName);
+      setRuntime(my);
+
+      const ins: InspectOut[] = [];
+      for (const c of my) {
+        const r = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(c.name)}/inspect`, { credentials: "include" });
+        if (!r.ok) continue;
+        ins.push(await r.json());
+      }
+      setContainers(ins);
+    } catch (e) {
+      // soft-fail
+      // eslint-disable-next-line no-console
+      console.warn("refreshRuntime failed", e);
+    }
+  }
+
+  // Load runtime + files on mount/changes
   useEffect(() => {
     let cancel = false;
     (async () => {
       setLoading(true); setErr(null);
       try {
-        const rc = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`, { credentials: "include" });
-        if (rc.status === 401) { window.location.replace("/auth/login"); return; }
-        const contJson = await rc.json();
-        const runtimeAll: ApiContainer[] = (contJson.items || []) as ApiContainer[];
-        const my = runtimeAll.filter(c => (c.compose_project || c.stack || "(none)") === stackName);
-        if (!cancel) setRuntime(my);
-
-        const ins: InspectOut[] = [];
-        for (const c of my) {
-          const r = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(c.name)}/inspect`, { credentials: "include" });
-          if (!r.ok) continue;
-          ins.push(await r.json());
-        }
-        if (!cancel) setContainers(ins);
-
+        await refreshRuntime();
         if (stackIacId) await refreshFiles();
       } catch (e: any) {
         if (!cancel) setErr(e?.message || "Failed to load stack");
@@ -411,6 +426,7 @@ export default function StackDetailView({
       }
     })();
     return () => { cancel = true; };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host.name, stackName, stackIacId]);
 
   // Load EFFECTIVE Auto DevOps
@@ -477,14 +493,59 @@ export default function StackDetailView({
     });
   }
 
+  // Begin/stop short-lived watch that polls runtime so user sees changes roll in.
+  function beginWatch(durationMs = 120_000, intervalMs = 3_000) {
+    // clear any existing
+    if (watchTimer.current) {
+      window.clearTimeout(watchTimer.current);
+      watchTimer.current = null;
+    }
+    setWatching(true);
+    watchUntil.current = Date.now() + durationMs;
+
+    const tick = async () => {
+      await refreshRuntime();
+      if (Date.now() < watchUntil.current) {
+        watchTimer.current = window.setTimeout(tick, intervalMs);
+      } else {
+        setWatching(false);
+        watchTimer.current = null;
+      }
+    };
+    // immediate refresh and schedule
+    tick();
+  }
+
+  function stopWatch() {
+    if (watchTimer.current) {
+      window.clearTimeout(watchTimer.current);
+      watchTimer.current = null;
+    }
+    setWatching(false);
+  }
+
+  useEffect(() => {
+    return () => {
+      // cleanup on unmount
+      if (watchTimer.current) {
+        window.clearTimeout(watchTimer.current);
+        watchTimer.current = null;
+      }
+    };
+  }, []);
+
   async function deployNow() {
     if (!stackIacId) { alert("Create the stack (save a file) before deploying."); return; }
     if (files.length === 0) { alert("This stack has no files to deploy. Add a compose file or scripts first."); return; }
     setDeploying(true);
     try {
-      const r = await fetch(`/api/iac/stacks/${stackIacId}/deploy?manual=1`, { method: "POST", credentials: "include" });
-      if (!r.ok) { const txt = await r.text(); alert(`Deploy failed: ${r.status} ${txt}`); return; }
-      alert("Deploy requested. Check host for activity.");
+      // Manual deploy (server treats manual as default when auto param is absent)
+      const r = await fetch(`/api/iac/stacks/${stackIacId}/deploy`, { method: "POST", credentials: "include" });
+      const txt = await r.text();
+      if (!r.ok) { alert(`Deploy failed: ${r.status} ${txt}`); return; }
+
+      // Kick off a watch so the Active Containers panel keeps refreshing for a bit.
+      beginWatch(120_000, 3_000);
     } catch (e: any) {
       alert(`Deploy failed: ${e?.message || e}`);
     } finally {
@@ -513,10 +574,24 @@ export default function StackDetailView({
           <span className="text-sm text-slate-300">Auto DevOps</span>
           <Switch checked={autoDevOps} onCheckedChange={(v) => toggleAutoDevOps(!!v)} />
           {stackIacId ? (
-            <Button onClick={refreshFiles} variant="outline" className="border-slate-700">
+            <Button
+              onClick={async () => { await refreshRuntime(); await refreshFiles(); }}
+              variant="outline"
+              className="border-slate-700"
+              title="Refresh files and active containers"
+            >
               <RefreshCw className="h-4 w-4 mr-1" /> Refresh
             </Button>
           ) : null}
+          {watching && (
+            <span className="ml-1 inline-flex items-center gap-2 text-xs text-emerald-300">
+              <RefreshCw className="h-3 w-3 animate-spin" />
+              Watching updates…
+              <Button size="xs" variant="ghost" className="h-6 px-2 text-emerald-200" onClick={stopWatch} title="Stop watching">
+                <Square className="h-3 w-3 mr-1" /> Stop
+              </Button>
+            </span>
+          )}
         </div>
       </div>
 
@@ -548,7 +623,7 @@ export default function StackDetailView({
           <Card className="bg-slate-900/50 border-slate-800 h-full flex flex-col">
             <CardHeader className="pb-2 shrink-0 flex flex-row items-center justify-between">
               <CardTitle className="text-slate-200 text-lg">IaC Files</CardTitle>
-              {/* Removed redundant Deploy button from header */}
+              {/* (Deploy button removed from header earlier to avoid redundancy) */}
             </CardHeader>
             <CardContent className="flex-1 min-h-0 flex flex-col gap-3">
               {!stackIacId && (
@@ -582,7 +657,7 @@ export default function StackDetailView({
                     New script
                   </Button>
 
-                  {/* Move Delete IaC to the toolbar, left of Deploy */}
+                  {/* Delete IaC sits left of Deploy */}
                   {stackIacId ? (
                     <Button onClick={deleteStack} variant="outline" className="border-rose-700 text-rose-200">
                       <Trash2 className="h-4 w-4 mr-1" /> Delete IaC

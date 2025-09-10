@@ -93,6 +93,6 @@ COPY --from=ui /ui/dist ./ui/dist
 
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
-      CMD curl -fsS http://127.0.0.1:443/healthz || exit 1
+      CMD curl -fsS https://127.0.0.1:443/healthz || exit 1
 
 CMD ["ddui"]

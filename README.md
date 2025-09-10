@@ -177,25 +177,26 @@ services:
     depends_on:
       ddui-postgres:
         condition: service_healthy
-    image: cr.pcfae.com/prplanit/ddui:v0.4.0
+    image: prplanit/ddui:v0.4.7
     ports:
-      - "3000:8080"
+      - "3000:443"
     env_file: stack.env
     environment:
       # General Config
-      - DDUI_BIND=0.0.0.0:8080
-      - DDUI_DEFAULT_OWNER= # <email/username> (not too important yet, nothing is implemented for this.)
+      #- DDUI_BIND=0.0.0.0:443
+      # - DDUI_DEFAULT_OWNER= # (email)
       - DDUI_INVENTORY_PATH=/data/inventory
       - DDUI_LOCAL_HOST=anchorage
-        # - UI_ORIGIN=
+      - DDUI_UI_ORIGIN=https://ddui.pcfae.com
       
       # Authentication / OIDC
-        #- DDUI_COOKIE_DOMAIN=anchorage
-      - DDUI_COOKIE_SECURE=false
-      - OIDC_CLIENT_ID_FILE=/run/secrets/oidc_client_secret
+      - DDUI_COOKIE_SECURE=true
+      - DDUI_COOKIE_DOMAIN=ddui.pcfae.com
+      - OIDC_CLIENT_ID_FILE=/run/secrets/oidc_client_id
       - OIDC_CLIENT_SECRET_FILE=/run/secrets/oidc_client_secret
       - OIDC_ISSUER_URL=https://sso.prplanit.com
-      - OIDC_REDIRECT_URL=http://anchorage:3000/auth/callback
+      - OIDC_REDIRECT_URL=https://ddui.pcfae.com/auth/callback
+      - OIDC_POST_LOGOUT_REDIRECT_URL=https://ddui.pcfae.com/login
       - OIDC_SCOPES=openid email profile
         # - OIDC_ALLOWED_EMAIL_DOMAIN # (optional; blocks others)
       
@@ -226,7 +227,7 @@ services:
       - SSH_STRICT_HOST_KEY=false
       
       # Auto DevOps Config
-      - DDUI_DEVOPS_APPLY=true
+      - DDUI_DEVOPS_APPLY=false
       
       # Scanning Config - Docker Host(s) States
       - DDUI_SCAN_DOCKER_AUTO=true
@@ -241,6 +242,7 @@ services:
       - DDUI_IAC_DIRNAME=docker-compose
       - DDUI_SCAN_IAC_AUTO=true
       - DDUI_SCAN_IAC_INTERVAL=90s
+
     secrets:
       - oidc_client_id
       - oidc_client_secret
@@ -277,6 +279,100 @@ POSTGRES_USER=
 POSTGRES_DB=
 # Optional: advertise your dev UI origin so CORS allows credentials
 # UI_ORIGIN=http://localhost:5173
+```
+
+Nginx Example:
+```
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+server {
+  listen 80;
+  listen [::]:80;
+
+  server_name ddui.pcfae.com;
+  return 301 https://$host$request_uri;
+}
+
+server {
+  listen                    443 ssl http2;
+  listen                    [::]:443 ssl http2;
+  server_name               ddui.pcfae.com;
+  # return 301                $scheme://ddui.pcfae.com$request_uri;
+
+  access_log                /var/log/nginx/ddui.pcfae.com.access.log;
+  error_log                 /var/log/nginx/ddui.pcfae.com.error.log;
+
+  # TLS configuration
+  # sudo openssl req -x509 -newkey rsa:4096 -keyout /etc/letsencrypt/live/172.122.122.104/privkey.pem -out /etc/letsencrypt/live/172.122.122.104/fullchain.pem -sha256 -days 3650 -nodes \
+  # -subj "/C=XX/ST=Washington/L=Seattle/O=PrecisionPlanIT/OU=Internal/CN=cell-membrane"
+  ssl_certificate           /etc/letsencrypt/live/pcfae.com/fullchain.pem;
+  ssl_certificate_key       /etc/letsencrypt/live/pcfae.com/privkey.pem;
+  ssl_protocols             TLSv1.2 TLSv1.3;
+
+  ssl_ciphers 'ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-ECDSA-CHACHA20-POLY1305:ECDHE-RSA-CHACHA20-POLY1305:ECDHE-ECDSA-AES256-SHA384:ECDHE-RSA-AES256-SHA384';
+  ssl_prefer_server_ciphers on;
+  ssl_session_cache         shared:SSL:50m;
+  ssl_session_timeout       1d;
+
+  # OCSP Stapling ---
+  # fetch OCSP records from URL in ssl_certificate and cache them
+  ssl_stapling on;
+  ssl_stapling_verify on;
+  ssl_dhparam /etc/nginx/dhparam.pem;
+
+  client_max_body_size 0;
+
+  add_header 'Access-Control-Allow-Origin' 'https://apps.pcfae.com/';
+  more_set_headers "Content-Security-Policy: form-action 'self' https://apps.pcfae.com/;";
+  more_set_headers "Content-Security-Policy: frame-ancestors 'self' https://apps.pcfae.com/;";
+  #add_header 'Content-Security-Policy' 'upgrade-insecure-requests';
+
+  # WebSocket upgrade path (long-lived)
+  location ^~ /api/ws/ {
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    proxy_read_timeout 3600s;
+
+    # headroom for large Set-Cookie from upstream
+    proxy_buffer_size   16k;
+    proxy_buffers       8 32k;
+    proxy_busy_buffers_size 64k;
+
+    proxy_pass https://anchorage:3000;
+  }
+
+  location / {
+
+    proxy_http_version 1.1;
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+
+    proxy_set_header Host $host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+
+    proxy_read_timeout 3600s;
+
+    # headroom for large Set-Cookie from upstream
+    proxy_buffer_size   16k;
+    proxy_buffers       8 32k;
+    proxy_busy_buffers_size 64k;
+
+    # proxy_redirect off;
+    proxy_pass https://anchorage:3000/;
+  }
+}
 ```
 
 Build the UI once:

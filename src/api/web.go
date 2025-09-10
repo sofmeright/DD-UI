@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -28,6 +29,60 @@ type Health struct {
 	Status    string    `json:"status"`
 	StartedAt time.Time `json:"startedAt"`
 	Edition   string    `json:"edition"`
+}
+
+/* ---------------- Theming helpers ---------------- */
+
+func themeHex(name, def string) string {
+	v := strings.TrimSpace(env(name, ""))
+	if v == "" {
+		// Allow alias prefix DDUI_THEMING_* as a fallback
+		if strings.HasPrefix(name, "DDUI_THEME_") {
+			alias := "DDUI_THEMING_" + strings.TrimPrefix(name, "DDUI_THEME_")
+			v = strings.TrimSpace(env(alias, ""))
+		}
+	}
+	if v == "" {
+		return def
+	}
+	if !strings.HasPrefix(v, "#") {
+		return "#" + v
+	}
+	return v
+}
+
+func hexToRGB(hex string) (r, g, b int, ok bool) {
+	s := strings.TrimPrefix(strings.TrimSpace(hex), "#")
+	switch len(s) {
+	case 3:
+		_, err := fmt.Sscanf(s, "%1x%1x%1x", &r, &g, &b)
+		if err != nil {
+			return 0, 0, 0, false
+		}
+		r = r * 17
+		g = g * 17
+		b = b * 17
+		return r, g, b, true
+	case 6:
+		_, err := fmt.Sscanf(s, "%02x%02x%02x", &r, &g, &b)
+		return r, g, b, err == nil
+	default:
+		return 0, 0, 0, false
+	}
+}
+
+func rgba(hex string, alpha float64) string {
+	r, g, b, ok := hexToRGB(hex)
+	if !ok {
+		return "rgba(0,0,0,0)"
+	}
+	if alpha < 0 {
+		alpha = 0
+	}
+	if alpha > 1 {
+		alpha = 1
+	}
+	return fmt.Sprintf("rgba(%d,%d,%d,%.3f)", r, g, b, alpha)
 }
 
 func makeRouter() http.Handler {
@@ -1188,6 +1243,84 @@ func makeRouter() http.Handler {
 		fs.ServeHTTP(w, req)
 	})
 
+	// -------- Runtime theme stylesheet
+	r.Get("/theme.css", func(w http.ResponseWriter, req *http.Request) {
+		// Base palette (override via env)
+		bg := themeHex("DDUI_THEME_BG", "#0b1220")                 // app background
+		surface := themeHex("DDUI_THEME_SURFACE", "#0f172a")       // cards/blocks
+		border := themeHex("DDUI_THEME_BORDER", "#1f2937")
+		text := themeHex("DDUI_THEME_TEXT", "#e5e7eb")
+		textMuted := themeHex("DDUI_THEME_TEXT_MUTED", "#94a3b8")
+
+		primary := themeHex("DDUI_THEME_PRIMARY", "#22d3ee") // cyan-ish
+		success := themeHex("DDUI_THEME_SUCCESS", "#059669") // emerald-600-ish
+		warning := themeHex("DDUI_THEME_WARNING", "#f59e0b") // amber-500
+		danger := themeHex("DDUI_THEME_DANGER", "#e11d48")   // rose-600
+		info := themeHex("DDUI_THEME_INFO", "#6366f1")       // indigo-500
+
+		css := fmt.Sprintf(`/* generated theme */
+:root{
+  --ui-bg:%[1]s;
+  --ui-surface:%[2]s;
+  --ui-border:%[3]s;
+  --ui-text:%[4]s;
+  --ui-text-muted:%[5]s;
+  --ui-primary:%[6]s;
+  --ui-success:%[7]s;
+  --ui-warning:%[8]s;
+  --ui-danger:%[9]s;
+  --ui-info:%[10]s;
+}
+
+/* global */
+html, body { background-color: var(--ui-bg); color: var(--ui-text); }
+
+/* ------- Overrides for specific Tailwind classes used in UI ------- */
+/* Surfaces / borders / text neutrals */
+.bg-slate-900, .bg-slate-900\\/50 { background-color: %[11]s !important; }
+.bg-slate-900\\/40 { background-color: %[12]s !important; }
+.border-slate-800 { border-color: var(--ui-border) !important; }
+
+.text-slate-200, .text-white { color: var(--ui-text) !important; }
+.text-slate-300 { color: var(--ui-text) !important; opacity: .85; }
+.text-slate-400 { color: var(--ui-text-muted) !important; }
+.text-slate-500 { color: var(--ui-text-muted) !important; opacity: .85; }
+
+/* Muted panels (alerts/info) */
+.bg-slate-900\\/40 { background-color: %[12]s !important; }
+
+/* Accent / status colors mapped to semantics */
+.bg-emerald-800, .hover\\:bg-emerald-900:hover { background-color: var(--ui-success) !important; }
+.text-emerald-300 { color: var(--ui-success) !important; }
+
+.bg-amber-900\\/30, .text-amber-300 { background-color: %[13]s !important; color: var(--ui-warning) !important; }
+
+.border-rose-800, .text-rose-200 { border-color: var(--ui-danger) !important; color: var(--ui-danger) !important; }
+.bg-rose-950\\/50 { background-color: %[14]s !important; }
+
+.bg-indigo-900\\/40, .border-indigo-700\\/40, .text-indigo-200 { background-color: %[15]s !important; border-color: %[16]s !important; color: var(--ui-info) !important; }
+
+/* Badges / links */
+a, .text-sky-400, .text-cyan-300 { color: var(--ui-primary) !important; }
+
+/* Misc utility harmonization */
+.font-mono { color: inherit; }
+`,
+			bg, surface, border, text, textMuted,
+			primary, success, warning, danger, info,
+			rgba(surface, 0.50), // [11] surface /50
+			rgba(surface, 0.40), // [12] surface /40
+			rgba(warning, 0.30), // [13] amber panel
+			rgba(danger, 0.50),  // [14] rose panel
+			rgba(info, 0.40),    // [15] indigo bg
+			rgba(info, 0.40),    // [16] indigo border approx
+		)
+
+		w.Header().Set("Content-Type", "text/css; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte(css))
+	})
+
 	// SPA fallback (last)
 	r.Get("/*", func(w http.ResponseWriter, req *http.Request) {
 		if strings.HasPrefix(req.URL.Path, "/api") || strings.HasPrefix(req.URL.Path, "/auth") {
@@ -1199,7 +1332,20 @@ func makeRouter() http.Handler {
 			http.ServeFile(w, req, path)
 			return
 		}
-		http.ServeFile(w, req, filepath.Join(uiRoot, "index.html"))
+		index := filepath.Join(uiRoot, "index.html")
+		b, err := os.ReadFile(index)
+		if err != nil {
+			http.ServeFile(w, req, index) // fallback
+			return
+		}
+		// Inject theme link before </head> if not already present
+		html := string(b)
+		if !strings.Contains(html, `/theme.css`) && strings.Contains(html, "</head>") {
+			html = strings.Replace(html, "</head>", `  <link rel="stylesheet" href="/theme.css"></head>`, 1)
+		}
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		w.Header().Set("Cache-Control", "no-store")
+		_, _ = w.Write([]byte(html))
 	})
 
 	return r

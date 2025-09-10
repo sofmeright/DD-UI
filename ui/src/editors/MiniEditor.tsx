@@ -1,13 +1,26 @@
-import { useEffect, useMemo, useState } from "react";
+// ui/src/editors/MiniEditor.tsx
+import { useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Shield, ShieldOff, Save, Maximize2, Minimize2 } from "lucide-react";
-import Editor from "@monaco-editor/react";
+import { Shield, ShieldOff, Eye, EyeOff, Save, Maximize2, Minimize2 } from "lucide-react";
+import { Editor } from "@monaco-editor/react";
 import type { IacFileMeta } from "@/types";
 
+/**
+ * MiniEditor with:
+ * - Monaco editor (line numbers, language detection)
+ * - SOPS view toggle (Encrypted <-> Decrypted)
+ * - SOPS ON/OFF toggle for save behavior (re-encrypt after reveal, or save plaintext)
+ * - Fullscreen toggle
+ */
 export default function MiniEditor({
-  id, initialPath, stackId, ensureStack, refresh, fileMeta,
+  id,
+  initialPath,
+  stackId,
+  ensureStack,
+  refresh,
+  fileMeta, // optional metadata for the active file (includes .sops flag)
 }: {
   id: string;
   initialPath: string;
@@ -19,197 +32,240 @@ export default function MiniEditor({
   const [path, setPath] = useState(initialPath);
   const [content, setContent] = useState("");
   const [loading, setLoading] = useState(false);
-  const [decryptView, setDecryptView] = useState(false);
-  const [err, setErr] = useState<string | null>(null);
+
+  // Persisted SOPS flag for the file on disk (from server metadata).
+  const [isSopsPersisted, setIsSopsPersisted] = useState<boolean>(!!fileMeta?.sops);
+
+  // Whether we will encrypt on Save (user-controlled toggle; defaults based on metadata or filename).
+  const [sopsOnSave, setSopsOnSave] = useState<boolean>(() => {
+    if (fileMeta?.sops) return true;
+    const p = initialPath.toLowerCase();
+    // Sensible defaults for secret-ish names.
+    return p.endsWith("_private.env") || p.endsWith("_secret.env");
+  });
+
+  // Current view mode: decrypted (shows secrets) vs raw (what's actually stored / or plain)
+  // Decrypted only makes sense when sops is on (persisted or chosen for save) and the file exists.
+  const [decryptedView, setDecryptedView] = useState<boolean>(false);
+
+  // Fullscreen
   const [fullscreen, setFullscreen] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
 
-  // derived: isSops based on meta or path hints or content marker
-  const isSopsMeta = !!fileMeta?.sops;
-  const isSopsPath = useMemo(() => {
-    const low = path.toLowerCase();
-    return low.includes("_secret.env") || low.includes("_private.env");
-  }, [path]);
-  const isSopsByContent = useMemo(() => {
-    // quick heuristics: YAML with "sops:" block or dotenv with "ENC["
-    const t = (content || "").toLowerCase();
-    return /\nsops:/.test(t) || t.includes("enc[");
-  }, [content]);
-
-  const isSops = isSopsMeta || isSopsPath || isSopsByContent;
-
-  useEffect(() => { setPath(initialPath); setContent(""); setErr(null); setDecryptView(false); }, [initialPath]);
-
+  // Keep local flags in sync when props change (path switched via file list)
   useEffect(() => {
-    let cancel = false;
-    (async () => {
-      if (!stackId) return;
-      // If user pressed "New ..." and we only prefilled a base directory (ends with /), skip fetch.
-      if (path.endsWith("/")) { setContent(""); return; }
-      setLoading(true); setErr(null);
-      try {
-        const url = `/api/iac/stacks/${stackId}/file?path=${encodeURIComponent(path)}`;
-        const r = await fetch(url, { credentials: "include" });
-        if (!r.ok) {
-          if (r.status !== 404) throw new Error(`${r.status} ${r.statusText}`);
-          setContent("");
-        } else {
-          const txt = await r.text();
-          if (!cancel) setContent(txt);
-        }
-      } catch (e: any) {
-        if (!cancel) setErr(e?.message || "Failed to load");
-      } finally {
-        if (!cancel) setLoading(false);
-      }
-    })();
-    return () => { cancel = true; };
-  }, [stackId, path]);
+    setPath(initialPath);
+    setContent("");
+    setDecryptedView(false);
+    setIsSopsPersisted(!!fileMeta?.sops);
 
-  async function saveFile(forceSops?: boolean) {
-    if (path.endsWith("/")) { setErr("Please enter a full filename (not just a folder)."); return; }
-    setLoading(true); setErr(null);
+    // If metadata says it's SOPS, default sopsOnSave to true; else keep name-based heuristic.
+    if (fileMeta?.sops) {
+      setSopsOnSave(true);
+    } else {
+      const p = initialPath.toLowerCase();
+      setSopsOnSave(p.endsWith("_private.env") || p.endsWith("_secret.env"));
+    }
+  }, [initialPath, fileMeta]);
+
+  // Helper: choose Monaco language by file path
+  const language = useMemo(() => {
+    const p = path.toLowerCase();
+    if (p.endsWith(".yml") || p.endsWith(".yaml")) return "yaml";
+    if (p.endsWith(".json")) return "json";
+    if (p.endsWith("dockerfile") || p.endsWith("/dockerfile")) return "dockerfile";
+    if (p.endsWith(".sh")) return "shell";
+    if (p.endsWith(".env") || p.includes(".env")) return "ini"; // closest for dotenv
+    return "plaintext";
+  }, [path]);
+
+  // Fetch file (optionally decrypted)
+  async function loadFile(opts?: { decrypt?: boolean }) {
+    if (!stackId) {
+      setContent("");
+      return;
+    }
+    setLoading(true);
     try {
-      const idToUse = stackId ?? await ensureStack();
+      const url = new URL(`/api/iac/stacks/${stackId}/file`, window.location.origin);
+      url.searchParams.set("path", path);
+      if (opts?.decrypt) url.searchParams.set("decrypt", "1");
+
+      const r = await fetch(url.toString(), {
+        credentials: "include",
+        headers: opts?.decrypt ? { "X-Confirm-Reveal": "yes" } : undefined,
+      });
+
+      if (r.status === 404) {
+        setContent("");
+        return;
+      }
+      const txt = await r.text();
+      if (!r.ok) throw new Error(txt || `${r.status} ${r.statusText}`);
+      setContent(txt);
+    } catch (e) {
+      // Keep failure soft to avoid interrupting editing flow
+      setContent(prev => prev); // no-op, preserve any local edits
+      console.error("Editor load failed:", e);
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  // Initial and whenever path/view changes
+  useEffect(() => {
+    loadFile({ decrypt: decryptedView && (isSopsPersisted || sopsOnSave) });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [stackId, path, decryptedView]);
+
+  // Save file with current sopsOnSave preference.
+  async function saveFile() {
+    setLoading(true);
+    try {
+      const idToUse = stackId ?? (await ensureStack());
       const r = await fetch(`/api/iac/stacks/${idToUse}/file`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ path, content, sops: !!forceSops }),
+        body: JSON.stringify({ path, content, sops: sopsOnSave }),
       });
-      if (!r.ok) {
-        const txt = await r.text().catch(()=>"");
-        throw new Error(txt || `${r.status} ${r.statusText}`);
-      }
-      refresh();
-    } catch (e: any) {
-      setErr(e?.message || "Failed to save");
-    } finally {
-      setLoading(false);
-    }
-  }
 
-  // MiniEditor.revealSops()
-  async function revealSops() {
-    if (!stackId) { setErr("Create the stack by saving a file first."); return; }
-    if (path.endsWith("/")) { setErr("Please enter a full filename first."); return; }
-    setDecryptView(true);
-    setLoading(true); setErr(null);
-    try {
-      const url = `/api/iac/stacks/${stackId}/file?path=${encodeURIComponent(path)}&decrypt=1`;
-      const r = await fetch(url, {
-        credentials: "include",
-        headers: { "X-Confirm-Reveal": "yes" },
-      });
       const txt = await r.text();
-      if (!r.ok) {
-        throw new Error(txt || `${r.status} ${r.statusText}`);
+      if (!r.ok) throw new Error(txt || `${r.status} ${r.statusText}`);
+
+      // The API returns { sops: boolean, ... } – update flags if we can parse it
+      try {
+        const j = JSON.parse(txt);
+        if (typeof j?.sops === "boolean") {
+          setIsSopsPersisted(j.sops);
+          // staying in same decrypted/raw view is okay; if we just encrypted and are in decrypted view,
+          // keep showing decrypted content; if we just turned off sops, decrypted view is same as raw anyway.
+        }
+      } catch {
+        // ignore parse issues; refresh will sync state
       }
-      setContent(txt);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to decrypt");
+
+      // Ask parent to refresh listing & close editor if it wants to
+      refresh();
+    } catch (e) {
+      alert((e as Error)?.message || "Failed to save");
     } finally {
       setLoading(false);
     }
   }
 
-  async function encryptSops() {
-    if (!stackId) { setErr("Create the stack by saving a file first."); return; }
-    if (path.endsWith("/")) { setErr("Please enter a full filename first."); return; }
-    if (isSops) { setErr("File already appears to be SOPS-encrypted."); return; }
-    if (!confirm("Encrypt this file with SOPS? This action cannot be undone locally.")) return;
-
-    setLoading(true); setErr(null);
-    try {
-      await saveFile(true);
-    } catch (e: any) {
-      setErr(e?.message || "Failed to encrypt");
-    } finally {
-      setLoading(false);
+  // Toggle decrypted/raw view. When turning on, refetch with decrypt=1.
+  function toggleDecryptedView() {
+    // Only meaningful if SOPS is on (persisted on disk or chosen to be on for save)
+    if (!(isSopsPersisted || sopsOnSave)) {
+      return;
     }
+    setDecryptedView(v => !v);
   }
 
-  // pick monaco language by path
-  const language = useMemo(() => {
-    const low = path.toLowerCase();
-    if (low.endsWith(".yaml") || low.endsWith(".yml")) return "yaml";
-    if (low.endsWith(".json")) return "json";
-    if (low.endsWith(".sh")) return "shell";
-    if (low.includes(".env")) return "properties"; // close enough
-    return "plaintext";
-  }, [path]);
+  // Toggle encryption for future saves (also allows going back and forth).
+  function toggleSopsOnSave() {
+    setSopsOnSave(v => !v);
+    // If we turn SOPS OFF but are currently in decrypted view, keep content as-is;
+    // future saves will store plaintext. If we turn SOPS ON, user can Save to encrypt.
+  }
 
-  const editor = (
-    <Editor
-      key={`${id}-${language}`}
-      value={content}
-      onChange={(v) => setContent(v ?? "")}
-      language={language}
-      theme="vs-dark"
-      options={{
-        readOnly: loading,
-        wordWrap: "on",
-        lineNumbers: "on",
-        minimap: { enabled: false },
-        scrollBeyondLastLine: false,
-        fontFamily: "ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace",
-        fontSize: 13,
-        padding: { top: 8 },
-      }}
-      height="100%"
-    />
-  );
-
-  const editorShell = (
-    <div className="w-full flex-1 min-h-0 border border-slate-800 rounded overflow-hidden">
-      <div className="h-full">{editor}</div>
-    </div>
-  );
+  // Fullscreen helpers
+  function toggleFullscreen() {
+    setFullscreen(f => !f);
+  }
 
   return (
-    <Card className={`bg-slate-900/40 border-slate-800 h-full flex flex-col ${fullscreen ? "fixed inset-2 z-50" : ""}`}>
+    <Card
+      ref={containerRef}
+      className={
+        (fullscreen
+          ? "fixed inset-0 z-50 m-0 rounded-none"
+          : "h-full") +
+        " bg-slate-900/40 border-slate-800 flex flex-col"
+      }
+    >
       <CardHeader className="pb-2 shrink-0">
-        <CardTitle className="text-sm text-slate-200">Editor</CardTitle>
-      </CardHeader>
-      <CardContent className="flex-1 min-h-0 flex flex-col gap-3">
-        <div className="flex gap-2 shrink-0">
-          <Input value={path} onChange={e => setPath(e.target.value)} placeholder="docker-compose/host/stack/compose.yaml" className="flex-1" />
-          <div className="flex gap-1">
-            {/* Toggle fullscreen */}
+        <div className="flex items-center justify-between gap-2">
+          <CardTitle className="text-sm text-slate-200">Editor</CardTitle>
+          <div className="flex items-center gap-1">
             <Button
-              type="button"
-              variant="outline"
-              className="border-slate-700"
-              onClick={() => setFullscreen(f => !f)}
-              title={fullscreen ? "Exit full screen" : "Full screen editor"}
+              size="sm"
+              variant="ghost"
+              className="h-8 px-2"
+              onClick={toggleSopsOnSave}
+              title={sopsOnSave ? "SOPS: On (save encrypted)" : "SOPS: Off (save plaintext)"}
+            >
+              {sopsOnSave ? <Shield className="h-4 w-4 mr-1" /> : <ShieldOff className="h-4 w-4 mr-1" />}
+              {sopsOnSave ? "SOPS On" : "SOPS Off"}
+            </Button>
+
+            {(isSopsPersisted || sopsOnSave) && (
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-8 px-2 border-indigo-700 text-indigo-200"
+                onClick={toggleDecryptedView}
+                disabled={loading || !stackId}
+                title={decryptedView ? "Hide decrypted view" : "Show decrypted view"}
+              >
+                {decryptedView ? <EyeOff className="h-4 w-4 mr-1" /> : <Eye className="h-4 w-4 mr-1" />}
+                {decryptedView ? "Hide" : "Show"}
+              </Button>
+            )}
+
+            <Button
+              size="sm"
+              variant="ghost"
+              className="h-8 px-2"
+              onClick={toggleFullscreen}
+              title={fullscreen ? "Exit full screen" : "Full screen"}
             >
               {fullscreen ? <Minimize2 className="h-4 w-4" /> : <Maximize2 className="h-4 w-4" />}
             </Button>
-            {/* SOPS actions: show if encrypted, else encrypt */}
-            {isSops ? (
-              <Button onClick={revealSops} variant="outline" className="border-indigo-700 text-indigo-200" title="Decrypt and reveal SOPS content" disabled={loading}>
-                <Shield className="h-4 w-4 mr-1" /> Reveal SOPS
-              </Button>
-            ) : (
-              <Button onClick={encryptSops} variant="outline" className="border-amber-700 text-amber-200 disabled:opacity-60" title="Encrypt this file with SOPS" disabled={loading || path.endsWith("/")}>
-                <ShieldOff className="h-4 w-4 mr-1" /> Encrypt with SOPS
-              </Button>
-            )}
           </div>
         </div>
-        {err && <div className="text-xs text-rose-300 shrink-0">Error: {err}</div>}
-        {decryptView && <div className="text-xs text-amber-300 shrink-0">Warning: Decrypted secrets are visible in your browser until you navigate away.</div>}
+      </CardHeader>
 
-        {/* Editor */}
-        {editorShell}
+      <CardContent className="flex-1 min-h-0 flex flex-col gap-3">
+        <div className="flex gap-2 shrink-0">
+          <Input
+            value={path}
+            onChange={(e) => setPath(e.target.value)}
+            placeholder="docker-compose/host/stack/docker-compose.yaml"
+            className="flex-1"
+          />
+        </div>
 
-        <div className="flex items-center justify-end shrink-0">
-          <Button onClick={() => saveFile()} disabled={loading || path.endsWith("/")}>
+        <div className="flex-1 min-h-0 rounded border border-slate-800 overflow-hidden">
+          <Editor
+            key={`${id}:${path}`} // remount when path changes to reset undo stack
+            value={content}
+            onChange={(val) => setContent(val ?? "")}
+            language={language}
+            theme="vs-dark"
+            options={{
+              lineNumbers: "on",
+              wordWrap: "on",
+              minimap: { enabled: false },
+              fontSize: 13,
+              scrollBeyondLastLine: false,
+              tabSize: 2,
+              renderWhitespace: "selection",
+              readOnly: loading,
+            }}
+            height="100%"
+          />
+        </div>
+
+        <div className="flex items-center justify-end gap-2 shrink-0">
+          <Button onClick={saveFile} disabled={loading}>
             <Save className="h-4 w-4 mr-1" /> Save
           </Button>
         </div>
-        <div className="text-xs text-slate-500 -mt-2">
-          Files ending with <code>_private.env</code> or <code>_secret.env</code> will auto-encrypt with SOPS (if the server has a key).
-        </div>
+
+        {/* No decrypted warning (intentionally removed per request) */}
+        {/* FYI: filenames ending with _private.env or _secret.env default SOPS on. */}
       </CardContent>
     </Card>
   );

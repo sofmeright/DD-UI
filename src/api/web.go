@@ -495,7 +495,7 @@ func makeRouter() http.Handler {
 						break
 					}
 					// Not running (probably ENOENT / 127) — close & try next
-					_ = att.Close()
+					att.Close()
 				}
 
 				if chosen == nil {
@@ -530,7 +530,7 @@ func makeRouter() http.Handler {
 								Rows int    `json:"rows"`
 							}
 							if err := json.Unmarshal(data, &msg); err == nil && strings.EqualFold(msg.Type, "resize") {
-								_ = cli.ContainerExecResize(context.Background(), execID, types.ResizeOptions{
+								_ = cli.ContainerExecResize(context.Background(), execID, container.ResizeOptions{
 									Width:  uint(msg.Cols),
 									Height: uint(msg.Rows),
 								})

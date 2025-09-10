@@ -7,7 +7,7 @@
   - DDUI discovers your hosts via an ansible inventory file and stores and processes a standardized compose/.env/script folder layout.
     - This means the state of your deployments is decoupled from the application and can be edited in any editor of your choice and DDUI will automatically redeploy the app when IaC files change.
   - DDUI also allows you to decrypt/encrypt any IaC related file and deploy from it automatically if it exists with the decryption key.
-    - This is good for those who like to stream while working on their servers or want to upload their compose and env to a repo as they can be uploaded encrypted and ddui can actually deploy them if they are ever cloned and placed in its watch folder.
+    - This is good for those who like to stream while working on their servers or want to upload their compose and env to a repo as by default they are shown censored and they can be uploaded encrypted and ddui can actually deploy them if they are ever cloned and placed in its watch folder.
       - There are plans for DDUI to connect directly to a git repository.
 - DDUI seeks to bring the rewards of the DevOps mindset to those who may not have afforded them otherwise.
 - DDUI implements much of the features of other Docker GUIs and includes some industry tools like xterm 🔥 and monaco (editor used in vscode 🎉) to ensure a rich experience for the user.

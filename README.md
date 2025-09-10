@@ -15,13 +15,13 @@
 - We currently have a functional solution for the localhost. We plan to support an infinite number of hosts and much of the features were planned ahead it just takes times.
 #### Thank you for your support!
 
-<img src="example/screenshots/DDUI-Decrypted-Deployed.png" width="500" /><img src="example/screenshots/DDUI-Host-Stack_Detail-Collapsed.png" width="500" />
-<img src="example/screenshots/DDUI-Host-Stack_Detail-Expanded.png" width="500" /><img src="example/screenshots/DDUI-Host-Stacks.png" width="500" />
-<img src="example/screenshots/DDUI-Hosts.png" width="500" /><img src="example/screenshots/DDUI-Images.png" width="500" />
-<img src="example/screenshots/DDUI-Logs.png" width="500" /><img src="example/screenshots/DDUI-Networks.png" width="500" />
-<img src="example/screenshots/DDUI-Stack-Compose-Editor.png" width="500" /><img src="example/screenshots/DDUI-Stack-Encrypted.png" width="500" />
-<img src="example/screenshots/DDUI-Stats.png" width="500" /><img src="example/screenshots/DDUI-Terminal.png" width="500" />
-<img src="example/screenshots/DDUI-Volumes.png" width="500" />
+<img src="example/screenshots/DDUI-Decrypted-Deployed.png" width="420" /><img src="example/screenshots/DDUI-Host-Stack_Detail-Collapsed.png" width="420" />
+<img src="example/screenshots/DDUI-Host-Stack_Detail-Expanded.png" width="420" /><img src="example/screenshots/DDUI-Host-Stacks.png" width="420" />
+<img src="example/screenshots/DDUI-Hosts.png" width="420" /><img src="example/screenshots/DDUI-Images.png" width="420" />
+<img src="example/screenshots/DDUI-Logs.png" width="420" /><img src="example/screenshots/DDUI-Networks.png" width="420" />
+<img src="example/screenshots/DDUI-Stack-Compose-Editor.png" width="420" /><img src="example/screenshots/DDUI-Stack-Encrypted.png" width="420" />
+<img src="example/screenshots/DDUI-Stats.png" width="420" /><img src="example/screenshots/DDUI-Terminal.png" width="420" />
+<img src="example/screenshots/DDUI-Volumes.png" width="420" />
 
 ---
 

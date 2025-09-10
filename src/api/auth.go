@@ -202,11 +202,23 @@ func InitAuthFromEnv() error {
 		Domain:   cfg.CookieDomain,
 	}
 
+	log.Printf("auth: init ok (issuer=%s redirect=%s cookieDomain=%s secure=%v samesite=%v)",
+		cfg.Issuer, cfg.RedirectURL, cfg.CookieDomain, cfg.SecureCookies, sameSite)
+
 	return nil
 }
 
 func scopes(s string) []string { return strings.Fields(s) }
 func randHex(n int) string     { b := make([]byte, n/2); _, _ = rand.Read(b); return hex.EncodeToString(b) }
+
+// useNoneForIframe returns None when we're on HTTPS (so it works in iframes/cross-site),
+// otherwise Lax for local dev.
+func useNoneForIframe() http.SameSite {
+	if cfg.SecureCookies {
+		return http.SameSiteNoneMode
+	}
+	return http.SameSiteLaxMode
+}
 
 func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	if oauthCfg == nil || oidcProv == nil {
@@ -227,7 +239,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   300, // 5 minutes
 		HttpOnly: true,
 		Secure:   cfg.SecureCookies,
-		SameSite: http.SameSiteLaxMode, // safe for top-level redirects
+		SameSite: useNoneForIframe(), // <-- IMPORTANT: allow sending in iframe callback
 		Domain:   cfg.CookieDomain,
 	}
 	_ = tmp.Save(r, w)
@@ -247,6 +259,7 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 
 	// CSRF protection: state must match
 	if r.URL.Query().Get("state") != wantState || wantState == "" {
+		log.Printf("auth: state mismatch (have=%q want=%q)", r.URL.Query().Get("state"), wantState)
 		http.Error(w, "state mismatch", http.StatusBadRequest)
 		return
 	}
@@ -254,23 +267,27 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	tok, err := oauthCfg.Exchange(ctx, r.URL.Query().Get("code"))
 	if err != nil {
+		log.Printf("auth: code exchange failed: %v", err)
 		http.Error(w, "code exchange failed", http.StatusBadGateway)
 		return
 	}
 
 	// --- raw id_token for RP-logout ---
 	rawID, ok := tok.Extra("id_token").(string)
-	if !ok {
+	if !ok || strings.TrimSpace(rawID) == "" {
+		log.Printf("auth: no id_token in token response")
 		http.Error(w, "no id_token", http.StatusBadGateway)
 		return
 	}
 
 	idt, err := oidcVerifier.Verify(ctx, rawID)
 	if err != nil {
+		log.Printf("auth: id token verify failed: %v", err)
 		http.Error(w, "id token verify failed", http.StatusUnauthorized)
 		return
 	}
 	if idt.Nonce != nonce {
+		log.Printf("auth: nonce mismatch (have=%q want=%q)", idt.Nonce, nonce)
 		http.Error(w, "nonce mismatch", http.StatusBadRequest)
 		return
 	}
@@ -286,6 +303,7 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		Exp    int64  `json:"exp"`
 	}
 	if err := idt.Claims(&claims); err != nil {
+		log.Printf("auth: claims parse failed: %v", err)
 		http.Error(w, "claims parse failed", http.StatusBadGateway)
 		return
 	}
@@ -341,14 +359,14 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = sess.Save(r, w)
 
-	// expire oauth temp cookie too
+	// expire oauth temp cookie too (mirror iframe-friendly setting)
 	tmp, _ := store.Get(r, oauthTmpName)
 	tmp.Options = &sessions.Options{
 		Path:     "/",
 		MaxAge:   -1,
 		HttpOnly: true,
 		Secure:   cfg.SecureCookies,
-		SameSite: http.SameSiteLaxMode,
+		SameSite: useNoneForIframe(),
 		Domain:   cfg.CookieDomain,
 	}
 	_ = tmp.Save(r, w)

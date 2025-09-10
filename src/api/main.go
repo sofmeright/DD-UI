@@ -3,8 +3,16 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
 	"log"
+	"math/big"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
@@ -15,7 +23,7 @@ import (
 var startedAt = time.Now()
 
 func main() {
-	addr := env("DDUI_BIND", ":8080")
+	addr := env("DDUI_BIND", ":443")
 
 	if err := InitAuthFromEnv(); err != nil {
 		log.Fatalf("OIDC setup failed: %v", err)
@@ -35,10 +43,49 @@ func main() {
 	startAutoScanner(ctx)
 	startIacAutoScanner(ctx)
 
-	log.Printf("DDUI API on %s (ui=/home/ddui/ui/dist)", addr)
-	if err := http.ListenAndServe(addr, makeRouter()); err != nil {
+	r := makeRouter()
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	enableTLS := isTrueish(env("DDUI_TLS_ENABLE", "true"))
+	if !enableTLS {
+		log.Printf("http: listening on %s (TLS disabled)", addr)
+		log.Fatal(srv.ListenAndServe())
+		return
+	}
+
+	certFile := strings.TrimSpace(env("DDUI_TLS_CERT_FILE", ""))
+	keyFile := strings.TrimSpace(env("DDUI_TLS_KEY_FILE", ""))
+
+	if certFile != "" && keyFile != "" {
+		log.Printf("https: listening on %s (cert=%s)", addr, certFile)
+		log.Fatal(srv.ListenAndServeTLS(certFile, keyFile))
+		return
+	}
+
+	if !isTrueish(env("DDUI_TLS_SELF_SIGNED", "true")) {
+		log.Fatalf("https: TLS enabled but no cert files and self-signed disabled")
+	}
+
+	// Ephemeral self-signed (in-memory)
+	certPEM, keyPEM, err := generateSelfSigned("ddui.local")
+	if err != nil {
 		log.Fatal(err)
 	}
+	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		log.Fatal(err)
+	}
+	srv.TLSConfig = &tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	log.Printf("https: listening on %s (self-signed)", addr)
+	log.Fatal(srv.ListenAndServeTLS("", ""))
 }
 
 /* -------- auto-scan loop (all hosts) -------- */
@@ -219,4 +266,34 @@ func applyAutoDevOps(ctx context.Context) error {
 		cancel()
 	}
 	return nil
+}
+
+/* -------- TLS self-signed helper -------- */
+
+func generateSelfSigned(cn string) ([]byte, []byte, error) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	serial, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
+	tpl := x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{cn, "localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, &tpl, &tpl, &key.PublicKey, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	return certPEM, keyPEM, nil
 }

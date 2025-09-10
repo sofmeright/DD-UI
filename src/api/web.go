@@ -2,6 +2,7 @@
 package main
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/docker/docker/api/types"
@@ -20,8 +22,10 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/volume"
+	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
+	"github.com/gorilla/websocket"
 )
 
 type Health struct {
@@ -316,6 +320,188 @@ func makeRouter() http.Handler {
 				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 				w.Header().Set("Cache-Control", "no-store")
 				_, _ = io.Copy(w, rc)
+			})
+
+			// -------- Live logs (SSE) --------
+			priv.Get("/hosts/{name}/containers/{ctr}/logs/stream", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				ctr := chi.URLParam(r, "ctr")
+
+				h, err := GetHostByName(r.Context(), host)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer cli.Close()
+
+				inspect, err := cli.ContainerInspect(r.Context(), ctr)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+
+				opts := container.LogsOptions{
+					ShowStdout: true,
+					ShowStderr: true,
+					Follow:     true,
+					Timestamps: false,
+					Details:    false,
+				}
+				if s := strings.TrimSpace(r.URL.Query().Get("since")); s != "" {
+					opts.Since = s
+				}
+				if t := strings.TrimSpace(r.URL.Query().Get("tail")); t != "" {
+					opts.Tail = t
+				}
+
+				rc, err := cli.ContainerLogs(r.Context(), ctr, opts)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer rc.Close()
+
+				fl, ok := writeSSEHeader(w)
+				if !ok {
+					http.Error(w, "stream unsupported", http.StatusInternalServerError)
+					return
+				}
+
+				stdout := &sseLineWriter{w: w, fl: fl, stream: "stdout"}
+				stderr := &sseLineWriter{w: w, fl: fl, stream: "stderr"}
+
+				// Keep-alive tick
+				tick := time.NewTicker(15 * time.Second)
+				defer tick.Stop()
+
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					if inspect.Config != nil && inspect.Config.Tty {
+						// No multiplexing when TTY true
+						sc := bufio.NewScanner(rc)
+						for sc.Scan() {
+							_, _ = stdout.Write(append(sc.Bytes(), '\n'))
+						}
+					} else {
+						// Demux Docker log multiplexing
+						_, _ = stdcopy.StdCopy(stdout, stderr, rc)
+					}
+				}()
+
+				// pump until client disconnects
+				notify := r.Context().Done()
+				for {
+					select {
+					case <-notify:
+						return
+					case <-done:
+						return
+					case <-tick.C:
+						_, _ = w.Write([]byte(": keep-alive\n\n"))
+						fl.Flush()
+					}
+				}
+			})
+
+			// -------- Interactive console (WebSocket) --------
+			priv.Get("/ws/hosts/{name}/containers/{ctr}/exec", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				ctr := chi.URLParam(r, "ctr")
+
+				conn, err := wsUpgrader.Upgrade(w, r, nil)
+				if err != nil {
+					return
+				}
+				defer conn.Close()
+
+				h, err := GetHostByName(r.Context(), host)
+				if err != nil {
+					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: "+err.Error()))
+					return
+				}
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: "+err.Error()))
+					return
+				}
+				defer cli.Close()
+
+				// command to start
+				cmdQ := strings.TrimSpace(r.URL.Query().Get("cmd"))
+				var cmd []string
+				if cmdQ != "" {
+					cmd = strings.Fields(cmdQ)
+				} else {
+					cmd = []string{"/bin/sh"}
+				}
+
+				// create exec
+				execCfg := types.ExecConfig{
+					AttachStdin:  true,
+					AttachStdout: true,
+					AttachStderr: true,
+					Tty:          true,
+					Cmd:          cmd,
+					Env:          []string{},
+					WorkingDir:   "",
+				}
+				created, err := cli.ContainerExecCreate(r.Context(), ctr, execCfg)
+				if err != nil {
+					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: "+err.Error()))
+					return
+				}
+
+				att, err := cli.ContainerExecAttach(r.Context(), created.ID, types.ExecStartCheck{Tty: true})
+				if err != nil {
+					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: "+err.Error()))
+					return
+				}
+				defer att.Close()
+
+				// ws -> container stdin
+				go func() {
+					for {
+						mt, data, err := conn.ReadMessage()
+						if err != nil {
+							_ = att.CloseWrite()
+							return
+						}
+						if mt == websocket.TextMessage || mt == websocket.BinaryMessage {
+							// resize control: {"type":"resize","cols":120,"rows":30}
+							if strings.HasPrefix(string(data), `{"type":"resize"`) {
+								var msg struct {
+									Type string `json:"type"`
+									Cols uint   `json:"cols"`
+									Rows uint   `json:"rows"`
+								}
+								_ = json.Unmarshal(data, &msg)
+								if msg.Type == "resize" && (msg.Cols > 0 && msg.Rows > 0) {
+									_ = cli.ContainerExecResize(context.Background(), created.ID, types.ResizeOptions{Width: msg.Cols, Height: msg.Rows})
+									continue
+								}
+							}
+							_, _ = att.Conn.Write(data)
+						}
+					}
+				}()
+
+				// container stdout/err -> ws (binary)
+				buf := make([]byte, 32*1024)
+				for {
+					n, err := att.Reader.Read(buf)
+					if n > 0 {
+						_ = conn.WriteMessage(websocket.BinaryMessage, buf[:n])
+					}
+					if err != nil {
+						return
+					}
+				}
 			})
 
 			// Stats (one-shot JSON passthrough)
@@ -1451,4 +1637,66 @@ func shouldAutoApply(ctx context.Context, stackID int64) (bool, error) {
 	}
 
 	return eff, nil
+}
+
+/* ---------- SSE + WS helpers ---------- */
+
+type sseLineWriter struct {
+	mu     sync.Mutex
+	w      http.ResponseWriter
+	fl     http.Flusher
+	stream string // "stdout" | "stderr"
+	buf    []byte
+}
+
+func (s *sseLineWriter) Write(p []byte) (int, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.buf = append(s.buf, p...)
+	for {
+		i := -1
+		for j, b := range s.buf {
+			if b == '\n' {
+				i = j
+				break
+			}
+		}
+		if i == -1 {
+			break
+		}
+		line := string(s.buf[:i])
+		s.buf = s.buf[i+1:]
+		_, _ = s.w.Write([]byte("event: " + s.stream + "\n"))
+		_, _ = s.w.Write([]byte("data: " + line + "\n\n"))
+		s.fl.Flush()
+	}
+	return len(p), nil
+}
+
+func writeSSEHeader(w http.ResponseWriter) (http.Flusher, bool) {
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Connection", "keep-alive")
+	// Disable proxy buffering (nginx)
+	w.Header().Set("X-Accel-Buffering", "no")
+	fl, ok := w.(http.Flusher)
+	return fl, ok
+}
+
+var wsUpgrader = websocket.Upgrader{
+	ReadBufferSize:  32 * 1024,
+	WriteBufferSize: 32 * 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		// allow same-origin and configured UI origin
+		origin := strings.TrimSpace(r.Header.Get("Origin"))
+		ui := strings.TrimSpace(env("DDUI_UI_ORIGIN", ""))
+		if origin == "" || origin == ui {
+			return true
+		}
+		// dev helpers
+		if strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "http://127.0.0.1:") {
+			return true
+		}
+		return false
+	},
 }

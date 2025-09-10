@@ -1254,7 +1254,7 @@ func makeRouter() http.Handler {
 
 		primary := themeHex("DDUI_THEME_PRIMARY", "#22d3ee") // cyan-ish
 		success := themeHex("DDUI_THEME_SUCCESS", "#059669") // emerald-600-ish
-		warning := themeHex("DDUI_THEME_WARNING", "#f59e0b") // amber-500
+		warning := themeHex("DDUI_THEME_WARNING", "#FF001EFF") // ~~amber-500~~ red
 		danger := themeHex("DDUI_THEME_DANGER", "#e11d48")   // rose-600
 		info := themeHex("DDUI_THEME_INFO", "#6366f1")       // indigo-500
 

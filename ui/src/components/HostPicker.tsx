@@ -1,3 +1,4 @@
+// ui/src/components/HostPicker.tsx
 import { Host } from "@/types";
 
 export default function HostPicker({

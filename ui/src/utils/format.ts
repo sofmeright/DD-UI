@@ -1,5 +1,4 @@
 // ui/src/utils/format.ts
-
 export function formatDT(s?: string) {
     if (!s) return "—";
     const d = new Date(s);

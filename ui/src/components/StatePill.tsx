@@ -1,3 +1,4 @@
+// ui/src/components/StatePill.tsx
 export default function StatePill({ state, health }: { state?: string; health?: string }) {
     const s = (state || "").toLowerCase();
     const h = (health || "").toLowerCase();

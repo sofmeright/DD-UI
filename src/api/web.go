@@ -1,1702 +1,755 @@
-// src/api/web.go
+// src/api/main.go
 package main
 
 import (
-	"bufio"
 	"context"
-	"encoding/json"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/tls"
+	"crypto/x509"
+	"crypto/x509/pkix"
+	"encoding/pem"
 	"errors"
-	"io"
 	"log"
+	"math/big"
+	"net"
 	"net/http"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
-
-	"github.com/docker/docker/api/types"
-	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
-	"github.com/docker/docker/api/types/image"
-	"github.com/docker/docker/api/types/volume"
-	"github.com/docker/docker/pkg/stdcopy"
-	"github.com/go-chi/chi/v5"
-	"github.com/go-chi/cors"
-	"github.com/gorilla/websocket"
 )
 
-type Health struct {
-	Status    string    `json:"status"`
-	StartedAt time.Time `json:"startedAt"`
-	Edition   string    `json:"edition"`
+var startedAt = time.Now()
+
+func main() {
+	addr := env("DDUI_BIND", ":443")
+
+	if err := InitAuthFromEnv(); err != nil {
+		log.Fatalf("OIDC setup failed: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	if err := InitDBFromEnv(ctx); err != nil {
+		log.Fatalf("DB init failed: %v", err)
+	}
+	if err := InitInventory(); err != nil {
+		log.Fatalf("inventory init failed: %v", err)
+	}
+
+	// kick off background scanners
+	startAutoScanner(ctx)
+	startIacAutoScanner(ctx)
+
+	r := makeRouter()
+
+	srv := &http.Server{
+		Addr:              addr,
+		Handler:           r,
+		ReadHeaderTimeout: 10 * time.Second,
+	}
+
+	enableTLS := isTrueish(env("DDUI_TLS_ENABLE", "true"))
+	if !enableTLS {
+		log.Printf("http: listening on %s (TLS disabled)", addr)
+		log.Fatal(srv.ListenAndServe())
+		return
+	}
+
+	certFile := strings.TrimSpace(env("DDUI_TLS_CERT_FILE", ""))
+	keyFile := strings.TrimSpace(env("DDUI_TLS_KEY_FILE", ""))
+
+	if certFile != "" && keyFile != "" {
+		log.Printf("https: listening on %s (cert=%s)", addr, certFile)
+		log.Fatal(srv.ListenAndServeTLS(certFile, keyFile))
+		return
+	}
+
+	if !isTrueish(env("DDUI_TLS_SELF_SIGNED", "true")) {
+		log.Fatalf("https: TLS enabled but no cert files and self-signed disabled")
+	}
+
+	// Ephemeral self-signed (in-memory)
+	certPEM, keyPEM, err := generateSelfSigned("ddui.local")
+	if err != nil {
+		log.Fatal(err)
+	}
+	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		log.Fatal(err)
+	}
+	srv.TLSConfig = &tls.Config{
+		Certificates: []tls.Certificate{tlsCert},
+		MinVersion:   tls.VersionTLS12,
+	}
+	log.Printf("https: listening on %s (self-signed)", addr)
+	log.Fatal(srv.ListenAndServeTLS("", ""))
 }
 
-func makeRouter() http.Handler {
-	r := chi.NewRouter()
-
-	// CORS – locked down for credentials
-	uiOrigin := strings.TrimSpace(env("DDUI_UI_ORIGIN", ""))
-	allowedOrigins := []string{}
-	if uiOrigin != "" {
-		allowedOrigins = append(allowedOrigins, uiOrigin)
-	}
-	// dev helpers
-	allowedOrigins = append(allowedOrigins,
-		"http://localhost:5173",
-		"http://127.0.0.1:5173",
-	)
-
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   allowedOrigins, // no "*"
-		AllowedMethods:   []string{"GET", "POST", "PATCH", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Content-Type", "X-Confirm-Reveal"},
-		AllowCredentials: true,
-		MaxAge:           600,
-	}))
-
-	// -------- API
-	r.Route("/api", func(api chi.Router) {
-		api.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-			respondJSON(w, Health{Status: "ok", StartedAt: startedAt, Edition: "Community"})
-		})
-
-		// Session probe MUST be public
-		api.Get("/session", SessionHandler)
-
-		// Everything below requires auth
-		api.Group(func(priv chi.Router) {
-			priv.Use(RequireAuth)
-
-			/* ---------- Global DevOps Apply (Auto DevOps) ---------- */
-
-			// GET current global value (DB override or ENV fallback) + source
-			priv.Get("/devops/apply", func(w http.ResponseWriter, r *http.Request) {
-				val, src := getGlobalDevopsApply(r.Context())
-				writeJSON(w, http.StatusOK, map[string]any{
-					"value":  val,
-					"source": src, // "db" or "env"
-				})
-			})
-
-			// PATCH global: { "value": true|false } or { "value": null } to clear to ENV
-			priv.Patch("/devops/apply", func(w http.ResponseWriter, r *http.Request) {
-				var body struct {
-					Value *bool `json:"value"`
-				}
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-					http.Error(w, "bad json", http.StatusBadRequest)
-					return
-				}
-				if err := setGlobalDevopsApply(r.Context(), body.Value); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				val, src := getGlobalDevopsApply(r.Context())
-				writeJSON(w, http.StatusOK, map[string]any{"value": val, "source": src, "status": "ok"})
-			})
-
-			/* ---------- Host-level DevOps Apply override ---------- */
-
-			// GET host override + effective (host override if set, else global)
-			priv.Get("/hosts/{name}/devops/apply", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				ov, _ := getHostDevopsOverride(r.Context(), host)
-				glob, _ := getAppSettingBool(r.Context(), "devops_apply")
-				if glob == nil {
-					d := envBool("DDUI_DEVOPS_APPLY", "false")
-					glob = &d
-				}
-				eff := *glob
-				if ov != nil {
-					eff = *ov
-				}
-				writeJSON(w, http.StatusOK, map[string]any{
-					"override": ov,   // null means inherit
-					"effective": eff, // bool
-				})
-			})
-
-			// PATCH host override: { "value": true|false } or { "value": null } to clear
-			priv.Patch("/hosts/{name}/devops/apply", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				var body struct {
-					Value *bool `json:"value"`
-				}
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-					http.Error(w, "bad json", http.StatusBadRequest)
-					return
-				}
-				if err := setHostDevopsOverride(r.Context(), host, body.Value); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				ov, _ := getHostDevopsOverride(r.Context(), host)
-				glob, _ := getAppSettingBool(r.Context(), "devops_apply")
-				if glob == nil {
-					d := envBool("DDUI_DEVOPS_APPLY", "false")
-					glob = &d
-				}
-				eff := *glob
-				if ov != nil {
-					eff = *ov
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"override": ov, "effective": eff, "status": "ok"})
-			})
-
-			/* ---------- Group-level DevOps Apply override ---------- */
-
-			// GET group override + effective (group override if set, else global)
-			priv.Get("/groups/{name}/devops/apply", func(w http.ResponseWriter, r *http.Request) {
-				group := chi.URLParam(r, "name")
-				ov, _ := getGroupDevopsOverride(r.Context(), group)
-				glob, _ := getAppSettingBool(r.Context(), "devops_apply")
-				if glob == nil {
-					d := envBool("DDUI_DEVOPS_APPLY", "false")
-					glob = &d
-				}
-				eff := *glob
-				if ov != nil {
-					eff = *ov
-				}
-				writeJSON(w, http.StatusOK, map[string]any{
-					"override": ov,   // null means inherit
-					"effective": eff, // bool
-				})
-			})
-
-			// PATCH group override: { "value": true|false } or { "value": null } to clear
-			priv.Patch("/groups/{name}/devops/apply", func(w http.ResponseWriter, r *http.Request) {
-				group := chi.URLParam(r, "name")
-				var body struct {
-					Value *bool `json:"value"`
-				}
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-					http.Error(w, "bad json", http.StatusBadRequest)
-					return
-				}
-				if err := setGroupDevopsOverride(r.Context(), group, body.Value); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				ov, _ := getGroupDevopsOverride(r.Context(), group)
-				glob, _ := getAppSettingBool(r.Context(), "devops_apply")
-				if glob == nil {
-					d := envBool("DDUI_DEVOPS_APPLY", "false")
-					glob = &d
-				}
-				eff := *glob
-				if ov != nil {
-					eff = *ov
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"override": ov, "effective": eff, "status": "ok"})
-			})
-
-			/* ---------- Runtime / Inventory ---------- */
-
-			// Hosts listing with filters
-			priv.Get("/hosts", func(w http.ResponseWriter, r *http.Request) {
-				items, err := ListHosts(r.Context())
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-
-				owner := strings.TrimSpace(r.URL.Query().Get("owner"))
-				q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
-				limit := clamp(parseIntDefault(r.URL.Query().Get("limit"), 200), 1, 1000)
-				offset := parseIntDefault(r.URL.Query().Get("offset"), 0)
-
-				filtered := make([]HostRow, 0, len(items))
-				for _, h := range items {
-					if owner != "" && !strings.EqualFold(h.Owner, owner) {
-						continue
-					}
-					if q != "" {
-						if !strings.Contains(strings.ToLower(h.Name), q) &&
-							!strings.Contains(strings.ToLower(h.Addr), q) {
-							continue
-						}
-					}
-					filtered = append(filtered, h)
-				}
-				lo := offset
-				if lo > len(filtered) {
-					lo = len(filtered)
-				}
-				hi := lo + limit
-				if hi > len(filtered) {
-					hi = len(filtered)
-				}
-				page := filtered[lo:hi]
-
-				writeJSON(w, http.StatusOK, map[string]any{
-					"items":  page,
-					"total":  len(filtered),
-					"limit":  limit,
-					"offset": offset,
-				})
-			})
-
-			// List containers by host
-			priv.Get("/hosts/{name}/containers", func(w http.ResponseWriter, r *http.Request) {
-				name := chi.URLParam(r, "name")
-				items, err := listContainersByHost(r.Context(), name)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"items": items})
-			})
-
-			// Inspect a single container by host (for the stack compare page)
-			priv.Get("/hosts/{name}/containers/{ctr}/inspect", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				ctr := chi.URLParam(r, "ctr")
-				out, err := inspectContainerByHost(r.Context(), host, ctr)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				writeJSON(w, http.StatusOK, out)
-			})
-
-			// Container quick actions: play/stop/kill/restart/pause/unpause/remove
-			priv.Post("/hosts/{name}/containers/{ctr}/action", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				ctr := chi.URLParam(r, "ctr")
-				var body struct {
-					Action  string `json:"action"`
-					Timeout string `json:"timeout,omitempty"`
-				}
-				_ = json.NewDecoder(r.Body).Decode(&body)
-				if strings.TrimSpace(body.Action) == "" {
-					http.Error(w, "missing action", http.StatusBadRequest)
-					return
-				}
-				if err := performContainerAction(r.Context(), host, ctr, strings.ToLower(body.Action)); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-			})
-
-			// Logs (simple, non-follow)
-			priv.Get("/hosts/{name}/containers/{ctr}/logs", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				ctr := chi.URLParam(r, "ctr")
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				tail := strings.TrimSpace(r.URL.Query().Get("tail"))
-				opts := container.LogsOptions{
-					ShowStdout: true,
-					ShowStderr: true,
-					Timestamps: false,
-					Follow:     false,
-					Details:    false,
-				}
-				if tail != "" {
-					opts.Tail = tail
-				}
-				rc, err := cli.ContainerLogs(r.Context(), ctr, opts)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer rc.Close()
-
-				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-				w.Header().Set("Cache-Control", "no-store")
-				_, _ = io.Copy(w, rc)
-			})
-
-			// -------- Live logs (SSE) --------
-			priv.Get("/hosts/{name}/containers/{ctr}/logs/stream", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				ctr := chi.URLParam(r, "ctr")
-
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				inspect, err := cli.ContainerInspect(r.Context(), ctr)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-
-				opts := container.LogsOptions{
-					ShowStdout: true,
-					ShowStderr: true,
-					Follow:     true,
-					Timestamps: false,
-					Details:    false,
-				}
-				if s := strings.TrimSpace(r.URL.Query().Get("since")); s != "" {
-					opts.Since = s
-				}
-				if t := strings.TrimSpace(r.URL.Query().Get("tail")); t != "" {
-					opts.Tail = t
-				}
-
-				rc, err := cli.ContainerLogs(r.Context(), ctr, opts)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer rc.Close()
-
-				fl, ok := writeSSEHeader(w)
-				if !ok {
-					http.Error(w, "stream unsupported", http.StatusInternalServerError)
-					return
-				}
-
-				stdout := &sseLineWriter{w: w, fl: fl, stream: "stdout"}
-				stderr := &sseLineWriter{w: w, fl: fl, stream: "stderr"}
-
-				// Keep-alive tick
-				tick := time.NewTicker(15 * time.Second)
-				defer tick.Stop()
-
-				done := make(chan struct{})
-				go func() {
-					defer close(done)
-					if inspect.Config != nil && inspect.Config.Tty {
-						// No multiplexing when TTY true
-						sc := bufio.NewScanner(rc)
-						for sc.Scan() {
-							_, _ = stdout.Write(append(sc.Bytes(), '\n'))
-						}
-					} else {
-						// Demux Docker log multiplexing
-						_, _ = stdcopy.StdCopy(stdout, stderr, rc)
-					}
-				}()
-
-				// pump until client disconnects
-				notify := r.Context().Done()
-				for {
-					select {
-					case <-notify:
-						return
-					case <-done:
-						return
-					case <-tick.C:
-						_, _ = w.Write([]byte(": keep-alive\n\n"))
-						fl.Flush()
-					}
-				}
-			})
-
-			// -------- Interactive console (WebSocket) --------
-			priv.Get("/ws/hosts/{name}/containers/{ctr}/exec", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				ctr := chi.URLParam(r, "ctr")
-
-				conn, err := wsUpgrader.Upgrade(w, r, nil)
-				if err != nil {
-					return
-				}
-				defer conn.Close()
-
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: "+err.Error()))
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: "+err.Error()))
-					return
-				}
-				defer cli.Close()
-
-				// command to start
-				cmdQ := strings.TrimSpace(r.URL.Query().Get("cmd"))
-				var cmd []string
-				if cmdQ != "" {
-					cmd = strings.Fields(cmdQ)
-				} else {
-					cmd = []string{"/bin/sh"}
-				}
-
-				// create exec
-				execCfg := types.ExecConfig{
-					AttachStdin:  true,
-					AttachStdout: true,
-					AttachStderr: true,
-					Tty:          true,
-					Cmd:          cmd,
-					Env:          []string{},
-					WorkingDir:   "",
-				}
-				created, err := cli.ContainerExecCreate(r.Context(), ctr, execCfg)
-				if err != nil {
-					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: "+err.Error()))
-					return
-				}
-
-				att, err := cli.ContainerExecAttach(r.Context(), created.ID, types.ExecStartCheck{Tty: true})
-				if err != nil {
-					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: "+err.Error()))
-					return
-				}
-				defer att.Close()
-
-				// ws -> container stdin
-				go func() {
-					for {
-						mt, data, err := conn.ReadMessage()
-						if err != nil {
-							_ = att.CloseWrite()
-							return
-						}
-						if mt == websocket.TextMessage || mt == websocket.BinaryMessage {
-							// resize control: {"type":"resize","cols":120,"rows":30}
-							if strings.HasPrefix(string(data), `{"type":"resize"`) {
-								var msg struct {
-									Type string `json:"type"`
-									Cols uint   `json:"cols"`
-									Rows uint   `json:"rows"`
-								}
-								_ = json.Unmarshal(data, &msg)
-								if msg.Type == "resize" && (msg.Cols > 0 && msg.Rows > 0) {
-									_ = cli.ContainerExecResize(context.Background(), created.ID, types.ResizeOptions{Width: msg.Cols, Height: msg.Rows})
-									continue
-								}
-							}
-							_, _ = att.Conn.Write(data)
-						}
-					}
-				}()
-
-				// container stdout/err -> ws (binary)
-				buf := make([]byte, 32*1024)
-				for {
-					n, err := att.Reader.Read(buf)
-					if n > 0 {
-						_ = conn.WriteMessage(websocket.BinaryMessage, buf[:n])
-					}
-					if err != nil {
-						return
-					}
-				}
-			})
-
-			// Stats (one-shot JSON passthrough)
-			priv.Get("/hosts/{name}/containers/{ctr}/stats", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				ctr := chi.URLParam(r, "ctr")
-				txt, err := oneShotStats(r.Context(), host, ctr)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Cache-Control", "no-store")
-				_, _ = w.Write([]byte(txt))
-			})
-
-			// Images
-			priv.Get("/hosts/{name}/images", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				list, err := cli.ImageList(r.Context(), image.ListOptions{All: true})
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-
-				stored, _ := getImageTagMap(r.Context(), host)
-
-				type row struct {
-					Repo    string `json:"repo"`
-					Tag     string `json:"tag"`
-					ID      string `json:"id"`
-					Size    string `json:"size"`
-					Created string `json:"created"`
-				}
-				var items []row
-				seen := make(map[string]struct{}, len(list))
-
-				for _, im := range list {
-					id := im.ID
-					seen[id] = struct{}{}
-					repo := "<none>"
-					tag := "none"
-
-					if len(im.RepoTags) > 0 && im.RepoTags[0] != "<none>:<none>" {
-						parts := strings.SplitN(im.RepoTags[0], ":", 2)
-						repo = parts[0]
-						if len(parts) == 2 {
-							tag = parts[1]
-						}
-					} else if prev, ok := stored[id]; ok {
-						if strings.TrimSpace(prev[0]) != "" {
-							repo = prev[0]
-						}
-						if strings.TrimSpace(prev[1]) != "" {
-							tag = prev[1]
-						}
-					}
-
-					_ = upsertImageTag(r.Context(), host, id, repo, tag)
-
-					items = append(items, row{
-						Repo:    repo,
-						Tag:     tag,
-						ID:      id,
-						Size:    humanSize(im.Size),
-						Created: time.Unix(im.Created, 0).Format(time.RFC3339),
-					})
-				}
-
-				_ = cleanupImageTags(r.Context(), host, seen)
-
-				writeJSON(w, http.StatusOK, map[string]any{"items": items})
-			})
-
-			// Bulk delete images
-			priv.Post("/hosts/{name}/images/delete", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				var body struct {
-					IDs   []string `json:"ids"`
-					Force bool     `json:"force"`
-				}
-				_ = json.NewDecoder(r.Body).Decode(&body)
-				if len(body.IDs) == 0 {
-					http.Error(w, "ids required", http.StatusBadRequest)
-					return
-				}
-
-				type res struct {
-					ID  string `json:"id"`
-					Ok  bool   `json:"ok"`
-					Err string `json:"err,omitempty"`
-				}
-				out := make([]res, 0, len(body.IDs))
-
-				for _, id := range body.IDs {
-					_, err := cli.ImageRemove(r.Context(), id, image.RemoveOptions{
-						Force:         body.Force,
-						PruneChildren: true,
-					})
-					if err != nil {
-						out = append(out, res{ID: id, Ok: false, Err: err.Error()})
-						continue
-					}
-					out = append(out, res{ID: id, Ok: true})
-				}
-
-				_, _ = db.Exec(r.Context(),
-					`DELETE FROM image_tags WHERE host_name=$1 AND image_id = ANY($2::text[])`,
-					host, body.IDs,
-				)
-
-				writeJSON(w, http.StatusOK, map[string]any{"results": out})
-			})
-
-			// Networks
-			priv.Get("/hosts/{name}/networks", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				nets, err := cli.NetworkList(r.Context(), types.NetworkListOptions{Filters: filters.NewArgs()})
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				type row struct {
-					ID     string `json:"id"`
-					Name   string `json:"name"`
-					Driver string `json:"driver"`
-					Scope  string `json:"scope"`
-				}
-				var items []row
-				for _, n := range nets {
-					items = append(items, row{ID: n.ID, Name: n.Name, Driver: n.Driver, Scope: n.Scope})
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"items": items})
-			})
-
-			// Delete networks
-			priv.Post("/hosts/{name}/networks/delete", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				var body struct {
-					Names []string `json:"names"`
-				}
-				_ = json.NewDecoder(r.Body).Decode(&body)
-				if len(body.Names) == 0 {
-					http.Error(w, "names required", http.StatusBadRequest)
-					return
-				}
-
-				type res struct {
-					Name string `json:"name"`
-					Ok   bool   `json:"ok"`
-					Err  string `json:"err,omitempty"`
-				}
-				out := make([]res, 0, len(body.Names))
-
-				for _, n := range body.Names {
-					if err := cli.NetworkRemove(r.Context(), n); err != nil {
-						out = append(out, res{Name: n, Ok: false, Err: err.Error()})
-						continue
-					}
-					out = append(out, res{Name: n, Ok: true})
-				}
-
-				writeJSON(w, http.StatusOK, map[string]any{"results": out})
-			})
-
-			// Volumes
-			priv.Get("/hosts/{name}/volumes", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				vl, err := cli.VolumeList(r.Context(), volume.ListOptions{Filters: filters.NewArgs()})
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				type row struct {
-					Name       string `json:"name"`
-					Driver     string `json:"driver"`
-					Mountpoint string `json:"mountpoint"`
-					Created    string `json:"created"`
-				}
-				var items []row
-				for _, v := range vl.Volumes {
-					created := v.CreatedAt
-					items = append(items, row{v.Name, v.Driver, v.Mountpoint, created})
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"items": items})
-			})
-
-			// Delete volumes
-			priv.Post("/hosts/{name}/volumes/delete", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				var body struct {
-					Names []string `json:"names"`
-					Force bool     `json:"force"`
-				}
-				_ = json.NewDecoder(r.Body).Decode(&body)
-				if len(body.Names) == 0 {
-					http.Error(w, "names required", http.StatusBadRequest)
-					return
-				}
-
-				type res struct {
-					Name string `json:"name"`
-					Ok   bool   `json:"ok"`
-					Err  string `json:"err,omitempty"`
-				}
-				out := make([]res, 0, len(body.Names))
-
-				for _, v := range body.Names {
-					if err := cli.VolumeRemove(r.Context(), v, body.Force); err != nil {
-						out = append(out, res{Name: v, Ok: false, Err: err.Error()})
-						continue
-					}
-					out = append(out, res{Name: v, Ok: true})
-				}
-
-				writeJSON(w, http.StatusOK, map[string]any{"results": out})
-			})
-
-			// Trigger on-demand scan for a single host
-			priv.Post("/scan/host/{name}", func(w http.ResponseWriter, r *http.Request) {
-				name := chi.URLParam(r, "name")
-				to := parseDurationDefault(r.URL.Query().Get("timeout"), 45*time.Second)
-				ctx, cancel := context.WithTimeout(r.Context(), to)
-				defer cancel()
-
-				n, err := ScanHostContainers(ctx, name)
-				if err != nil {
-					if errors.Is(err, ErrSkipScan) {
-						writeJSON(w, http.StatusOK, map[string]any{
-							"host":   name,
-							"saved":  0,
-							"status": "skipped",
-						})
-						return
-					}
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]any{
-					"host":   name,
-					"saved":  n,
-					"status": "ok",
-				})
-			})
-
-			// Trigger scan for all known hosts (inventory only)
-			priv.Post("/scan/all", func(w http.ResponseWriter, r *http.Request) {
-				// IaC scan (non-fatal)
-				if _, _, err := ScanIacLocal(r.Context()); err != nil {
-					log.Printf("iac: sync scan failed: %v", err)
-				}
-
-				hostRows, err := ListHosts(r.Context())
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusInternalServerError)
-					return
-				}
-
-				perHostTO := parseDurationDefault(r.URL.Query().Get("timeout"), 30*time.Second)
-
-				type result struct {
-					Host    string `json:"host"`
-					Saved   int    `json:"saved,omitempty"`
-					Err     string `json:"err,omitempty"`
-					Skipped bool   `json:"skipped,omitempty"`
-					Reason  string `json:"reason,omitempty"`
-				}
-
-				var (
-					results []result
-					total   int
-					scanned int
-					skipped int
-					failed  int
-				)
-
-				for _, h := range hostRows {
-					url, _ := dockerURLFor(h)
-					if isUnixSock(url) && !localHostAllowed(h) {
-						results = append(results, result{
-							Host:    h.Name,
-							Skipped: true,
-							Reason:  "local docker.sock only allowed for the designated local host",
-						})
-						skipped++
-						continue
-					}
-
-					ctx, cancel := context.WithTimeout(r.Context(), perHostTO)
-					n, err := ScanHostContainers(ctx, h.Name)
-					cancel()
-
-					if err != nil {
-						if errors.Is(err, ErrSkipScan) {
-							results = append(results, result{Host: h.Name, Skipped: true})
-							skipped++
-							continue
-						}
-						results = append(results, result{Host: h.Name, Err: err.Error()})
-						failed++
-						continue
-					}
-
-					total += n
-					scanned++
-					results = append(results, result{Host: h.Name, Saved: n})
-				}
-
-				writeJSON(w, http.StatusOK, map[string]any{
-					"hosts_total": len(hostRows),
-					"scanned":     scanned,
-					"skipped":     skipped,
-					"errors":      failed,
-					"saved":       total,
-					"results":     results,
-					"status":      "ok",
-				})
-			})
-
-			// POST /api/inventory/reload
-			priv.Post("/inventory/reload", func(w http.ResponseWriter, r *http.Request) {
-				var body struct{ Path string `json:"path"` }
-				_ = json.NewDecoder(r.Body).Decode(&body)
-
-				var err error
-				if strings.TrimSpace(body.Path) != "" {
-					err = ReloadInventoryWithPath(body.Path)
-				} else {
-					err = ReloadInventory()
-				}
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
-			})
-
-			/* ---------- IaC ---------- */
-
-			// Force IaC scan (local)
-			priv.Post("/iac/scan", func(w http.ResponseWriter, r *http.Request) {
-				ctx, cancel := context.WithTimeout(r.Context(), 2*time.Minute)
-				defer cancel()
-				stacks, services, err := ScanIacLocal(ctx)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]any{
-					"status":   "ok",
-					"stacks":   stacks,
-					"services": services,
-				})
-			})
-
-			// Desired stacks/services for a host (host + groups)
-			priv.Get("/hosts/{name}/iac", func(w http.ResponseWriter, r *http.Request) {
-				name := chi.URLParam(r, "name")
-				items, err := listIacStacksForHost(r.Context(), name)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"stacks": items})
-			})
-
-			// Create a new stack in the local IaC repo
-			priv.Post("/iac/stacks", func(w http.ResponseWriter, r *http.Request) {
-				var body struct {
-					ScopeKind string `json:"scope_kind"`
-					ScopeName string `json:"scope_name"`
-					StackName string `json:"stack_name"`
-				}
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-					http.Error(w, "bad json", http.StatusBadRequest)
-					return
-				}
-				if body.ScopeKind == "" || body.ScopeName == "" || body.StackName == "" {
-					http.Error(w, "scope_kind, scope_name, stack_name required", http.StatusBadRequest)
-					return
-				}
-
-				root := strings.TrimSpace(env(iacDefaultRootEnv, iacDefaultRoot))
-				dirname := strings.TrimSpace(env(iacDirNameEnv, iacDefaultDirName))
-				rel := filepath.ToSlash(filepath.Join(dirname, body.ScopeName, body.StackName))
-				full, err := joinUnder(root, rel)
-				if err != nil {
-					http.Error(w, "invalid path", http.StatusBadRequest)
-					return
-				}
-				if err := os.MkdirAll(full, 0o755); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-
-				repoID, err := upsertIacRepoLocal(r.Context(), root)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				id, err := upsertIacStack(r.Context(), repoID, body.ScopeKind, body.ScopeName, body.StackName, rel, "", "unmanaged", "", "none", true)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"id": id, "rel_path": rel})
-			})
-
-			// Get a single IaC stack (returns effective auto devops)
-			priv.Get("/iac/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {
-				idStr := chi.URLParam(r, "id")
-				id, _ := strconv.ParseInt(idStr, 10, 64)
-
-				var row struct {
-					ID         int64   `json:"id"`
-					RepoID     int64   `json:"repo_id"`
-					ScopeKind  string  `json:"scope_kind"`
-					ScopeName  string  `json:"scope_name"`
-					StackName  string  `json:"stack_name"`
-					RelPath    string  `json:"rel_path"`
-					IacEnabled bool    `json:"iac_enabled"`
-					DeployKind string  `json:"deploy_kind"`
-					SopsStatus string  `json:"sops_status"`
-					Override   *bool   `json:"auto_apply_override"`
-					UpdatedAt  string  `json:"updated_at"`
-					Effective  bool    `json:"effective_auto_devops"`
-				}
-				var updatedAt time.Time
-				err := db.QueryRow(r.Context(), `
-					SELECT id, repo_id, scope_kind::text, scope_name, stack_name, rel_path,
-					       iac_enabled, deploy_kind::text, sops_status::text, auto_apply_override, updated_at
-					FROM iac_stacks
-					WHERE id=$1
-				`, id).Scan(
-					&row.ID, &row.RepoID, &row.ScopeKind, &row.ScopeName, &row.StackName, &row.RelPath,
-					&row.IacEnabled, &row.DeployKind, &row.SopsStatus, &row.Override, &updatedAt,
-				)
-				if err != nil {
-					http.Error(w, "not found", http.StatusNotFound)
-					return
-				}
-				row.UpdatedAt = updatedAt.Format(time.RFC3339)
-				eff, _ := shouldAutoApply(r.Context(), id)
-				row.Effective = eff
-				writeJSON(w, http.StatusOK, map[string]any{"stack": row})
-			})
-
-			// Patch IaC stack (decoupled + compat):
-			//   { "iac_enabled": true|false }              -> updates ONLY iac_enabled; **compat:** if AutoDevOps* not provided, we mirror this to auto_apply_override
-			//   { "auto_devops": true|false }             -> sets stack auto_apply_override to value
-			//   { "auto_devops_inherit": true }           -> clears stack override (inherit)
-			priv.Patch("/iac/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {
-				idStr := chi.URLParam(r, "id")
-				id, _ := strconv.ParseInt(idStr, 10, 64)
-
-				var body struct {
-					IacEnabled        *bool `json:"iac_enabled,omitempty"`
-					AutoDevOps        *bool `json:"auto_devops,omitempty"`
-					AutoDevOpsInherit *bool `json:"auto_devops_inherit,omitempty"`
-				}
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-					http.Error(w, "bad json", http.StatusBadRequest)
-					return
-				}
-
-				// Update iac_enabled only (decoupled)
-				var touchedIac bool
-				if body.IacEnabled != nil {
-					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET iac_enabled=$1 WHERE id=$2`, *body.IacEnabled, id); err != nil {
-						http.Error(w, err.Error(), http.StatusBadRequest)
-						return
-					}
-					touchedIac = true
-				}
-
-				// Clear override if requested
-				if body.AutoDevOpsInherit != nil && *body.AutoDevOpsInherit {
-					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_apply_override=NULL WHERE id=$1`, id); err != nil {
-						http.Error(w, err.Error(), http.StatusBadRequest)
-						return
-					}
-				}
-
-				// Set explicit auto devops override
-				if body.AutoDevOps != nil {
-					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_apply_override=$1 WHERE id=$2`, *body.AutoDevOps, id); err != nil {
-						http.Error(w, err.Error(), http.StatusBadRequest)
-						return
-					}
-				}
-
-				// **Compatibility path**:
-				// If caller only sent iac_enabled, treat it as an Auto DevOps toggle too,
-				// so existing UI switches control Auto DevOps until the UI is updated.
-				if touchedIac && body.AutoDevOps == nil && (body.AutoDevOpsInherit == nil || !*body.AutoDevOpsInherit) {
-					_, _ = db.Exec(r.Context(), `UPDATE iac_stacks SET auto_apply_override=$1 WHERE id=$2`, *body.IacEnabled, id)
-				}
-
-				eff, _ := shouldAutoApply(r.Context(), id)
-				writeJSON(w, http.StatusOK, map[string]any{
-					"id":                    id,
-					"iac_enabled":           body.IacEnabled,
-					"auto_devops":           body.AutoDevOps,
-					"auto_devops_inherit":   body.AutoDevOpsInherit,
-					"effective_auto_devops": eff,
-					"status":                "ok",
-				})
-			})
-
-			// Delete a stack (optionally delete files too)
-			priv.Delete("/iac/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {
-				idStr := chi.URLParam(r, "id")
-				id, _ := strconv.ParseInt(idStr, 10, 64)
-				deleteFiles := r.URL.Query().Get("delete_files") == "1" || r.URL.Query().Get("delete_files") == "true"
-
-				root, err := getRepoRootForStack(r.Context(), id)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-
-				var rel string
-				_ = db.QueryRow(r.Context(), `SELECT rel_path FROM iac_stacks WHERE id=$1`, id).Scan(&rel)
-
-				if _, err := db.Exec(r.Context(), `DELETE FROM iac_stacks WHERE id=$1`, id); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				if deleteFiles && rel != "" {
-					if full, err := joinUnder(root, rel); err == nil {
-						_ = os.RemoveAll(full) // best effort
-					}
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
-			})
-
-			// ===== IaC Editor APIs =====
-
-			// List files tracked for a stack
-			priv.Get("/iac/stacks/{id}/files", func(w http.ResponseWriter, r *http.Request) {
-				idStr := chi.URLParam(r, "id")
-				id, _ := strconv.ParseInt(idStr, 10, 64)
-				items, err := listFilesForStack(r.Context(), id)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"files": items})
-			})
-
-			// Read file content for a stack file (with optional decrypt)
-			priv.Get("/iac/stacks/{id}/file", func(w http.ResponseWriter, r *http.Request) {
-				idStr := chi.URLParam(r, "id")
-				id, _ := strconv.ParseInt(idStr, 10, 64)
-				rel := strings.TrimSpace(r.URL.Query().Get("path"))
-				if rel == "" {
-					http.Error(w, "missing path", http.StatusBadRequest)
-					return
-				}
-				root, err := getRepoRootForStack(r.Context(), id)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				full, err := joinUnder(root, rel)
-				if err != nil {
-					http.Error(w, "invalid path", http.StatusBadRequest)
-					return
-				}
-				decrypt := r.URL.Query().Get("decrypt") == "1" || r.URL.Query().Get("decrypt") == "true"
-
-				var data []byte
-				if decrypt {
-					if !envBool("DDUI_ALLOW_SOPS_DECRYPT", "false") {
-						http.Error(w, "decrypt disabled on server", http.StatusForbidden)
-						return
-					}
-					if strings.ToLower(r.Header.Get("X-Confirm-Reveal")) != "yes" {
-						http.Error(w, "confirmation required", http.StatusForbidden)
-						return
-					}
-					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-					defer cancel()
-					cmd := exec.CommandContext(ctx, "sops", "-d", full)
-					out, err := cmd.CombinedOutput()
-					if err != nil {
-						http.Error(w, "sops decrypt failed: "+string(out), http.StatusNotImplemented)
-						return
-					}
-					data = out
-				} else {
-					b, err := os.ReadFile(full)
-					if err != nil {
-						http.Error(w, err.Error(), http.StatusNotFound)
-						return
-					}
-					data = b
-				}
-
-				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-				w.Header().Set("Cache-Control", "no-store")
-				_, _ = w.Write(data)
-			})
-
-			// Create/update file content
-			priv.Post("/iac/stacks/{id}/file", func(w http.ResponseWriter, r *http.Request) {
-				idStr := chi.URLParam(r, "id")
-				id, _ := strconv.ParseInt(idStr, 10, 64)
-				var body struct {
-					Path    string `json:"path"`
-					Content string `json:"content"`
-					Sops    bool   `json:"sops,omitempty"`
-					Role    string `json:"role,omitempty"` // compose|env|script|other
-				}
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-					http.Error(w, "bad json", http.StatusBadRequest)
-					return
-				}
-				if strings.TrimSpace(body.Path) == "" {
-					http.Error(w, "path required", http.StatusBadRequest)
-					return
-				}
-				root, err := getRepoRootForStack(r.Context(), id)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				full, err := joinUnder(root, body.Path)
-				if err != nil {
-					http.Error(w, "invalid path", http.StatusBadRequest)
-					return
-				}
-				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				if err := os.WriteFile(full, []byte(body.Content), 0o644); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-
-				// auto-role
-				if body.Role == "" {
-					low := strings.ToLower(full)
-					switch {
-					case strings.HasSuffix(low, ".yml"), strings.HasSuffix(low, ".yaml"):
-						body.Role = "compose"
-					case strings.HasSuffix(low, ".sh"):
-						body.Role = "script"
-					case strings.Contains(low, ".env") || strings.HasSuffix(low, ".env"):
-						body.Role = "env"
-					default:
-						body.Role = "other"
-					}
-				}
-
-				// Optional SOPS auto-encrypt on save (opt-in)
-				shouldSops := body.Sops || strings.HasSuffix(strings.ToLower(body.Path), "_private.env") || strings.HasSuffix(strings.ToLower(body.Path), "_secret.env")
-				if shouldSops && (os.Getenv("SOPS_AGE_KEY") != "" || os.Getenv("SOPS_AGE_KEY_FILE") != "" || os.Getenv("SOPS_AGE_RECIPIENTS") != "") {
-					args := []string{"-e", "-i"}
-					if strings.HasSuffix(strings.ToLower(body.Path), ".env") {
-						args = []string{"-e", "-i", "--input-type", "dotenv"}
-					}
-					if rec := strings.TrimSpace(os.Getenv("SOPS_AGE_RECIPIENTS")); rec != "" {
-						for _, rcp := range strings.Fields(rec) {
-							if rcp != "" {
-								args = append(args, "--age", rcp)
-							}
-						}
-					}
-					args = append(args, full)
-
-					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-					defer cancel()
-					out, err := exec.CommandContext(ctx, "sops", args...).CombinedOutput()
-					if err != nil {
-						log.Printf("sops: encrypt failed: %v out=%s", err, string(out))
-					} else {
-						log.Printf("sops: encrypted %s", full)
-						body.Sops = true
-					}
-				}
-
-				sum, sz := sha256File(full)
-				relFromRoot := filepath.ToSlash(strings.TrimPrefix(full, strings.TrimSuffix(root, "/")+"/"))
-				if err := upsertIacFile(r.Context(), id, body.Role, relFromRoot, body.Sops, sum, sz); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "size": sz, "sha256": sum, "sops": body.Sops})
-			})
-
-			// Delete a file from a stack
-			priv.Delete("/iac/stacks/{id}/file", func(w http.ResponseWriter, r *http.Request) {
-				idStr := chi.URLParam(r, "id")
-				id, _ := strconv.ParseInt(idStr, 10, 64)
-				rel := strings.TrimSpace(r.URL.Query().Get("path"))
-				if rel == "" {
-					http.Error(w, "missing path", http.StatusBadRequest)
-					return
-				}
-				root, err := getRepoRootForStack(r.Context(), id)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				full, err := joinUnder(root, rel)
-				if err != nil {
-					http.Error(w, "invalid path", http.StatusBadRequest)
-					return
-				}
-				_ = os.Remove(full) // best effort
-				_ = deleteIacFileRow(r.Context(), id, rel)
-				writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
-			})
-
-			// Deploy endpoint
-			// - Manual deploys: **default** (for UI). Pass ?auto=1 for background/auto callers.
-			priv.Post("/iac/stacks/{id}/deploy", func(w http.ResponseWriter, r *http.Request) {
-				idStr := chi.URLParam(r, "id")
-				id, err := strconv.ParseInt(idStr, 10, 64)
-				if err != nil || id <= 0 {
-					http.Error(w, "bad id", http.StatusBadRequest)
-					return
-				}
-
-				// must have something to deploy
-				ok, derr := stackHasContent(r.Context(), id)
-				if derr != nil {
-					http.Error(w, derr.Error(), http.StatusInternalServerError)
-					return
-				}
-				if !ok {
-					http.Error(w, "stack has no files", http.StatusBadRequest)
-					return
-				}
-
-				// Manual by default (UI-friendly). Auto callers pass ?auto=1 explicitly.
-				manual := !isTrueish(r.URL.Query().Get("auto"))
-
-				// Gate only if NOT manual
-				if !manual {
-					allowed, aerr := shouldAutoApply(r.Context(), id)
-					if aerr != nil {
-						http.Error(w, aerr.Error(), http.StatusBadRequest)
-						return
-					}
-					if !allowed {
-						writeJSON(w, http.StatusAccepted, map[string]any{
-							"status":  "skipped",
-							"reason":  "auto_devops_disabled",
-							"stackID": id,
-						})
-						return
-					}
-				}
-
-				// async deploy with timeout + logging; mark manual flag in context
-				go func(stackID int64, manual bool) {
-					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-					defer cancel()
-					ctx = context.WithValue(ctx, ctxManualKey{}, manual)
-					if err := deployStack(ctx, stackID); err != nil {
-						log.Printf("deploy: stack %d failed: %v", stackID, err)
-						return
-					}
-					log.Printf("deploy: stack %d ok", stackID)
-				}(id, manual)
-
-				writeJSON(w, http.StatusAccepted, map[string]any{
-					"status":  "queued",
-					"id":      id,
-					"manual":  manual,
-					"allowed": true,
-				})
-			})
-		})
-	})
-
-	// Legacy alias
-	r.Get("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		respondJSON(w, Health{Status: "ok", StartedAt: startedAt, Edition: "Community"})
-	})
-
-	// -------- Auth endpoints (must come BEFORE SPA fallback)
-	r.Get("/login", LoginHandler)
-	r.Get("/auth/login", LoginHandler) // alias
-	r.Get("/auth/callback", CallbackHandler)
-	r.Post("/logout", LogoutHandler)
-	r.Post("/auth/logout", LogoutHandler) // alias
-
-	// -------- Static SPA (Vite)
-	uiRoot := env("DDUI_UI_DIR", "/home/ddui/ui/dist")
-	fs := http.FileServer(http.Dir(uiRoot))
-
-	// Serve built assets directly
-	r.Get("/assets/*", func(w http.ResponseWriter, req *http.Request) {
-		fs.ServeHTTP(w, req)
-	})
-
-	// SPA fallback (last)
-	r.Get("/*", func(w http.ResponseWriter, req *http.Request) {
-		if strings.HasPrefix(req.URL.Path, "/api") || strings.HasPrefix(req.URL.Path, "/auth") {
-			http.NotFound(w, req)
-			return
-		}
-		path := filepath.Join(uiRoot, filepath.Clean(strings.TrimPrefix(req.URL.Path, "/")))
-		if info, err := os.Stat(path); err == nil && !info.IsDir() {
-			http.ServeFile(w, req, path)
-			return
-		}
-		http.ServeFile(w, req, filepath.Join(uiRoot, "index.html"))
-	})
-
-	return r
+/* -------- auto-scan loop (all hosts) -------- */
+
+func envBool(key, def string) bool {
+	v := strings.ToLower(env(key, def))
+	return v == "1" || v == "t" || v == "true" || v == "yes" || v == "on"
 }
-
-func respondJSON(w http.ResponseWriter, v any) {
-	w.Header().Set("Content-Type", "application/json")
-	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(v)
-}
-
-func parseIntDefault(s string, def int) int {
-	if s == "" {
-		return def
-	}
-	if n, err := strconv.Atoi(s); err == nil {
-		return n
-	}
-	return def
-}
-
-func clamp(v, lo, hi int) int {
-	if v < lo {
-		return lo
-	}
-	if v > hi {
-		return hi
-	}
-	return v
-}
-
-func parseDurationDefault(s string, def time.Duration) time.Duration {
-	if s == "" {
-		return def
-	}
-	if d, err := time.ParseDuration(s); err == nil {
+func envDur(key, def string) time.Duration {
+	if d, err := time.ParseDuration(env(key, def)); err == nil {
 		return d
 	}
+	out, _ := time.ParseDuration(def)
+	return out
+}
+func envInt(key string, def int) int {
+	if s := env(key, ""); s != "" {
+		if n, err := strconv.Atoi(s); err == nil {
+			return n
+		}
+	}
 	return def
 }
 
-// safe path join under repo root
-func joinUnder(root, rel string) (string, error) {
-	clean := filepath.Clean("/" + rel) // force absolute-clean then strip
-	clean = strings.TrimPrefix(clean, "/")
-	full := filepath.Join(root, clean)
-	r, err := filepath.Rel(root, full)
-	if err != nil || strings.HasPrefix(r, "..") {
-		return "", errors.New("outside root")
-	}
-	return full, nil
-}
-
-// --- Image repo/tag persistence helpers ---
-
-func upsertImageTag(ctx context.Context, host, id, repo, tag string) error {
-	_, err := db.Exec(ctx, `
-		INSERT INTO image_tags (host_name, image_id, repo, tag)
-		VALUES ($1, $2, $3, $4)
-		ON CONFLICT (host_name, image_id)
-		DO UPDATE SET repo=EXCLUDED.repo, tag=EXCLUDED.tag, last_seen=now();
-	`, host, id, repo, tag)
-	return err
-}
-
-func getImageTagMap(ctx context.Context, host string) (map[string][2]string, error) {
-	rows, err := db.Query(ctx, `SELECT image_id, repo, tag FROM image_tags WHERE host_name=$1`, host)
+// run one full pass across hosts with limited concurrency
+func scanAllOnce(ctx context.Context, perHostTO time.Duration, conc int) {
+	hostRows, err := ListHosts(ctx)
 	if err != nil {
-		return nil, err
+		log.Printf("scan: list hosts failed: %v", err)
+		return
 	}
-	defer rows.Close()
-	out := make(map[string][2]string)
-	for rows.Next() {
-		var id, repo, tag string
-		if err := rows.Scan(&id, &repo, &tag); err != nil {
-			return nil, err
-		}
-		out[id] = [2]string{repo, tag}
+	sem := make(chan struct{}, conc)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+
+	var total, scanned, skipped, failed int
+
+	for _, h := range hostRows {
+		h := h
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+
+			hctx, cancel := context.WithTimeout(ctx, perHostTO)
+			n, err := ScanHostContainers(hctx, h.Name)
+			cancel()
+
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				// treat intentional skips distinctly
+				if errors.Is(err, ErrSkipScan) {
+					skipped++
+					return
+				}
+				failed++
+				log.Printf("scan: host=%s error=%v", h.Name, err)
+				return
+			}
+			scanned++
+			total += n
+			log.Printf("scan: host=%s saved=%d", h.Name, n)
+		}()
 	}
-	return out, nil
+	wg.Wait()
+	log.Printf("scan: complete hosts=%d scanned=%d skipped=%d total_saved=%d errors=%d",
+		len(hostRows), scanned, skipped, total, failed)
 }
 
-func cleanupImageTags(ctx context.Context, host string, keepIDs map[string]struct{}) error {
-	ids := make([]string, 0, len(keepIDs))
-	for id := range keepIDs {
-		ids = append(ids, id)
+func startAutoScanner(ctx context.Context) {
+	if !envBool("DDUI_SCAN_DOCKER_AUTO", "true") {
+		log.Printf("scan: auto disabled (DDUI_SCAN_DOCKER_AUTO=false)")
+		return
 	}
-	_, err := db.Exec(ctx, `
-		DELETE FROM image_tags t
-		WHERE t.host_name = $1
-		  AND NOT EXISTS (
-		    SELECT 1
-		    FROM UNNEST($2::text[]) AS u(id)
-		    WHERE u.id = t.image_id
-		  );
-	`, host, ids)
-	return err
-}
+	interval := envDur("DDUI_SCAN_DOCKER_INTERVAL", "1m")
+	perHostTO := envDur("DDUI_SCAN_DOCKER_HOST_TIMEOUT", "45s")
+	conc := envInt("DDUI_SCAN_DOCKER_CONCURRENCY", 3)
 
-func humanSize(b int64) string {
-	const unit = 1024
-	if b < unit {
-		return strconv.FormatInt(b, 10) + " B"
-	}
-	div, exp := int64(unit), 0
-	for n := b / unit; n >= unit; n /= unit {
-		div *= unit
-		exp++
-	}
-	return strings.TrimSuffix(strings.TrimSpace(
-		strconv.FormatFloat(float64(b)/float64(div), 'f', 1, 64)), ".0") + " " + string("KMGTPE"[exp]) + "B"
-}
+	log.Printf("scan: auto enabled interval=%s host_timeout=%s conc=%d", interval, perHostTO, conc)
 
-/* ---------------- DevOps Apply helpers ---------------- */
-
-func isTrueish(s string) bool {
-	if s == "" {
-		return false
-	}
-	switch strings.ToLower(strings.TrimSpace(s)) {
-	case "1", "t", "true", "y", "yes", "on":
-		return true
-	}
-	return false
-}
-
-// app_settings: simple KV store
-func getAppSetting(ctx context.Context, key string) (string, bool) {
-	var v string
-	err := db.QueryRow(ctx, `SELECT value FROM app_settings WHERE key=$1`, key).Scan(&v)
-	if err != nil {
-		return "", false
-	}
-	return v, true
-}
-func setAppSetting(ctx context.Context, key, value string) error {
-	_, err := db.Exec(ctx, `
-		INSERT INTO app_settings (key, value) VALUES ($1,$2)
-		ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value, updated_at=now()
-	`, key, value)
-	return err
-}
-func delAppSetting(ctx context.Context, key string) error {
-	_, err := db.Exec(ctx, `DELETE FROM app_settings WHERE key=$1`, key)
-	return err
-}
-func getAppSettingBool(ctx context.Context, key string) (*bool, bool) {
-	if s, ok := getAppSetting(ctx, key); ok {
-		b := isTrueish(s)
-		return &b, true
-	}
-	return nil, false
-}
-
-// Global DevOps Apply (Auto DevOps) – DB override with ENV fallback
-func getGlobalDevopsApply(ctx context.Context) (bool, string) {
-	if b, ok := getAppSettingBool(ctx, "devops_apply"); ok && b != nil {
-		return *b, "db"
-	}
-	return envBool("DDUI_DEVOPS_APPLY", "false"), "env"
-}
-func setGlobalDevopsApply(ctx context.Context, v *bool) error {
-	if v == nil {
-		return delAppSetting(ctx, "devops_apply")
-	}
-	if *v {
-		return setAppSetting(ctx, "devops_apply", "true")
-	}
-	return setAppSetting(ctx, "devops_apply", "false")
-}
-
-// host_settings: per-host overrides
-func getHostDevopsOverride(ctx context.Context, host string) (*bool, error) {
-	var val *bool
-	err := db.QueryRow(ctx, `SELECT auto_apply_override FROM host_settings WHERE host_name=$1`, host).Scan(&val)
-	if err != nil {
-		return nil, nil // treat as absent
-	}
-	return val, nil
-}
-func setHostDevopsOverride(ctx context.Context, host string, v *bool) error {
-	if v == nil {
-		_, err := db.Exec(ctx, `DELETE FROM host_settings WHERE host_name=$1`, host)
-		return err
-	}
-	_, err := db.Exec(ctx, `
-		INSERT INTO host_settings (host_name, auto_apply_override)
-		VALUES ($1,$2)
-		ON CONFLICT (host_name) DO UPDATE SET auto_apply_override=EXCLUDED.auto_apply_override, updated_at=now()
-	`, host, *v)
-	return err
-}
-
-// group_settings: per-group overrides
-func getGroupDevopsOverride(ctx context.Context, group string) (*bool, error) {
-	var val *bool
-	err := db.QueryRow(ctx, `SELECT auto_apply_override FROM group_settings WHERE group_name=$1`, group).Scan(&val)
-	if err != nil {
-		return nil, nil // treat as absent
-	}
-	return val, nil
-}
-func setGroupDevopsOverride(ctx context.Context, group string, v *bool) error {
-	if v == nil {
-		_, err := db.Exec(ctx, `DELETE FROM group_settings WHERE group_name=$1`, group)
-		return err
-	}
-	_, err := db.Exec(ctx, `
-		INSERT INTO group_settings (group_name, auto_apply_override)
-		VALUES ($1,$2)
-		ON CONFLICT (group_name) DO UPDATE SET auto_apply_override=EXCLUDED.auto_apply_override, updated_at=now()
-	`, group, *v)
-	return err
-}
-
-// shouldAutoApply resolves effective Auto DevOps policy:
-// global -> (host|group) override -> stack override
-func shouldAutoApply(ctx context.Context, stackID int64) (bool, error) {
-	// Base: global
-	global, _ := getGlobalDevopsApply(ctx)
-
-	// Fetch stack scope + stack override
-	var scopeKind, scopeName string
-	var stackOv *bool
-	err := db.QueryRow(ctx, `
-		SELECT scope_kind::text, scope_name, auto_apply_override
-		FROM iac_stacks WHERE id=$1
-	`, stackID).Scan(&scopeKind, &scopeName, &stackOv)
-	if err != nil {
-		return false, errors.New("stack not found")
+	// optional boot scan
+	if envBool("DDUI_SCAN_DOCKER_ON_START", "true") {
+		go scanAllOnce(ctx, perHostTO, conc)
 	}
 
-	eff := global
-
-	switch strings.ToLower(scopeKind) {
-	case "host":
-		if hov, _ := getHostDevopsOverride(ctx, scopeName); hov != nil {
-			eff = *hov
-		}
-	case "group":
-		if gov, _ := getGroupDevopsOverride(ctx, scopeName); gov != nil {
-			eff = *gov
-		}
-	}
-
-	// Stack override wins if set
-	if stackOv != nil {
-		eff = *stackOv
-	}
-
-	return eff, nil
-}
-
-/* ---------- SSE + WS helpers ---------- */
-
-type sseLineWriter struct {
-	mu     sync.Mutex
-	w      http.ResponseWriter
-	fl     http.Flusher
-	stream string // "stdout" | "stderr"
-	buf    []byte
-}
-
-func (s *sseLineWriter) Write(p []byte) (int, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	s.buf = append(s.buf, p...)
-	for {
-		i := -1
-		for j, b := range s.buf {
-			if b == '\n' {
-				i = j
-				break
+	t := time.NewTicker(interval)
+	go func() {
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				scanAllOnce(ctx, perHostTO, conc)
+			case <-ctx.Done():
+				log.Printf("scan: auto scanner stopping: %v", ctx.Err())
+				return
 			}
 		}
-		if i == -1 {
-			break
-		}
-		line := string(s.buf[:i])
-		s.buf = s.buf[i+1:]
-		_, _ = s.w.Write([]byte("event: " + s.stream + "\n"))
-		_, _ = s.w.Write([]byte("data: " + line + "\n\n"))
-		s.fl.Flush()
+	}()
+}
+
+// ---- IaC auto-scan (local + apply) ----
+
+func startIacAutoScanner(ctx context.Context) {
+	if !envBool("DDUI_SCAN_IAC_AUTO", "true") {
+		log.Printf("iac: auto disabled (DDUI_SCAN_IAC_AUTO=false)")
+		return
 	}
-	return len(p), nil
+	interval := envDur("DDUI_SCAN_IAC_INTERVAL", "90s")
+	log.Printf("iac: auto enabled interval=%s", interval)
+
+	// initial scan on boot (non-fatal)
+	go func() {
+		if _, _, err := ScanIacLocal(ctx); err != nil {
+			log.Printf("iac: initial scan failed: %v", err)
+		}
+		if err := applyAutoDevOps(ctx); err != nil {
+			log.Printf("iac: initial apply failed: %v", err)
+		}
+	}()
+
+	t := time.NewTicker(interval)
+	go func() {
+		defer t.Stop()
+		for {
+			select {
+			case <-t.C:
+				if _, _, err := ScanIacLocal(ctx); err != nil {
+					log.Printf("iac: periodic scan failed: %v", err)
+				}
+				if err := applyAutoDevOps(ctx); err != nil {
+					log.Printf("iac: apply failed: %v", err)
+				}
+			case <-ctx.Done():
+				log.Printf("iac: auto scanner stopping: %v", ctx.Err())
+				return
+			}
+		}
+	}()
 }
 
-func writeSSEHeader(w http.ResponseWriter) (http.Flusher, bool) {
-	w.Header().Set("Content-Type", "text/event-stream")
-	w.Header().Set("Cache-Control", "no-store")
-	w.Header().Set("Connection", "keep-alive")
-	// Disable proxy buffering (nginx)
-	w.Header().Set("X-Accel-Buffering", "no")
-	fl, ok := w.(http.Flusher)
-	return fl, ok
+/* --- Auto DevOps evaluator (see comment in previous turn) --- */
+
+func applyAutoDevOps(ctx context.Context) error {
+	rows, err := db.Query(ctx, `SELECT id FROM iac_stacks`)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			continue
+		}
+		has, _ := stackHasContent(ctx, id)
+		if !has {
+			continue
+		}
+		allowed, err := shouldAutoApply(ctx, id)
+		if err != nil || !allowed {
+			continue
+		}
+		dctx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		_ = deployStack(dctx, id) // best effort; idempotent for compose
+		cancel()
+	}
+	return nil
 }
 
-var wsUpgrader = websocket.Upgrader{
-	ReadBufferSize:  32 * 1024,
-	WriteBufferSize: 32 * 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		// allow same-origin and configured UI origin
-		origin := strings.TrimSpace(r.Header.Get("Origin"))
-		ui := strings.TrimSpace(env("DDUI_UI_ORIGIN", ""))
-		if origin == "" || origin == ui {
-			return true
-		}
-		// dev helpers
-		if strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "http://127.0.0.1:") {
-			return true
-		}
-		return false
-	},
+/* -------- TLS self-signed helper -------- */
+
+func generateSelfSigned(cn string) ([]byte, []byte, error) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	serial, _ := rand.Int(rand.Reader, big.NewInt(1<<62))
+	tpl := x509.Certificate{
+		SerialNumber: serial,
+		Subject:      pkix.Name{CommonName: cn},
+		NotBefore:    time.Now().Add(-1 * time.Hour),
+		NotAfter:     time.Now().Add(365 * 24 * time.Hour),
+		KeyUsage:     x509.KeyUsageKeyEncipherment | x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth},
+		BasicConstraintsValid: true,
+		DNSNames:              []string{cn, "localhost"},
+		IPAddresses:           []net.IP{net.ParseIP("127.0.0.1")},
+	}
+
+	der, err := x509.CreateCertificate(rand.Reader, &tpl, &tpl, &key.PublicKey, key)
+	if err != nil {
+		return nil, nil, err
+	}
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	return certPEM, keyPEM, nil
+}
+
+
+// ui/src/views/HostsStacksView.tsx
+import { useEffect, useMemo, useState } from "react";
+import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
+import { ArrowLeft, ChevronRight, FileText, Activity, Bug, Pause, Play, PlayCircle, RefreshCw, RotateCw, Terminal, Trash2, ZapOff, Eye, EyeOff } from "lucide-react";
+import MetricCard from "@/components/MetricCard";
+import StatePill from "@/components/StatePill";
+import DriftBadge from "@/components/DriftBadge";
+import Fact from "@/components/Fact";
+import ActionBtn from "@/components/ActionBtn";
+import { ApiContainer, Host, IacService, IacStack, InspectOut, MergedRow, MergedStack } from "@/types";
+import { formatDT, formatPortsLines } from "@/utils/format";
+
+export default function HostStacksView({
+  host, onBack, onSync, onOpenStack,
+}: { host: Host; onBack: () => void; onSync: ()=>void; onOpenStack: (stackName: string, iacId?: number)=>void }) {
+  const [loading, setLoading] = useState(true);
+  const [err, setErr] = useState<string | null>(null);
+  const [stacks, setStacks] = useState<MergedStack[]>([]);
+  const [hostQuery, setHostQuery] = useState("");
+  const [logModal, setLogModal] = useState<{ ctr: string; text: string } | null>(null);
+
+  function matchRow(r: MergedRow, q: string) {
+    if (!q) return true;
+    const hay = [r.name, r.state, r.stack, r.imageRun, r.imageIac, r.ip, r.portsText, r.owner]
+      .filter(Boolean).join(" ").toLowerCase();
+    return hay.includes(q.toLowerCase());
+  }
+
+  async function doCtrAction(ctr: string, action: string) {
+    try {
+      await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(ctr)}/action`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action }),
+      });
+      onSync();
+      setStacks(prev => prev.map(s => ({
+        ...s,
+        rows: s.rows.map(r => r.name === ctr
+          ? { ...r, state: action === "pause" ? "paused" :
+                          action === "unpause" ? "running" :
+                          action === "stop" ? "exited" :
+                          action === "kill" ? "dead" :
+                          action === "remove" ? "removed" :
+                          action === "start" ? "running" :
+                          action === "restart" ? "restarting" : r.state }
+          : r)
+      })));
+    } catch (e) {
+      alert("Action failed");
+    }
+  }
+
+  async function openLogs(ctr: string) {
+    try {
+      const r = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(ctr)}/logs?tail=200`, { credentials: "include" });
+      const txt = await r.text();
+      setLogModal({ ctr, text: txt || "(no logs)" });
+    } catch {
+      setLogModal({ ctr, text: "(failed to load logs)" });
+    }
+  }
+
+  useEffect(() => {
+    let cancel = false;
+    (async () => {
+      setLoading(true); setErr(null);
+      try {
+        const [rc, ri] = await Promise.all([
+          fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`, { credentials: "include" }),
+          fetch(`/api/hosts/${encodeURIComponent(host.name)}/iac`, { credentials: "include" }),
+        ]);
+        if (rc.status === 401 || ri.status === 401) { window.location.replace("/auth/login"); return; }
+        const contJson = await rc.json();
+        const iacJson = await ri.json();
+        const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
+        const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
+
+        // Fetch per-stack effective Auto DevOps
+        const effMap: Record<number, boolean> = {};
+        await Promise.all(
+          (iacStacks || [])
+            .filter(s => typeof (s as any)?.id === "number")
+            .map(async (s) => {
+              try {
+                const r = await fetch(`/api/iac/stacks/${(s as any).id}`, { credentials: "include" });
+                if (!r.ok) return;
+                const j = await r.json();
+                if (j?.stack?.id) {
+                  effMap[j.stack.id] = !!j.stack.effective_auto_devops;
+                }
+              } catch { /* ignore per-stack errors */ }
+            })
+        );
+
+        const rtByStack = new Map<string, ApiContainer[]>();
+        for (const c of runtime) {
+          const key = (c.compose_project || c.stack || "(none)").trim() || "(none)";
+          if (!rtByStack.has(key)) rtByStack.set(key, []);
+          rtByStack.get(key)!.push(c);
+        }
+
+        const iacByStack = new Map<string, IacStack>();
+        for (const s of iacStacks) iacByStack.set(s.name, s);
+
+        const names = new Set<string>([...rtByStack.keys(), ...iacByStack.keys()]);
+        const merged: MergedStack[] = [];
+
+        for (const sname of Array.from(names).sort()) {
+          const rcs = rtByStack.get(sname) || [];
+          const is = iacByStack.get(sname);
+          const services: IacService[] = Array.isArray(is?.services) ? (is!.services as IacService[]) : [];
+          const hasIac = !!is && (services.length > 0 || !!is.compose);
+          const hasContent = !!is && (!!is.compose || services.length > 0);
+
+          const rows: MergedRow[] = [];
+
+          function desiredImageFor(c: ApiContainer): string | undefined {
+            if (!is || services.length === 0) return undefined;
+            const svc = services.find(x =>
+              (c.compose_service && x.service_name === c.compose_service) ||
+              (x.container_name && x.container_name === c.name)
+            );
+            return svc?.image || undefined;
+          }
+
+          for (const c of rcs) {
+            const portsLines = formatPortsLines((c as any).ports);
+            const portsText = portsLines.join("\n");
+            const desired = desiredImageFor(c);
+            const drift = !!(desired && desired.trim() && desired.trim() !== (c.image || "").trim());
+            rows.push({
+              name: c.name,
+              state: c.state,
+              stack: sname,
+              imageRun: c.image,
+              imageIac: desired,
+              created: formatDT(c.created_ts),
+              ip: c.ip_addr,
+              portsText,
+              owner: c.owner || "—",
+              drift,
+            });
+          }
+
+          if (is) {
+            for (const svc of services) {
+              const exists = rows.some(r => r.name === (svc.container_name || svc.service_name));
+              if (!exists) {
+                rows.push({
+                  name: svc.container_name || svc.service_name,
+                  state: "missing",
+                  stack: sname,
+                  imageRun: undefined,
+                  imageIac: svc.image,
+                  created: "—",
+                  ip: "—",
+                  portsText: "—",
+                  owner: "—",
+                  drift: true,
+                });
+              }
+            }
+          }
+
+          let stackDrift: "in_sync" | "drift" | "unknown" = "unknown";
+          if (hasIac) {
+            stackDrift = rows.some(r => r.drift) ? "drift" : "in_sync";
+          }
+
+          const effectiveAuto = (is && typeof (is as any).id === "number" && effMap[(is as any).id]) ? true : false;
+
+          merged.push({
+            name: sname,
+            drift: stackDrift,
+            iacEnabled: effectiveAuto,                      // <- switch reflects EFFECTIVE auto-devops
+            pullPolicy: hasIac ? is?.pull_policy : undefined,
+            sops: hasIac ? (is?.sops_status === "all") : false,
+            deployKind: hasIac ? (is?.deploy_kind || "compose") : (sname === "(none)" ? "unmanaged" : "unmanaged"),
+            rows,
+            iacId: (is as any)?.id,
+            hasIac,
+            hasContent,
+          });
+        }
+
+        if (!cancel) setStacks(merged);
+      } catch (e: any) {
+        if (!cancel) setErr(e?.message || "Failed to load host stacks");
+      } finally {
+        if (!cancel) setLoading(false);
+      }
+    })();
+    return () => { cancel = true; };
+  }, [host.name, onSync]);
+
+  async function createStackFlow() {
+    const existing = new Set(stacks.map(s => s.name));
+    let name = prompt("New stack name:");
+    if (!name) return;
+    name = name.trim();
+    if (!name) return;
+    if (existing.has(name)) { alert("A stack with that name already exists."); return; }
+    try {
+      const r = await fetch(`/api/iac/stacks`, {
+        method: "POST",
+        credentials: "include",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ scope_kind: "host", scope_name: host.name, stack_name: name, iac_enabled: false }),
+      });
+      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      const j = await r.json();
+      onOpenStack(name, j.id);
+    } catch (e: any) {
+      alert(e?.message || "Failed to create stack");
+    }
+  }
+
+  // PATCH the stack Auto DevOps OVERRIDE (decoupled from iac_enabled)
+  async function setAutoDevOps(id: number, enabled: boolean) {
+    const r = await fetch(`/api/iac/stacks/${id}`, {
+      method: "PATCH",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auto_devops: enabled }),
+    });
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  }
+
+  function handleToggleAuto(sIndex: number, enabled: boolean) {
+    const s = stacks[sIndex];
+    if (!s.iacId || !s.hasContent) {
+      if (enabled) {
+        alert("This stack needs compose files or services before Auto DevOps can be enabled. Add content first.");
+      }
+      return;
+    }
+    setStacks(prev => prev.map((row, i) => i === sIndex ? { ...row, iacEnabled: enabled } : row));
+    setAutoDevOps(s.iacId!, enabled).catch(err => {
+      alert(`Failed to update Auto DevOps: ${err?.message || err}`);
+      setStacks(prev => prev.map((row, i) => i === sIndex ? { ...row, iacEnabled: !enabled } : row));
+    });
+  }
+
+  async function deleteStackAt(index: number) {
+    const s = stacks[index];
+    if (!s.iacId) return;
+    if (!confirm(`Delete IaC for stack "${s.name}"? This removes IaC files/metadata but not runtime containers.`)) return;
+    const r = await fetch(`/api/iac/stacks/${s.iacId}`, { method: "DELETE", credentials: "include" });
+    if (!r.ok) { alert(`Failed to delete: ${r.status} ${r.statusText}`); return; }
+    setStacks(prev => prev.map((row, i) => i === index
+      ? { ...row, iacId: undefined, hasIac: false, iacEnabled: false, pullPolicy: undefined, sops: false, drift: "unknown", hasContent: false }
+      : row
+    ));
+  }
+
+  return (
+    <div className="space-y-4">
+      {/* Logs modal */}
+      {logModal && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4" onClick={() => setLogModal(null)}>
+          <div className="bg-slate-950 border border-slate-800 rounded-xl w-full max-w-3xl p-4" onClick={e => e.stopPropagation()}>
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-slate-200 font-semibold">Logs: {logModal.ctr}</div>
+              <Button size="sm" variant="outline" className="border-slate-700" onClick={() => setLogModal(null)}>Close</Button>
+            </div>
+            <pre className="text-xs text-slate-300 bg-slate-900 border border-slate-800 rounded p-3 max-h-[60vh] overflow-auto whitespace-pre-wrap">{logModal.text}</pre>
+          </div>
+        </div>
+      )}
+
+      <div className="flex items-center gap-2">
+        <Button variant="outline" className="border-slate-700 text-slate-200 hover:bg-slate-800" onClick={onBack}>
+          <ArrowLeft className="h-4 w-4 mr-1" /> Back to Deployments
+        </Button>
+        <div className="ml-2 text-lg font-semibold text-white">
+          {host.name} <span className="text-slate-400 text-sm">{host.address || ""}</span>
+        </div>
+        <div className="ml-auto flex items-center gap-2">
+          <Button onClick={onSync} className="bg-[#310937] hover:bg-[#2a0830] text-white">
+            <RefreshCw className="h-4 w-4 mr-1" /> Sync
+          </Button>
+          <Button onClick={createStackFlow} variant="outline" className="border-slate-700 text-slate-200">
+            <Eye className="hidden" /> {/* placeholder to avoid import shake issues */}
+            New Stack
+          </Button>
+          <div className="relative w-72">
+            <Input
+              value={hostQuery}
+              onChange={(e) => setHostQuery(e.target.value)}
+              placeholder={`Search ${host.name}…`}
+              className="pl-3 bg-slate-900/50 border-slate-800 text-slate-200 placeholder:text-slate-500"
+            />
+          </div>
+        </div>
+      </div>
+
+      {loading && <div className="text-sm px-3 py-2 rounded-lg border border-slate-800 bg-slate-900/60 text-slate-300">Loading stacks…</div>}
+      {err && <div className="text-sm px-3 py-2 rounded-lg border border-rose-800/50 bg-rose-950/50 text-rose-200">Error: {err}</div>}
+
+      {stacks.map((s, idx) => (
+        <Card key={`${host.name}:${s.name}:${idx}`} className="bg-slate-900/50 border-slate-800 rounded-xl">
+          <CardHeader className="pb-2 flex flex-row items-center justify-between">
+            <div className="space-y-1">
+              <CardTitle className="text-xl text-white">
+                <button className="hover:underline" onClick={() => onOpenStack(s.name, s.iacId)}>
+                  {s.name}
+                </button>
+              </CardTitle>
+              <div className="flex items-center gap-2">
+                {DriftBadge(s.drift)}
+                <Badge variant="outline" className="border-slate-700 text-slate-300">{s.deployKind || "unknown"}</Badge>
+                <Badge variant="outline" className="border-slate-700 text-slate-300">pull: {s.hasIac ? (s.pullPolicy || "—") : "—"}</Badge>
+                {s.hasIac ? (
+                  s.sops ? (
+                    <Badge className="bg-indigo-900/40 border-indigo-700/40 text-indigo-200">SOPS</Badge>
+                  ) : (
+                    <Badge variant="outline" className="border-slate-700 text-slate-300">no SOPS</Badge>
+                  )
+                ) : (
+                  <Badge variant="outline" className="border-slate-700 text-slate-300">No IaC</Badge>
+                )}
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              <span className="text-sm text-slate-300">Auto DevOps</span>
+              <Switch
+                checked={!!s.iacEnabled}
+                onCheckedChange={(v) => handleToggleAuto(idx, !!v)}
+                disabled={!s.iacId || !s.hasContent}
+              />
+              {s.iacId && (
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  title="Delete IaC for this stack"
+                  onClick={() => deleteStackAt(idx)}
+                >
+                  <Trash2 className="h-4 w-4 text-rose-300" />
+                </Button>
+              )}
+            </div>
+          </CardHeader>
+          <CardContent className="pt-0">
+            <div className="overflow-x-auto rounded-lg border border-slate-800">
+              <table className="w-full text-xs table-fixed">
+                <thead className="bg-slate-900/70 text-slate-300">
+                  <tr className="whitespace-nowrap">
+                    <th className="px-2 py-2 text-left w-56">Name</th>
+                    <th className="px-2 py-2 text-left w-36">State</th>
+                    <th className="px-2 py-2 text-left w-[24rem]">Image</th>
+                    <th className="px-2 py-2 text-left w-40">Created</th>
+                    <th className="px-2 py-2 text-left w-36">IP</th>
+                    <th className="px-2 py-2 text-left w-56">Published Ports</th>
+                    <th className="px-2 py-2 text-left w-32">Owner</th>
+                    <th className="px-2 py-2 text-left w-[18rem]">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {(s.rows.filter(r => matchRow(r, hostQuery))).map((r, i) => {
+                    const st = (r.state || "").toLowerCase();
+                    const isRunning = st.includes("running") || st.includes("up") || st.includes("healthy") || st.includes("restarting");
+                    const isPaused = st.includes("paused");
+                    return (
+                      <tr key={i} className="border-t border-slate-800 hover:bg-slate-900/40 align-top">
+                        <td className="px-2 py-1.5 font-medium text-slate-200 truncate">{r.name}</td>
+                        <td className="px-2 py-1.5 text-slate-300"><StatePill state={r.state} /></td>
+                        <td className="px-2 py-1.5 text-slate-300">
+                          <div className="flex items-center gap-2">
+                            <div className="max-w-[24rem] truncate" title={r.imageRun || ""}>{r.imageRun || "—"}</div>
+                            {r.imageIac && (
+                              <>
+                                <ChevronRight className="h-4 w-4 text-slate-500" />
+                                <div className={`max-w-[24rem] truncate ${r.drift ? "text-amber-300" : "text-slate-300"}`} title={r.imageIac}>
+                                  {r.imageIac}
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-300">{r.created || "—"}</td>
+                        <td className="px-2 py-1.5 text-slate-300">{r.ip || "—"}</td>
+                        <td className="px-2 py-1.5 text-slate-300 align-top">
+                          <div className="max-w-56 whitespace-pre-line leading-tight">
+                            {r.portsText || "—"}
+                          </div>
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-300">{r.owner || "—"}</td>
+                        <td className="px-2 py-1">
+                          <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap py-0.5">
+                            {!isRunning && !isPaused && (
+                              <ActionBtn title="Start" icon={Play} onClick={() => doCtrAction(r.name, "start")} />
+                            )}
+                            {isRunning && (
+                              <ActionBtn title="Stop" icon={Pause} onClick={() => doCtrAction(r.name, "stop")} />
+                            )}
+                            {(isRunning || isPaused) && (
+                              <ActionBtn title="Restart" icon={RotateCw} onClick={() => doCtrAction(r.name, "restart")} />
+                            )}
+                            {isRunning && !isPaused && (
+                              <ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />
+                            )}
+                            {isPaused && (
+                              <ActionBtn title="Resume" icon={PlayCircle} onClick={() => doCtrAction(r.name, "unpause")} />
+                            )}
+
+                            <span className="mx-1 h-4 w-px bg-slate-700/60" />
+
+                            <ActionBtn title="Logs" icon={FileText} onClick={() => openLogs(r.name)} />
+                            <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
+                            <ActionBtn
+                              title="Stats"
+                              icon={Activity}
+                              onClick={async () => {
+                                try {
+                                  const r2 = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(r.name)}/stats`, { credentials: "include" });
+                                  const txt = await r2.text();
+                                  setLogModal({ ctr: `${r.name} (stats)`, text: txt });
+                                } catch {
+                                  setLogModal({ ctr: `${r.name} (stats)`, text: "(failed to load stats)" });
+                                }
+                              }}
+                            />
+
+                            <span className="mx-1 h-4 w-px bg-slate-700/60" />
+
+                            <ActionBtn title="Kill" icon={ZapOff} onClick={() => doCtrAction(r.name, "kill")} />
+                            <ActionBtn title="Remove" icon={Trash2} onClick={() => doCtrAction(r.name, "remove")} />
+
+                            <ActionBtn title="Console (soon)" icon={Terminal} onClick={() => {}} disabled />
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {(!s.rows || s.rows.filter(r => matchRow(r, hostQuery)).length === 0) && (
+                    <tr><td className="p-3 text-slate-500" colSpan={8}>No containers or services.</td></tr>
+                  )}
+                </tbody>
+              </table>
+            </div>
+            <div className="pt-2 text-xs text-slate-400">
+              Tip: click the stack title to open the full compare & editor view.
+            </div>
+          </CardContent>
+        </Card>
+      ))}
+
+      <Card className="bg-slate-900/40 border-slate-800">
+        <CardContent className="py-4 flex flex-wrap items-center gap-3 text-sm text-slate-300">
+          Security by default:
+          <span className="px-2 py-1 rounded bg-slate-800/60 border border-slate-700">AGE key never persisted</span>
+          <span className="px-2 py-1 rounded bg-slate-800/60 border border-slate-700">Decrypt to tmpfs only</span>
+          <span className="px-2 py-1 rounded bg-slate-800/60 border border-slate-700">Redacted logs</span>
+          <span className="px-2 py-1 rounded bg-slate-800/60 border border-slate-700">Obscured paths</span>
+        </CardContent>
+      </Card>
+    </div>
+  );
 }

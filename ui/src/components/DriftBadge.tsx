@@ -1,3 +1,4 @@
+// ui/src/components/DriftBadge.tsx
 import { Badge } from "@/components/ui/badge";
 
 export default function DriftBadge(d: "in_sync" | "drift" | "unknown") {

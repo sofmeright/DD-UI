@@ -1,3 +1,4 @@
+// ui/src/components/Fact.tsx
 export default function Fact({ label, value }: { label: string; value: React.ReactNode }) {
     return (
       <div className="flex items-start gap-3">

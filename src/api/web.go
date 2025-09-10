@@ -16,6 +16,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -38,6 +39,15 @@ type Health struct {
 	StartedAt time.Time `json:"startedAt"`
 	Edition   string    `json:"edition"`
 }
+
+// ---- DDUI internal label constants (kept small & neutral) ----
+const (
+		dduiLabelManaged = "ddui.managed"
+		dduiLabelUID     = "ddui.uid"
+		dduiLabelSpec    = "ddui.spec_digest"
+		dduiLabelStackID = "ddui.stack_id"
+		dduiLabelService = "ddui.service"
+	)
 
 func makeRouter() http.Handler {
 	r := chi.NewRouter()
@@ -1955,6 +1965,33 @@ func buildDesiredSpec(ctx context.Context, stackID int64) (*desiredSpec, error) 
 
 /* ---------------------- helpers for desired spec ---------------------- */
 
+// computeServiceSpecDigest creates a stable hash of what "matters" for drift.
+// It includes project, files digest, service name, canonical image, container_name,
+// and sorted lists of ports/volumes/env keys.
+func computeServiceSpecDigest(project, filesDigest, svcName string, s desiredServiceSpec) string {
+		h := sha256.New()
+		write := func(parts ...string) {
+			for _, p := range parts {
+				io.WriteString(h, p)
+				io.WriteString(h, "\n")
+			}
+		}
+		write("v1", project, filesDigest, svcName, s.Image, s.ContainerName)
+		if len(s.Ports) > 0 {
+		cp := append([]string(nil), s.Ports...)
+			sort.Strings(cp); write(cp...)
+		}
+		if len(s.Volumes) > 0 {
+			cv := append([]string(nil), s.Volumes...)
+			sort.Strings(cv); write(cv...)
+		}
+		if len(s.EnvKeys) > 0 {
+			ck := append([]string(nil), s.EnvKeys...)
+			sort.Strings(ck); write(ck...)
+		}
+		return hex.EncodeToString(h.Sum(nil))
+	}
+
 // Merge env maps (b overwrites a)
 func mergeEnvs(a, b map[string]string) map[string]string {
 	    out := make(map[string]string, len(a)+len(b))
@@ -2252,5 +2289,6 @@ func envKeysOnly(v any) []string {
 			}
 		}
 	}
+	sort.Strings(keys)
 	return keys
 }

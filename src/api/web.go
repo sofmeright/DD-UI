@@ -432,66 +432,120 @@ func makeRouter() http.Handler {
 				}
 				defer cli.Close()
 
-				// command to start
-				cmdQ := strings.TrimSpace(r.URL.Query().Get("cmd"))
-				var cmd []string
-				if cmdQ != "" {
-					cmd = strings.Fields(cmdQ)
+				// Choose command: prefer explicit ?cmd, else ?shell, else auto
+				rawCmd := strings.TrimSpace(r.URL.Query().Get("cmd"))
+				shell := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("shell")))
+
+				var candidates [][]string
+				if rawCmd != "" {
+					candidates = [][]string{strings.Fields(rawCmd)}
 				} else {
-					cmd = []string{"/bin/sh"}
+					switch shell {
+					case "bash":
+						candidates = [][]string{{"/bin/bash"}, {"/usr/bin/bash"}}
+					case "ash":
+						candidates = [][]string{{"/bin/ash"}}
+					case "dash":
+						candidates = [][]string{{"/bin/dash"}}
+					case "sh":
+						candidates = [][]string{{"/bin/sh"}, {"sh"}}
+					default: // auto
+						candidates = [][]string{
+							{"/bin/bash"}, {"/usr/bin/bash"},
+							{"/bin/ash"},
+							{"/bin/dash"},
+							{"/bin/sh"}, {"sh"},
+						}
+					}
 				}
 
-				// create exec
-				execCfg := types.ExecConfig{
-					AttachStdin:  true,
-					AttachStdout: true,
-					AttachStderr: true,
-					Tty:          true,
-					Cmd:          cmd,
-					Env:          []string{},
-					WorkingDir:   "",
+				type runner struct {
+					id  string
+					att types.HijackedResponse
 				}
-				created, err := cli.ContainerExecCreate(r.Context(), ctr, execCfg)
-				if err != nil {
-					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: "+err.Error()))
+				var chosen *runner
+
+				tryCtx, cancelTry := context.WithTimeout(r.Context(), 6*time.Second)
+				defer cancelTry()
+
+				for _, cmd := range candidates {
+					created, cerr := cli.ContainerExecCreate(tryCtx, ctr, types.ExecConfig{
+						AttachStdin:  true,
+						AttachStdout: true,
+						AttachStderr: true,
+						Tty:          true,
+						Cmd:          cmd,
+						Env:          []string{},
+						WorkingDir:   "",
+					})
+					if cerr != nil || created.ID == "" {
+						continue
+					}
+
+					att, aerr := cli.ContainerExecAttach(tryCtx, created.ID, types.ExecStartCheck{Tty: true})
+					if aerr != nil {
+						continue
+					}
+
+					// Inspect quickly: if it already exited, treat as not available.
+					time.Sleep(150 * time.Millisecond) // tiny grace for startup
+					ins, ierr := cli.ContainerExecInspect(tryCtx, created.ID)
+					if ierr == nil && ins.Running {
+						chosen = &runner{id: created.ID, att: att}
+						break
+					}
+					// Not running (probably ENOENT / 127) — close & try next
+					_ = att.Close()
+				}
+
+				if chosen == nil {
+					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: no supported shell found (tried bash, ash, dash, sh)"))
 					return
 				}
+				defer chosen.att.Close()
 
-				att, err := cli.ContainerExecAttach(r.Context(), created.ID, types.ExecStartCheck{Tty: true})
-				if err != nil {
-					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: "+err.Error()))
-					return
-				}
-				defer att.Close()
-
-				// ws -> container stdin
-				go func() {
+				// WS -> container stdin (handles resize control messages)
+				go func(execID string) {
 					for {
 						mt, data, err := conn.ReadMessage()
 						if err != nil {
-							// half-close write if supported, else close
+							// half-close write if possible
 							type closer interface{ CloseWrite() error }
-							if cw, ok := att.Conn.(closer); ok {
+							if cw, ok := chosen.att.Conn.(closer); ok {
 								_ = cw.CloseWrite()
 							} else {
-								_ = att.Conn.Close()
+								_ = chosen.att.Conn.Close()
 							}
 							return
 						}
-						if mt == websocket.TextMessage || mt == websocket.BinaryMessage {
-							// optional resize messages are ignored for SDK compatibility
-							if strings.HasPrefix(string(data), `{"type":"resize"`) {
+						if mt != websocket.TextMessage && mt != websocket.BinaryMessage {
+							continue
+						}
+
+						// Optional resize: {"type":"resize","cols":80,"rows":24}
+						if len(data) > 10 && data[0] == '{' {
+							var msg struct {
+								Type string `json:"type"`
+								Cols int    `json:"cols"`
+								Rows int    `json:"rows"`
+							}
+							if err := json.Unmarshal(data, &msg); err == nil && strings.EqualFold(msg.Type, "resize") {
+								_ = cli.ContainerExecResize(context.Background(), execID, types.ResizeOptions{
+									Width:  uint(msg.Cols),
+									Height: uint(msg.Rows),
+								})
 								continue
 							}
-							_, _ = att.Conn.Write(data)
 						}
-					}
-				}()
 
-				// container stdout/err -> ws (binary)
+						_, _ = chosen.att.Conn.Write(data)
+					}
+				}(chosen.id)
+
+				// Container stdout/err -> WS (binary)
 				buf := make([]byte, 32*1024)
 				for {
-					n, err := att.Reader.Read(buf)
+					n, err := chosen.att.Reader.Read(buf)
 					if n > 0 {
 						_ = conn.WriteMessage(websocket.BinaryMessage, buf[:n])
 					}

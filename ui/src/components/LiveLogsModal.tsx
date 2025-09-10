@@ -1,5 +1,5 @@
 // ui/src/components/LiveLogsModal.tsx
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useRef, useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
 
 type Line = { stream: "stdout" | "stderr"; text: string };
@@ -15,11 +15,39 @@ export default function LiveLogsModal({
 }) {
   const [lines, setLines] = useState<Line[]>([]);
   const [paused, setPaused] = useState(false);
+  const [autoScroll, setAutoScroll] = useState(true); // default ON
   const boxRef = useRef<HTMLDivElement | null>(null);
   const esRef = useRef<EventSource | null>(null);
 
+  const scrollToBottom = useCallback(() => {
+    if (!boxRef.current) return;
+    boxRef.current.scrollTop = boxRef.current.scrollHeight;
+  }, []);
+
+  // Toggle autoScroll OFF if user manually scrolls up
   useEffect(() => {
-    if (paused) return;
+    const el = boxRef.current;
+    if (!el) return;
+
+    const onScroll = () => {
+      if (!el) return;
+      const nearBottom = el.scrollTop + el.clientHeight >= el.scrollHeight - 40;
+      if (autoScroll !== nearBottom) {
+        // If user moved away from bottom, disable autoScroll; if they return, re-enable
+        setAutoScroll(nearBottom);
+      }
+    };
+    el.addEventListener("scroll", onScroll, { passive: true });
+    return () => el.removeEventListener("scroll", onScroll);
+  }, [autoScroll]);
+
+  useEffect(() => {
+    if (paused) {
+      // ensure any existing stream is closed
+      try { esRef.current?.close(); } catch {}
+      esRef.current = null;
+      return;
+    }
 
     const url = `/api/hosts/${encodeURIComponent(host)}/containers/${encodeURIComponent(
       container
@@ -29,16 +57,15 @@ export default function LiveLogsModal({
 
     const push = (stream: "stdout" | "stderr") => (ev: MessageEvent<string>) => {
       const text = ev.data ?? "";
-      // chunk into individual lines if needed (SSE events are already line-based, but safe)
       const parts = text.split(/\r?\n/);
       setLines((prev) => {
         const next = prev.concat(parts.map((t) => ({ stream, text: t })));
         // keep last 2000 lines
         return next.length > 2000 ? next.slice(next.length - 2000) : next;
       });
-      // auto-scroll
-      if (boxRef.current) {
-        boxRef.current.scrollTop = boxRef.current.scrollHeight;
+      if (autoScroll) {
+        // let DOM paint the new nodes, then snap to bottom
+        requestAnimationFrame(scrollToBottom);
       }
     };
 
@@ -46,13 +73,13 @@ export default function LiveLogsModal({
     es.addEventListener("stderr", push("stderr"));
 
     es.onerror = () => {
-      // Network hiccup: allow EventSource to auto-retry; if it closes, user can close/reopen.
+      // Let EventSource auto-retry; if the server closes, user can reopen.
     };
 
     return () => {
       try { es.close(); } catch {}
     };
-  }, [host, container, paused]);
+  }, [host, container, paused, autoScroll, scrollToBottom]);
 
   const copyAll = async () => {
     const txt = lines.map((l) => l.text).join("\n");
@@ -65,6 +92,12 @@ export default function LiveLogsModal({
         <div className="flex items-center justify-between mb-2">
           <div className="text-slate-200 font-semibold">
             Live Logs: <span className="text-slate-400">{host}</span> / <span className="text-slate-400">{container}</span>
+            <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-800/60 border border-slate-700 text-slate-300">
+              {paused ? "paused" : "streaming"}
+            </span>
+            <span className="ml-2 text-xs px-2 py-0.5 rounded bg-slate-800/60 border border-slate-700 text-slate-300">
+              {autoScroll ? "auto-scroll" : "free scroll"}
+            </span>
           </div>
           <div className="flex items-center gap-2">
             <Button
@@ -74,6 +107,15 @@ export default function LiveLogsModal({
               onClick={() => setPaused((p) => !p)}
             >
               {paused ? "Resume" : "Pause"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              className="border-slate-700"
+              onClick={() => setAutoScroll((v) => !v)}
+              title="Toggle following the newest lines"
+            >
+              {autoScroll ? "Free scroll" : "Follow newest"}
             </Button>
             <Button size="sm" variant="outline" className="border-slate-700" onClick={copyAll}>
               Copy

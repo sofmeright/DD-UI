@@ -38,6 +38,10 @@
 ---
 
 ## What DDUI does today
+- Docker Management: Start/Stop/Pause/Resume/Kill containers.
+- View live logs of any container.
+- Initiate a terminal session in a container. Uses xterm for a really rich experience in the shell.
+- Edit docker compose, .env, and scripts. Application implements monaco editor (editor used in vscode) for a no compromise experience compared to other Docker management tools.
 - **Inventory**: list hosts; drill into a host to see stacks/containers.
 - **Sync**: one click triggers:
   - **IaC scan** (local repo), and
@@ -53,13 +57,22 @@
 
 ### Planned / WIP highlights
 
-- Safer change workflows (preview/validate/apply).
-- Additional inventory backends.
+- Testing / validating multi host docker features.
+- Urls in the navbar and forward and backwards browser navigation.
+- Perhaps a local admin user.
+- Urls in the navbar and browser navigation; forward/back, by url.
+- Bug when a file is open outside DDUI it can create an empty temp file next to the file after saving.
+- Make the GUIs more responsive especially when things are changed by DDUI itself.
+- Cache names (and prior tags) for images in the DB for the case when images become orphaned / stranded and they might show as unnamed untagged.
 - Bugfixes
 - Further Testing
-- UI Refreshes
+- UI Refreshes outside the deployments sections.
+- A settings menu.
+- A theme menu.
+- Whatever idea I have that I suddenly think we can not live without!
 
 Features are evolving; treat all APIs and UI as unstable for now.
+Environment Variables are unlikely to change.
 
 ---
 
@@ -75,55 +88,10 @@ Features are evolving; treat all APIs and UI as unstable for now.
   - Host detail (stacks, drift, per-host search).
   - “Reveal SOPS” UX sends an explicit confirmation header to the backend.
 
-> **Note (history)**: an earlier doc mentioned a “Rust-based orchestrator skeleton.” The production backend is Go; that blurb captured the original idea but the current code is Go.
-
 ---
 
-## Requirements
-- Docker reachable from the DDUI backend to each host you list (TCP or local socket).
-- PostgreSQL 14+
-- Node 18+ (for dev UI), Go 1.21+ (backend)
-- OIDC provider (tested with Zitadel) or run in “local only” with `/api/session` returning no user (login page will redirect).
-- **SOPS 3.10+** available on the backend host/container (DDUI calls `sops` by name).  
-  The provided Docker image installs it to `/usr/local/bin/sops`.
 
----
-
-## Quick start (developer mode)
-> Best for hacking on the UI/API locally.
-
-1) **Postgres**
-```bash
-docker run -d --name ddui-pg -p 5432:5432 \
-  -e POSTGRES_PASSWORD=devpass -e POSTGRES_USER=ddui -e POSTGRES_DB=ddui \
-  postgres:15
-```
-Set `DATABASE_URL` for the backend:
-```bash
-export DATABASE_URL=postgres://ddui:devpass@localhost:5432/ddui?sslmode=disable
-```
-
-2) **OIDC (Zitadel example)**  
-Create an OAuth 2.0 Web client:
-- Redirect URL: `https://your-ddui.example.com/auth/callback` (or `http://localhost:8080/auth/callback` for dev)
-- (Optional) Post-logout redirect: `http://localhost:8080/`
-- Scopes: `openid email profile`
-
-Environment (dev):
-```bash
-export OIDC_ISSUER_URL="https://<your-zitadel-domain>/.well-known/openid-configuration"
-export OIDC_CLIENT_ID="<client-id>"
-export OIDC_CLIENT_SECRET="<client-secret>"    # supports "@/path/to/secret"
-export OIDC_REDIRECT_URL="http://localhost:8080/auth/callback"
-# Optional hardening / ergonomics
-export OIDC_SCOPES="openid email profile"
-export OIDC_ALLOWED_EMAIL_DOMAIN=""            # e.g. "example.com" to restrict
-export COOKIE_DOMAIN=""                         # e.g. ".example.com" in prod
-# If unset, DDUI infers COOKIE_SECURE from the redirect URL scheme
-# export COOKIE_SECURE=true|false
-```
-
-3) **Point DDUI at your IaC repo (local)**  
+**Point DDUI at your IaC repo (local)**  
 Mount or place your repo under a root (default `/data`) with this layout:
 ```bash
 /data/
@@ -139,28 +107,11 @@ Mount or place your repo under a root (default `/data`) with this layout:
 
 Env (if you customize):
 ```bash
-export DDUI_IAC_ROOT="/data"
-export DDUI_IAC_DIRNAME="docker-compose"
+DDUI_IAC_ROOT="/data"
+DDUI_IAC_DIRNAME="docker-compose"
 # Gated decrypt is OFF by default; see SOPS section below to enable carefully.
-# export DDUI_ALLOW_SOPS_DECRYPT=true
+# DDUI_ALLOW_SOPS_DECRYPT=true
 ```
-
-4) **Run backend**
-```bash
-cd src/api
-go run .
-# or: go build -o ddui && ./ddui
-```
-The backend runs DB migrations automatically at startup (ensure `DATABASE_URL` is set).
-
-5) **Run frontend**
-```bash
-cd ui
-pnpm install
-pnpm dev
-```
-Visit `http://localhost:5173` (or the port Vite prints).  
-In production, the Go server serves the built UI; during dev it’s fine to run separately.
 
 ---
 
@@ -291,17 +242,12 @@ secrets:
 
 ### `.env` file
 ```.env
-OIDC_CLIENT_ID=
-OIDC_CLIENT_SECRET=
-# You can generate the Session Secret via DDUI_SESSION_SECRET="$(openssl rand -hex 64)".
-DDUI_SESSION_SECRET=
-POSTGRES_USER=
-POSTGRES_DB=
-# Optional: advertise your dev UI origin so CORS allows credentials
-# UI_ORIGIN=http://localhost:5173
+POSTGRES_USER=prplanit
+POSTGRES_DB=ddui
+SOPS_AGE_RECIPIENTS=<placeyourkeyhere>
 ```
 
-Nginx Example:
+### `Nginx` Example:
 ```
 map $http_upgrade $connection_upgrade {
     default upgrade;
@@ -394,6 +340,65 @@ server {
   }
 }
 ```
+
+## Quick start (developer mode)
+> Best for hacking on the UI/API locally.
+
+## Requirements
+- Docker reachable from the DDUI backend to each host you list (TCP or local socket).
+- PostgreSQL 14+
+- Node 18+ (for dev UI), Go 1.21+ (backend)
+- OIDC provider (tested with Zitadel) or run in “local only” with `/api/session` returning no user (login page will redirect).
+- **SOPS 3.10+** available on the backend host/container (DDUI calls `sops` by name).  
+  The provided Docker image installs it to `/usr/local/bin/sops`.
+
+1) **Postgres**
+```bash
+docker run -d --name ddui-pg -p 5432:5432 \
+  -e POSTGRES_PASSWORD=devpass -e POSTGRES_USER=ddui -e POSTGRES_DB=ddui \
+  postgres:15
+```
+Set `DATABASE_URL` for the backend:
+```bash
+export DATABASE_URL=postgres://ddui:devpass@localhost:5432/ddui?sslmode=disable
+```
+
+2) **OIDC (Zitadel example)**  
+Create an OAuth 2.0 Web client:
+- Redirect URL: `https://your-ddui.example.com/auth/callback` (or `http://localhost:8080/auth/callback` for dev)
+- (Optional) Post-logout redirect: `http://localhost:8080/`
+- Scopes: `openid email profile`
+
+Environment (dev):
+```bash
+export OIDC_ISSUER_URL="https://<your-zitadel-domain>/.well-known/openid-configuration"
+export OIDC_CLIENT_ID="<client-id>"
+export OIDC_CLIENT_SECRET="<client-secret>"    # supports "@/path/to/secret"
+export OIDC_REDIRECT_URL="http://localhost:8080/auth/callback"
+# Optional hardening / ergonomics
+export OIDC_SCOPES="openid email profile"
+export OIDC_ALLOWED_EMAIL_DOMAIN=""            # e.g. "example.com" to restrict
+export COOKIE_DOMAIN=""                         # e.g. ".example.com" in prod
+# If unset, DDUI infers COOKIE_SECURE from the redirect URL scheme
+# export COOKIE_SECURE=true|false
+```
+
+3) **Run backend**
+```bash
+cd src/api
+go run .
+# or: go build -o ddui && ./ddui
+```
+The backend runs DB migrations automatically at startup (ensure `DATABASE_URL` is set).
+
+4) **Run frontend**
+```bash
+cd ui
+pnpm install
+pnpm dev
+```
+Visit `http://localhost:5173` (or the port Vite prints).  
+In production, the Go server serves the built UI; during dev it’s fine to run separately.
 
 Build the UI once:
 ```bash

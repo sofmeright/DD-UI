@@ -1,10 +1,9 @@
-// ui/src/views/StackDetailView.tsx
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import { ArrowLeft, ChevronRight, Eye, EyeOff, RefreshCw, RotateCw, Trash2 } from "lucide-react";
+import { ArrowLeft, ChevronRight, Eye, EyeOff, RefreshCw, Trash2, Rocket } from "lucide-react";
 import Fact from "@/components/Fact";
 import MiniEditor from "@/editors/MiniEditor";
 import StatePill from "@/components/StatePill";
@@ -219,10 +218,8 @@ function NetworksBlock({ c }: { c: InspectOut }) {
 
 function ContainerCard({
   c,
-  onToggleDeploy,
 }: {
   c: InspectOut;
-  onToggleDeploy?: () => void;
 }) {
   const [revealEnvAll, setRevealEnvAll] = useState(false);
 
@@ -235,9 +232,6 @@ function ContainerCard({
 
   const statusText = (c as any).state || (c as any).status || "unknown";
 
-  const created = (c as any).created || (c as any).created_at || "";
-  const started = (c as any).started || (c as any).started_at || (c as any).start_time || "";
-
   return (
     <div className="rounded-lg border border-slate-800 p-3 space-y-3">
       {/* Header with name and status pill */}
@@ -246,7 +240,7 @@ function ContainerCard({
         <div><StatePill state={statusText} /></div>
       </div>
 
-      {/* Top details: Image, Ports, Restart policy — each on its own line */}
+      {/* Top details: Image, Ports */}
       <div className="space-y-1">
         <RowShell index={0}>
           <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Image</div>
@@ -258,7 +252,7 @@ function ContainerCard({
         </RowShell>
       </div>
 
-      {/* GENERAL collapsible: ID, Created, Start time, CMD, ENTRYPOINT (no Name/Status) */}
+      {/* GENERAL collapsible */}
       <CollapsibleSection title="General" defaultOpen={false}>
         <div className="space-y-1">
           <RowShell index={0}>
@@ -305,7 +299,7 @@ function ContainerCard({
         </div>
       </CollapsibleSection>
 
-      {/* Environment with per-container bulk reveal toggle (right corner, left of count) */}
+      {/* Environment with per-container bulk reveal toggle */}
       <CollapsibleSection
         title="Environment Variables"
         count={envCount}
@@ -350,7 +344,7 @@ function ContainerCard({
         )}
       </CollapsibleSection>
 
-      {/* Networks (between Labels and Volumes) */}
+      {/* Networks */}
       <CollapsibleSection title="Networks" count={netsCount}>
         <NetworksBlock c={c} />
       </CollapsibleSection>
@@ -500,6 +494,14 @@ export default function StackDetailView({
 
   const hasContent = files.some(f => f.role === "compose") || files.length > 0;
 
+  // "New file" helpers: open blank editor with base dir if default exists; otherwise prefill default full path.
+  function openNewFile(baseDir: string, defaultName: string) {
+    const base = `docker-compose/${host.name}/${stackName}/`;
+    const defaultPath = `${base}${defaultName}`;
+    const exists = files.some(f => f.rel_path === defaultPath);
+    setEditPath(exists ? baseDir : defaultPath);
+  }
+
   return (
     <div className="space-y-4">
       <div className="flex items-center gap-2">
@@ -508,21 +510,12 @@ export default function StackDetailView({
         </Button>
         <div className="ml-2 text-lg font-semibold text-white">Stack: {stackName}</div>
         <div className="ml-auto flex items-center gap-3">
-          <Button onClick={deployNow} disabled={deploying || !hasContent} className="bg-emerald-800 hover:bg-emerald-900 text-white disabled:opacity-50">
-            <RotateCw className={`h-4 w-4 mr-1 ${deploying ? "animate-spin" : ""}`} />
-            {deploying ? "Deploying..." : "Deploy"}
-          </Button>
           <span className="text-sm text-slate-300">Auto DevOps</span>
           <Switch checked={autoDevOps} onCheckedChange={(v) => toggleAutoDevOps(!!v)} />
           {stackIacId ? (
-            <>
-              <Button onClick={refreshFiles} variant="outline" className="border-slate-700">
-                <RefreshCw className="h-4 w-4 mr-1" /> Refresh
-              </Button>
-              <Button onClick={deleteStack} variant="outline" className="border-rose-700 text-rose-200">
-                <Trash2 className="h-4 w-4 mr-1" /> Delete IaC
-              </Button>
-            </>
+            <Button onClick={refreshFiles} variant="outline" className="border-slate-700">
+              <RefreshCw className="h-4 w-4 mr-1" /> Refresh
+            </Button>
           ) : null}
         </div>
       </div>
@@ -555,12 +548,7 @@ export default function StackDetailView({
           <Card className="bg-slate-900/50 border-slate-800 h-full flex flex-col">
             <CardHeader className="pb-2 shrink-0 flex flex-row items-center justify-between">
               <CardTitle className="text-slate-200 text-lg">IaC Files</CardTitle>
-              {stackIacId && hasContent && (
-                <Button onClick={deployNow} disabled={deploying} size="sm" className="bg-emerald-800 hover:bg-emerald-900 text-white">
-                  <RotateCw className={`h-4 w-4 mr-1 ${deploying ? "animate-spin" : ""}`} />
-                  Deploy
-                </Button>
-              )}
+              {/* Removed redundant Deploy button from header */}
             </CardHeader>
             <CardContent className="flex-1 min-h-0 flex flex-col gap-3">
               {!stackIacId && (
@@ -571,9 +559,49 @@ export default function StackDetailView({
               <div className="flex items-center justify-between shrink-0">
                 <div className="text-slate-300 text-sm">{files.length} file(s)</div>
                 <div className="flex items-center gap-2">
-                  <Button size="sm" onClick={() => setEditPath(`docker-compose/${host.name}/${stackName}/docker-compose.yaml`)}>New compose</Button>
-                  <Button size="sm" variant="outline" className="border-slate-700" onClick={() => setEditPath(`docker-compose/${host.name}/${stackName}/.env`)}>New env</Button>
-                  <Button size="sm" variant="outline" className="border-slate-700" onClick={() => setEditPath(`docker-compose/${host.name}/${stackName}/deploy.sh`)}>New script</Button>
+                  <Button
+                    size="sm"
+                    onClick={() => openNewFile(`docker-compose/${host.name}/${stackName}/`, "docker-compose.yaml")}
+                  >
+                    New compose
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-slate-700"
+                    onClick={() => openNewFile(`docker-compose/${host.name}/${stackName}/`, ".env")}
+                  >
+                    New env
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-slate-700"
+                    onClick={() => openNewFile(`docker-compose/${host.name}/${stackName}/`, "deploy.sh")}
+                  >
+                    New script
+                  </Button>
+
+                  {/* Move Delete IaC to the toolbar, left of Deploy */}
+                  {stackIacId ? (
+                    <Button onClick={deleteStack} variant="outline" className="border-rose-700 text-rose-200">
+                      <Trash2 className="h-4 w-4 mr-1" /> Delete IaC
+                    </Button>
+                  ) : null}
+
+                  {/* Deploy sits to the right of New Script (and Delete IaC) */}
+                  {hasContent && (
+                    <Button
+                      onClick={deployNow}
+                      disabled={deploying}
+                      size="sm"
+                      className="bg-emerald-800 hover:bg-emerald-900 text-white"
+                      title="Deploy this stack"
+                    >
+                      <Rocket className={`h-4 w-4 mr-1 ${deploying ? "animate-spin" : ""}`} />
+                      {deploying ? "Deploying..." : "Deploy"}
+                    </Button>
+                  )}
                 </div>
               </div>
 
@@ -632,6 +660,7 @@ export default function StackDetailView({
                     stackId={stackIacId}
                     ensureStack={ensureStack}
                     refresh={() => { setEditPath(null); refreshFiles(); }}
+                    fileMeta={files.find(f => f.rel_path === editPath)}
                   />
                 </div>
               )}

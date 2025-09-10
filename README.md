@@ -1,6 +1,20 @@
 # <img src="ui/public/DDUI-Logo.png" alt="DDUI (Designated Driver UI)" width="35" height="35" /> DDUI (Designated Driver UI)
 > Declarative, security-first Docker orchestration. DDUI compares runtime state (containers on your hosts) to declared state (your IaC repo), shows drift, and puts encryption (SOPS/AGE) and DevOps ergonomics first.
 
+## What is DDUI?
+- Designated Driver UI is a Docker Managment Engine that puts DevOps and Encryption first.
+- DDUI seeks to ease the adoption of Infrastructure as Code and make it less intimidating for users to encrypt their secrets and sensitive docker values.
+  - DDUI discovers your hosts via an ansible inventory file and stores and processes a standardized compose/.env/script folder layout.
+    - This means the state of your deployments is decoupled from the application and can be edited in any editor of your choice and DDUI will automatically redeploy the app when IaC files change.
+  - DDUI also allows you to decrypt/encrypt any IaC related file and deploy from it automatically if it exists with the decryption key.
+    - This is good for those who like to stream while working on their servers or want to upload their compose and env to a repo as they can be uploaded encrypted and ddui can actually deploy them if they are ever cloned and placed in its watch folder.
+      - There are plans for DDUI to connect directly to a git repository.
+- DDUI seeks to bring the rewards of the DevOps mindset to those who may not have afforded them otherwise.
+- DDUI implements much of the features of other Docker GUIs and includes some industry tools like xterm 🔥 and monaco (editor used in vscode 🎉) to ensure a rich experience for the user.
+- DDUI is free forever, for non-commercial and home use. You can inquire for a commercial license. If you find us interesting feel free to give us a pull @ prplanit/ddui on the Docker Hub. 
+- We currently have a functional solution for the localhost. We plan to support an infinite number of hosts and much of the features were planned ahead it just takes times.
+#### Thank you for your support!
+
 <img src="example/screenshots/DDUI-Decrypted-Deployed.png" width="500" /><img src="example/screenshots/DDUI-Host-Stack_Detail-Collapsed.png" width="500" />
 <img src="example/screenshots/DDUI-Host-Stack_Detail-Expanded.png" width="500" /><img src="example/screenshots/DDUI-Host-Stacks.png" width="500" />
 <img src="example/screenshots/DDUI-Hosts.png" width="500" /><img src="example/screenshots/DDUI-Images.png" width="500" />

@@ -7,35 +7,19 @@ import { Switch } from "@/components/ui/switch";
 import { ArrowLeft, ChevronRight, Eye, EyeOff, RefreshCw, RotateCw, Trash2 } from "lucide-react";
 import Fact from "@/components/Fact";
 import MiniEditor from "@/editors/MiniEditor";
+import StatePill from "@/components/StatePill";
 import { ApiContainer, Host, IacFileMeta, InspectOut } from "@/types";
 import { formatDT } from "@/utils/format";
 
-/* ---------- Shared row primitives (unify font/spacing/columns) ---------- */
+/* ---------- Shared row primitives (uniform font/spacing/columns) ---------- */
 
-function RowShell({
-  children,
-  index,
-}: {
-  children: React.ReactNode;
-  index: number;
-}) {
-  // Alternating shading for eye-tracking
+function RowShell({ children, index }: { children: React.ReactNode; index: number }) {
   const zebra = index % 2 === 0 ? "bg-slate-900/30" : "bg-slate-900/10";
-  return (
-    <div className={`grid grid-cols-12 items-center gap-2 px-2 py-1.5 rounded ${zebra}`}>
-      {children}
-    </div>
-  );
+  return <div className={`grid grid-cols-12 items-center gap-2 px-2 py-1.5 rounded ${zebra}`}>{children}</div>;
 }
 
-// Readonly, scroll-on-focus input (cuts off visually, but scrolls when highlighted)
-function ValueBox({
-  value,
-  title,
-}: {
-  value: string;
-  title?: string;
-}) {
+// Readonly, scroll-on-focus input (truncates visually, scrolls on selection)
+function ValueBox({ value, title }: { value: string; title?: string }) {
   return (
     <input
       readOnly
@@ -46,6 +30,46 @@ function ValueBox({
     />
   );
 }
+
+/* ---------- Collapsible wrapper with right-side actions ---------- */
+
+function CollapsibleSection({
+  title,
+  count,
+  rightAction,
+  children,
+  defaultOpen = false,
+}: {
+  title: string;
+  count?: number;
+  rightAction?: React.ReactNode;
+  children: React.ReactNode;
+  defaultOpen?: boolean;
+}) {
+  const [open, setOpen] = useState(defaultOpen);
+  return (
+    <div className="border border-slate-800 rounded-lg">
+      <button
+        type="button"
+        className="w-full flex items-center justify-between px-3 py-2 hover:bg-slate-900/40"
+        onClick={() => setOpen((o) => !o)}
+        aria-expanded={open}
+      >
+        <div className="flex items-center gap-2">
+          <ChevronRight className={`h-4 w-4 text-slate-400 transition-transform ${open ? "rotate-90" : ""}`} />
+          <div className="text-xs uppercase tracking-wide text-slate-400">{title}</div>
+        </div>
+        <div className="flex items-center gap-2">
+          {rightAction}
+          {typeof count === "number" && <Badge variant="outline" className="border-slate-700 text-slate-300">{count}</Badge>}
+        </div>
+      </button>
+      {open && <div className="px-3 pb-3 pt-1">{children}</div>}
+    </div>
+  );
+}
+
+/* ---------- Sections (Env, Labels, Networks, Ports, Volumes) ---------- */
 
 function EnvRow({
   k,
@@ -84,15 +108,7 @@ function EnvRow({
   );
 }
 
-function LabelRow({
-  k,
-  v,
-  index,
-}: {
-  k: string;
-  v: string;
-  index: number;
-}) {
+function LabelRow({ k, v, index }: { k: string; v: string; index: number }) {
   return (
     <RowShell index={index}>
       <div className="col-span-4 text-slate-300 text-sm font-medium break-words">{k}</div>
@@ -102,8 +118,6 @@ function LabelRow({
     </RowShell>
   );
 }
-
-/* ---------- Facts + ports remain as before ---------- */
 
 function PortsBlock({ ports }: { ports?: InspectOut["ports"] }) {
   const list = ports || [];
@@ -120,8 +134,6 @@ function PortsBlock({ ports }: { ports?: InspectOut["ports"] }) {
     </div>
   );
 }
-
-/* ---------- Volumes: 3 uniform columns with explicit mapping ---------- */
 
 function VolsBlock({ vols }: { vols?: InspectOut["volumes"] }) {
   const list = vols || [];
@@ -145,40 +157,213 @@ function VolsBlock({ vols }: { vols?: InspectOut["volumes"] }) {
   );
 }
 
-/* ---------- Collapsible wrapper ---------- */
+type NetRow = { name: string; ip?: string; gateway?: string; mac?: string };
 
-function CollapsibleSection({
-  title,
-  count,
-  children,
-  defaultOpen = false,
-}: {
-  title: string;
-  count?: number;
-  children: React.ReactNode;
-  defaultOpen?: boolean;
-}) {
-  const [open, setOpen] = useState(defaultOpen);
+function normalizeNetworks(c: InspectOut): NetRow[] {
+  const anyC: any = c as any;
+
+  // Preferred shapes
+  if (Array.isArray(anyC.networks_detail)) {
+    return anyC.networks_detail.map((n: any) => ({
+      name: n.name ?? "",
+      ip: n.ip ?? n.ip_address ?? n.ipv4 ?? "",
+      gateway: n.gateway ?? "",
+      mac: n.mac ?? n.mac_address ?? "",
+    }));
+  }
+  if (anyC.networks_map && typeof anyC.networks_map === "object") {
+    return Object.entries(anyC.networks_map).map(([name, n]: any) => ({
+      name,
+      ip: n?.ip ?? n?.ip_address ?? n?.IPAddress ?? "",
+      gateway: n?.gateway ?? n?.Gateway ?? "",
+      mac: n?.mac ?? n?.mac_address ?? n?.MacAddress ?? "",
+    }));
+  }
+
+  // Fallback: list of names only
+  if (Array.isArray(c.networks)) {
+    return (c.networks as string[]).map((name) => ({ name }));
+  }
+  return [];
+}
+
+function NetworksBlock({ c }: { c: InspectOut }) {
+  const nets = normalizeNetworks(c);
+  if (!nets.length) return <div className="text-sm text-slate-500">No networks.</div>;
+
   return (
-    <div className="border border-slate-800 rounded-lg">
-      <button
-        type="button"
-        className="w-full flex items-center justify-between px-3 py-2 hover:bg-slate-900/40"
-        onClick={() => setOpen((o) => !o)}
-        aria-expanded={open}
-      >
-        <div className="flex items-center gap-2">
-          <ChevronRight className={`h-4 w-4 text-slate-400 transition-transform ${open ? "rotate-90" : ""}`} />
-          <div className="text-xs uppercase tracking-wide text-slate-400">{title}</div>
-        </div>
-        {typeof count === "number" && (
-          <Badge variant="outline" className="border-slate-700 text-slate-300">{count}</Badge>
-        )}
-      </button>
-      {open && <div className="px-3 pb-3 pt-1">{children}</div>}
+    <div className="space-y-1">
+      {/* Header */}
+      <div className="grid grid-cols-4 gap-3 px-2 py-1.5">
+        <div className="text-xs text-slate-400">Name</div>
+        <div className="text-xs text-slate-400">IP Address</div>
+        <div className="text-xs text-slate-400">Gateway</div>
+        <div className="text-xs text-slate-400">MAC Address</div>
+      </div>
+      {nets.map((n, i) => {
+        const zebra = i % 2 === 0 ? "bg-slate-900/30" : "bg-slate-900/10";
+        return (
+          <div key={`${n.name}-${i}`} className={`grid grid-cols-4 gap-3 px-2 py-1.5 rounded ${zebra}`}>
+            <div className="text-slate-300 text-sm truncate" title={n.name}>{n.name || "—"}</div>
+            <div className="text-slate-300 text-sm truncate" title={n.ip}>{n.ip || "—"}</div>
+            <div className="text-slate-300 text-sm truncate" title={n.gateway}>{n.gateway || "—"}</div>
+            <div className="text-slate-300 text-sm truncate font-mono" title={n.mac}>{n.mac || "—"}</div>
+          </div>
+        );
+      })}
     </div>
   );
 }
+
+/* ---------- Container Card (per-container state, status pill, sections) ---------- */
+
+function ContainerCard({
+  c,
+  onToggleDeploy,
+}: {
+  c: InspectOut;
+  onToggleDeploy?: () => void;
+}) {
+  const [revealEnvAll, setRevealEnvAll] = useState(false);
+
+  const envEntries = Object.entries(c.env || {});
+  const labelEntries = Object.entries(c.labels || {}).sort(([a], [b]) => a.localeCompare(b));
+  const envCount = envEntries.length;
+  const labelCount = labelEntries.length;
+  const volCount = (c.volumes || []).length;
+  const netsCount = normalizeNetworks(c).length;
+
+  const statusText = (c as any).state || (c as any).status || "unknown";
+
+  const created = (c as any).created || (c as any).created_at || "";
+  const started = (c as any).started || (c as any).started_at || (c as any).start_time || "";
+
+  return (
+    <div className="rounded-lg border border-slate-800 p-3 space-y-3">
+      {/* Header with name and status pill */}
+      <div className="flex items-center justify-between">
+        <div className="font-medium text-slate-200 text-sm">{c.name}</div>
+        <div><StatePill state={statusText} /></div>
+      </div>
+
+      {/* Top details: Image, Ports, Restart policy — each on its own line */}
+      <div className="space-y-1">
+        <RowShell index={0}>
+          <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Image</div>
+          <div className="col-span-9 text-slate-300 text-sm font-mono truncate" title={c.image || ""}>{c.image || "—"}</div>
+        </RowShell>
+        <RowShell index={1}>
+          <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Ports</div>
+          <div className="col-span-9"><PortsBlock ports={c.ports} /></div>
+        </RowShell>
+        <RowShell index={2}>
+          <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Restart policy</div>
+          <div className="col-span-9 text-slate-300 text-sm">{c.restart_policy || "—"}</div>
+        </RowShell>
+      </div>
+
+      {/* GENERAL collapsible: ID, Created, Start time, CMD, ENTRYPOINT (no Name/Status) */}
+      <CollapsibleSection title="General" defaultOpen={false}>
+        <div className="space-y-1">
+          <RowShell index={0}>
+            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Created</div>
+            <div className="col-span-9 text-slate-300 text-sm">
+              {(c as any).created || (c as any).created_at
+                ? formatDT((c as any).created || (c as any).created_at)
+                : "—"}
+            </div>
+          </RowShell>
+          <RowShell index={1}>
+            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Start time</div>
+            <div className="col-span-9 text-slate-300 text-sm">
+              {(c as any).started || (c as any).started_at || (c as any).start_time
+                ? formatDT((c as any).started || (c as any).started_at || (c as any).start_time)
+                : "—"}
+            </div>
+          </RowShell>
+          <RowShell index={2}>
+            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">CMD</div>
+            <div className="col-span-9">
+              <ValueBox value={(c.cmd || []).join(" ") || "—"} />
+            </div>
+          </RowShell>
+          <RowShell index={3}>
+            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">ENTRYPOINT</div>
+            <div className="col-span-9">
+              <ValueBox value={(c.entrypoint || []).join(" ") || "—"} />
+            </div>
+          </RowShell>
+          <RowShell index={4}>
+            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">ID</div>
+            <div
+              className="col-span-9 text-slate-300 text-sm font-mono truncate"
+              title={(c as any).id || (c as any).container_id || ""}
+            >
+              {(c as any).id || (c as any).container_id || "—"}
+            </div>
+          </RowShell>
+        </div>
+      </CollapsibleSection>
+
+      {/* Environment with per-container bulk reveal toggle (right corner, left of count) */}
+      <CollapsibleSection
+        title="Environment Variables"
+        count={envCount}
+        rightAction={
+          envCount > 0 ? (
+            <Button
+              size="icon"
+              variant="ghost"
+              className="h-7 w-7"
+              onClick={(e) => {
+                e.stopPropagation();
+                setRevealEnvAll((v) => !v);
+              }}
+              title={revealEnvAll ? "Hide all" : "Reveal all"}
+            >
+              {revealEnvAll ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+            </Button>
+          ) : null
+        }
+      >
+        {envCount === 0 ? (
+          <div className="text-sm text-slate-500">No environment variables.</div>
+        ) : (
+          <div className="space-y-1">
+            {envEntries.map(([k, v], idx) => (
+              <EnvRow key={k} k={k} v={v} forceShow={revealEnvAll} index={idx} />
+            ))}
+          </div>
+        )}
+      </CollapsibleSection>
+
+      {/* Labels */}
+      <CollapsibleSection title="Labels" count={labelCount}>
+        {labelCount === 0 ? (
+          <div className="text-sm text-slate-500">No labels.</div>
+        ) : (
+          <div className="space-y-1">
+            {labelEntries.map(([k, v], idx) => (
+              <LabelRow key={k} k={k} v={v} index={idx} />
+            ))}
+          </div>
+        )}
+      </CollapsibleSection>
+
+      {/* Networks (between Labels and Volumes) */}
+      <CollapsibleSection title="Networks" count={netsCount}>
+        <NetworksBlock c={c} />
+      </CollapsibleSection>
+
+      {/* Volumes */}
+      <CollapsibleSection title="Volumes" count={volCount}>
+        <VolsBlock vols={c.volumes} />
+      </CollapsibleSection>
+    </div>
+  );
+}
+
+/* ---------- Page ---------- */
 
 export default function StackDetailView({
   host, stackName, iacId, onBack,
@@ -191,7 +376,6 @@ export default function StackDetailView({
   const [editPath, setEditPath] = useState<string | null>(null);
   const [stackIacId, setStackIacId] = useState<number | undefined>(iacId);
   const [autoDevOps, setAutoDevOps] = useState<boolean>(false);
-  const [revealEnvAll, setRevealEnvAll] = useState<boolean>(false);
   const [deploying, setDeploying] = useState<boolean>(false);
 
   useEffect(() => { setAutoDevOps(false); }, [stackName]);
@@ -314,7 +498,7 @@ export default function StackDetailView({
     }
   }
 
-  const hasContent = files.some(f => f.role === 'compose') || files.length > 0;
+  const hasContent = files.some(f => f.role === "compose") || files.length > 0;
 
   return (
     <div className="space-y-4">
@@ -325,8 +509,8 @@ export default function StackDetailView({
         <div className="ml-2 text-lg font-semibold text-white">Stack: {stackName}</div>
         <div className="ml-auto flex items-center gap-3">
           <Button onClick={deployNow} disabled={deploying || !hasContent} className="bg-emerald-800 hover:bg-emerald-900 text-white disabled:opacity-50">
-            <RotateCw className={`h-4 w-4 mr-1 ${deploying ? 'animate-spin' : ''}`} />
-            {deploying ? 'Deploying...' : 'Deploy'}
+            <RotateCw className={`h-4 w-4 mr-1 ${deploying ? "animate-spin" : ""}`} />
+            {deploying ? "Deploying..." : "Deploy"}
           </Button>
           <span className="text-sm text-slate-300">Auto DevOps</span>
           <Switch checked={autoDevOps} onCheckedChange={(v) => toggleAutoDevOps(!!v)} />
@@ -352,15 +536,6 @@ export default function StackDetailView({
           <Card className="bg-slate-900/50 border-slate-800">
             <CardHeader className="pb-2 flex items-center justify-between">
               <CardTitle className="text-slate-200 text-lg">Active Containers</CardTitle>
-              <Button
-                size="sm"
-                variant="outline"
-                className="border-slate-700"
-                onClick={() => setRevealEnvAll(v => !v)}
-                title={revealEnvAll ? "Hide all env" : "Reveal all env"}
-              >
-                {revealEnvAll ? <EyeOff className="h-4 w-4 mr-1" /> : <Eye className="h-4 w-4 mr-1" />} {revealEnvAll ? "Hide env" : "Reveal env"}
-              </Button>
             </CardHeader>
             <CardContent className="space-y-3">
               {containers.length === 0 && (
@@ -368,67 +543,9 @@ export default function StackDetailView({
                   No containers are currently running for this stack on {host.name}.
                 </div>
               )}
-
-              {containers.map((c, i) => {
-                const envEntries = Object.entries(c.env || {});
-                const labelEntries = Object.entries(c.labels || {}).sort(([a],[b]) => a.localeCompare(b));
-                const envCount = envEntries.length;
-                const labelCount = labelEntries.length;
-                const volCount = (c.volumes || []).length;
-
-                return (
-                  <div key={i} className="rounded-lg border border-slate-800 p-3 space-y-3">
-                    <div className="flex items-center justify-between">
-                      <div className="font-medium text-slate-200">{c.name}</div>
-                    </div>
-
-                    {/* Top details in two even columns */}
-                    <div className="grid md:grid-cols-2 gap-3">
-                      <div className="space-y-2 md:pr-3 md:border-r md:border-slate-800">
-                        <Fact label="CMD" value={<span className="font-mono">{(c.cmd || []).join(" ") || "—"}</span>} />
-                        <Fact label="ENTRYPOINT" value={<span className="font-mono">{(c.entrypoint || []).join(" ") || "—"}</span>} />
-                        <Fact label="Image" value={<span className="font-mono">{c.image || "—"}</span>} />
-                      </div>
-                      <div className="space-y-2 md:pl-3 md:border-l md:border-slate-800">
-                        <Fact label="Networks" value={(c.networks || []).join(", ") || "—"} />
-                        <Fact label="Ports" value={<PortsBlock ports={c.ports} />} />
-                        <Fact label="Restart policy" value={c.restart_policy || "—"} />
-                      </div>
-                    </div>
-
-                    {/* Collapsible sections with unified row style */}
-                    <div className="space-y-2">
-                      <CollapsibleSection title="Environment Variables" count={envCount}>
-                        {envCount === 0 ? (
-                          <div className="text-sm text-slate-500">No environment variables.</div>
-                        ) : (
-                          <div className="space-y-1">
-                            {envEntries.map(([k, v], idx) => (
-                              <EnvRow key={k} k={k} v={v} forceShow={revealEnvAll} index={idx} />
-                            ))}
-                          </div>
-                        )}
-                      </CollapsibleSection>
-
-                      <CollapsibleSection title="Labels" count={labelCount}>
-                        {labelCount === 0 ? (
-                          <div className="text-sm text-slate-500">No labels.</div>
-                        ) : (
-                          <div className="space-y-1">
-                            {labelEntries.map(([k, v], idx) => (
-                              <LabelRow key={k} k={k} v={v} index={idx} />
-                            ))}
-                          </div>
-                        )}
-                      </CollapsibleSection>
-
-                      <CollapsibleSection title="Volumes" count={volCount}>
-                        <VolsBlock vols={c.volumes} />
-                      </CollapsibleSection>
-                    </div>
-                  </div>
-                );
-              })}
+              {containers.map((c, i) => (
+                <ContainerCard key={i} c={c} />
+              ))}
             </CardContent>
           </Card>
         </div>
@@ -440,7 +557,7 @@ export default function StackDetailView({
               <CardTitle className="text-slate-200 text-lg">IaC Files</CardTitle>
               {stackIacId && hasContent && (
                 <Button onClick={deployNow} disabled={deploying} size="sm" className="bg-emerald-800 hover:bg-emerald-900 text-white">
-                  <RotateCw className={`h-4 w-4 mr-1 ${deploying ? 'animate-spin' : ''}`} />
+                  <RotateCw className={`h-4 w-4 mr-1 ${deploying ? "animate-spin" : ""}`} />
                   Deploy
                 </Button>
               )}

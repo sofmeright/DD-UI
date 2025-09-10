@@ -991,6 +991,88 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"stacks": items})
 			})
 
+			// Enhanced stacks/services with deployment stamp-based drift detection
+			priv.Get("/hosts/{name}/enhanced-iac", func(w http.ResponseWriter, r *http.Request) {
+				name := chi.URLParam(r, "name")
+				items, err := listEnhancedIacStacksForHost(r.Context(), name)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"stacks": items})
+			})
+
+			// Direct SSH command execution on hosts
+			priv.Post("/hosts/{name}/ssh", func(w http.ResponseWriter, r *http.Request) {
+				hostName := chi.URLParam(r, "name")
+				var body struct {
+					Command string   `json:"command"`
+					Args    []string `json:"args,omitempty"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "invalid JSON", http.StatusBadRequest)
+					return
+				}
+				if strings.TrimSpace(body.Command) == "" {
+					http.Error(w, "command is required", http.StatusBadRequest)
+					return
+				}
+
+				op := SSHDirectOperation{
+					HostName: hostName,
+					Command:  body.Command,
+					Args:     body.Args,
+				}
+
+				output, err := ExecuteSSHDirectOperation(r.Context(), op)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]any{
+						"success": false,
+						"error":   err.Error(),
+					})
+					return
+				}
+
+				writeJSON(w, http.StatusOK, map[string]any{
+					"success": true,
+					"output":  output,
+				})
+			})
+
+			// Enhanced container operations with deployment stamp awareness
+			priv.Post("/hosts/{name}/containers/{ctr}/enhanced-action", func(w http.ResponseWriter, r *http.Request) {
+				hostName := chi.URLParam(r, "name")
+				containerID := chi.URLParam(r, "ctr")
+				var body struct {
+					Action string `json:"action"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "invalid JSON", http.StatusBadRequest)
+					return
+				}
+
+				var result *ContainerOpResult
+				switch strings.ToLower(body.Action) {
+				case "start":
+					result = StartContainer(r.Context(), hostName, containerID)
+				case "stop":
+					result = StopContainer(r.Context(), hostName, containerID)
+				case "restart":
+					result = RestartContainer(r.Context(), hostName, containerID)
+				case "logs":
+					result = GetContainerLogs(r.Context(), hostName, containerID)
+				default:
+					http.Error(w, "unsupported action", http.StatusBadRequest)
+					return
+				}
+
+				if result.Success {
+					writeJSON(w, http.StatusOK, result)
+				} else {
+					writeJSON(w, http.StatusBadRequest, result)
+				}
+			})
+
 			// Create a new stack in the local IaC repo
 			priv.Post("/iac/stacks", func(w http.ResponseWriter, r *http.Request) {
 				var body struct {

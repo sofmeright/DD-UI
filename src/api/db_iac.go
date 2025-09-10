@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -139,6 +140,13 @@ type IacStackOut struct {
 	Services   []IacServiceRow `json:"services"`
 }
 
+type EnhancedIacStackOut struct {
+	IacStackOut
+	LatestDeployment *DeploymentStamp `json:"latest_deployment,omitempty"`
+	DriftDetected    bool             `json:"drift_detected"`
+	DriftReason      string           `json:"drift_reason,omitempty"`
+}
+
 func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, error) {
 	h, err := GetHostByName(ctx, hostName)
 	if err != nil {
@@ -270,4 +278,88 @@ func stackHasContent(ctx context.Context, stackID int64) (bool, error) {
 	var compose string
 	_ = db.QueryRow(ctx, `SELECT COALESCE(compose_file,'') FROM iac_stacks WHERE id=$1`, stackID).Scan(&compose)
 	return strings.TrimSpace(compose) != "", nil
+}
+
+// listEnhancedIacStacksForHost returns stacks with deployment stamp-based drift detection
+func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]EnhancedIacStackOut, error) {
+	// Get base stacks
+	baseStacks, err := listIacStacksForHost(ctx, hostName)
+	if err != nil {
+		return nil, err
+	}
+
+	var enhancedStacks []EnhancedIacStackOut
+	for _, stack := range baseStacks {
+		enhanced := EnhancedIacStackOut{
+			IacStackOut: stack,
+		}
+
+		// Get latest deployment stamp
+		latestStamp, err := GetLatestDeploymentStamp(ctx, stack.ID)
+		if err == nil {
+			enhanced.LatestDeployment = latestStamp
+			
+			// Check for drift by comparing current deployment hash with expected
+			driftDetected, reason := checkStackDrift(ctx, stack.ID, latestStamp.DeploymentHash)
+			enhanced.DriftDetected = driftDetected
+			enhanced.DriftReason = reason
+		} else {
+			// No deployment stamp found - this could indicate drift or first deployment
+			enhanced.DriftDetected = true
+			enhanced.DriftReason = "No deployment stamp found - manual deployment or first time deployment"
+		}
+
+		enhancedStacks = append(enhancedStacks, enhanced)
+	}
+
+	return enhancedStacks, nil
+}
+
+// checkStackDrift compares the current expected deployment hash with running containers
+func checkStackDrift(ctx context.Context, stackID int64, expectedHash string) (bool, string) {
+	// Check if containers with this stack have the expected deployment hash
+	rows, err := db.Query(ctx, `
+		SELECT container_id, deployment_hash, state
+		FROM containers 
+		WHERE stack_id = $1 
+		  AND state IN ('running', 'paused', 'restarting')
+	`, stackID)
+	if err != nil {
+		return true, fmt.Sprintf("Failed to query containers: %v", err)
+	}
+	defer rows.Close()
+
+	var runningContainers int
+	var containersWithWrongHash int
+	var containersWithoutHash int
+
+	for rows.Next() {
+		var containerID, deploymentHash, state string
+		if err := rows.Scan(&containerID, &deploymentHash, &state); err != nil {
+			continue
+		}
+		
+		runningContainers++
+		
+		if deploymentHash == "" {
+			containersWithoutHash++
+		} else if deploymentHash != expectedHash {
+			containersWithWrongHash++
+		}
+	}
+
+	// Determine drift status
+	if runningContainers == 0 {
+		return true, "No running containers found for stack"
+	}
+	
+	if containersWithoutHash > 0 {
+		return true, fmt.Sprintf("%d containers missing deployment stamps", containersWithoutHash)
+	}
+	
+	if containersWithWrongHash > 0 {
+		return true, fmt.Sprintf("%d containers have different deployment hash", containersWithWrongHash)
+	}
+
+	return false, "All containers match expected deployment"
 }

@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os/exec"
 	"strings"
@@ -11,7 +12,6 @@ import (
 
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
-	"github.com/docker/docker/api/types/filters"
 )
 
 // SSHContainerOperation represents a container operation that can be performed over SSH
@@ -68,7 +68,7 @@ func executeContainerStart(ctx context.Context, cli dockerClient, containerID st
 
 // executeContainerStop stops a container
 func executeContainerStop(ctx context.Context, cli dockerClient, containerID string) (string, error) {
-	timeout := time.Second * 10
+	timeout := int(10) // 10 seconds
 	err := cli.ContainerStop(ctx, containerID, container.StopOptions{Timeout: &timeout})
 	if err != nil {
 		return "", fmt.Errorf("failed to stop container: %v", err)
@@ -78,7 +78,7 @@ func executeContainerStop(ctx context.Context, cli dockerClient, containerID str
 
 // executeContainerRestart restarts a container
 func executeContainerRestart(ctx context.Context, cli dockerClient, containerID string) (string, error) {
-	timeout := time.Second * 10
+	timeout := int(10) // 10 seconds
 	err := cli.ContainerRestart(ctx, containerID, container.StopOptions{Timeout: &timeout})
 	if err != nil {
 		return "", fmt.Errorf("failed to restart container: %v", err)
@@ -101,10 +101,12 @@ func executeContainerLogs(ctx context.Context, cli dockerClient, containerID str
 	}
 	defer logs.Close()
 
-	// Read logs (simplified - in production you'd want to handle docker's multiplexed stream format)
-	logContent := make([]byte, 8192)
-	n, _ := logs.Read(logContent)
-	return string(logContent[:n]), nil
+	// Read logs using io.ReadAll
+	logContent, err := io.ReadAll(logs.Reader)
+	if err != nil {
+		return "", fmt.Errorf("failed to read logs: %v", err)
+	}
+	return string(logContent), nil
 }
 
 // executeContainerExec executes a command in a container
@@ -122,17 +124,18 @@ func executeContainerExec(ctx context.Context, cli dockerClient, containerID, co
 	}
 
 	// Start exec
-	execStartConfig := types.ExecStartConfig{}
-	resp, err := cli.ContainerExecStart(ctx, execResp.ID, execStartConfig)
+	resp, err := cli.ContainerExecStart(ctx, execResp.ID, types.ExecStartCheck{})
 	if err != nil {
 		return "", fmt.Errorf("failed to start exec: %v", err)
 	}
 	defer resp.Close()
 
-	// Read output (simplified)
-	output := make([]byte, 8192)
-	n, _ := resp.Reader.Read(output)
-	return string(output[:n]), nil
+	// Read output using io.ReadAll
+	output, err := io.ReadAll(resp.Reader)
+	if err != nil {
+		return "", fmt.Errorf("failed to read exec output: %v", err)
+	}
+	return string(output), nil
 }
 
 // SSHDirectOperation represents a direct SSH operation on a host
@@ -297,6 +300,6 @@ type dockerClient interface {
 	ContainerRestart(ctx context.Context, containerID string, options container.StopOptions) error
 	ContainerLogs(ctx context.Context, containerID string, options container.LogsOptions) (types.HijackedResponse, error)
 	ContainerExecCreate(ctx context.Context, containerID string, config types.ExecConfig) (types.IDResponse, error)
-	ContainerExecStart(ctx context.Context, execID string, config types.ExecStartConfig) (types.HijackedResponse, error)
+	ContainerExecStart(ctx context.Context, execID string, config types.ExecStartCheck) (types.HijackedResponse, error)
 	ContainerList(ctx context.Context, options container.ListOptions) ([]types.Container, error)
 }

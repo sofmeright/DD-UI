@@ -10,24 +10,100 @@ import MiniEditor from "@/editors/MiniEditor";
 import { ApiContainer, Host, IacFileMeta, InspectOut } from "@/types";
 import { formatDT } from "@/utils/format";
 
-function EnvRow({ k, v, forceShow }: { k: string; v: string; forceShow?: boolean }) {
-  const [show, setShow] = useState(false);
-  const showEff = forceShow || show;
-  const masked = v ? "•".repeat(Math.min(v.length, 24)) : "";
+/* ---------- Shared row primitives (unify font/spacing/columns) ---------- */
+
+function RowShell({
+  children,
+  index,
+}: {
+  children: React.ReactNode;
+  index: number;
+}) {
+  // Alternating shading for eye-tracking
+  const zebra = index % 2 === 0 ? "bg-slate-900/30" : "bg-slate-900/10";
   return (
-    <div className="flex items-start gap-3 py-1">
-      <div className="text-slate-300 text-sm w-44 shrink-0">{k}</div>
-      <div className="flex items-start gap-2 grow min-w-0">
-        <div className="text-slate-400 text-sm font-mono break-all whitespace-pre-wrap leading-tight max-h-24 overflow-auto pr-1">
-          {showEff ? v || "" : masked}
-        </div>
-        <Button size="icon" variant="ghost" className="h-7 w-7 shrink-0" onClick={() => setShow(s => !s)} title={showEff ? "Hide" : "Reveal"}>
-          {showEff ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
-        </Button>
-      </div>
+    <div className={`grid grid-cols-12 items-center gap-2 px-2 py-1.5 rounded ${zebra}`}>
+      {children}
     </div>
   );
 }
+
+// Readonly, scroll-on-focus input (cuts off visually, but scrolls when highlighted)
+function ValueBox({
+  value,
+  title,
+}: {
+  value: string;
+  title?: string;
+}) {
+  return (
+    <input
+      readOnly
+      value={value}
+      title={title ?? value}
+      onFocus={(e) => e.currentTarget.select()}
+      className="w-full max-w-full bg-slate-900/40 border border-slate-700 text-slate-300 font-mono text-sm px-2 py-1 rounded outline-none focus:ring-1 focus:ring-slate-600 overflow-auto"
+    />
+  );
+}
+
+function EnvRow({
+  k,
+  v,
+  forceShow,
+  index,
+}: {
+  k: string;
+  v: string;
+  forceShow?: boolean;
+  index: number;
+}) {
+  const [show, setShow] = useState(false);
+  const showEff = !!forceShow || show;
+  const masked = v ? "•".repeat(Math.min(v.length, 24)) : "";
+  const display = showEff ? v || "" : masked;
+
+  return (
+    <RowShell index={index}>
+      <div className="col-span-4 text-slate-300 text-sm font-medium break-words">{k}</div>
+      <div className="col-span-7">
+        <ValueBox value={display} title={showEff ? v : undefined} />
+      </div>
+      <div className="col-span-1 flex justify-end">
+        <Button
+          size="icon"
+          variant="ghost"
+          className="h-7 w-7"
+          onClick={() => setShow((s) => !s)}
+          title={showEff ? "Hide" : "Reveal"}
+        >
+          {showEff ? <EyeOff className="h-4 w-4" /> : <Eye className="h-4 w-4" />}
+        </Button>
+      </div>
+    </RowShell>
+  );
+}
+
+function LabelRow({
+  k,
+  v,
+  index,
+}: {
+  k: string;
+  v: string;
+  index: number;
+}) {
+  return (
+    <RowShell index={index}>
+      <div className="col-span-4 text-slate-300 text-sm font-medium break-words">{k}</div>
+      <div className="col-span-8">
+        <ValueBox value={v} />
+      </div>
+    </RowShell>
+  );
+}
+
+/* ---------- Facts + ports remain as before ---------- */
 
 function PortsBlock({ ports }: { ports?: InspectOut["ports"] }) {
   const list = ports || [];
@@ -36,27 +112,40 @@ function PortsBlock({ ports }: { ports?: InspectOut["ports"] }) {
     <div className="space-y-1 text-sm">
       {list.map((p, i) => (
         <div key={i} className="text-slate-300">
-          {(p.published ? p.published + " → " : "")}{p.target}{p.protocol ? "/" + p.protocol : ""}
+          {(p.published ? p.published + " → " : "")}
+          {p.target}
+          {p.protocol ? "/" + p.protocol : ""}
         </div>
       ))}
     </div>
   );
 }
 
+/* ---------- Volumes: 3 uniform columns with explicit mapping ---------- */
+
 function VolsBlock({ vols }: { vols?: InspectOut["volumes"] }) {
   const list = vols || [];
   if (!list.length) return <div className="text-sm text-slate-500">No mounts.</div>;
   return (
-    <div className="space-y-1 text-sm">
-      {list.map((m, i) => (
-        <div key={i} className="text-slate-300">
-          <span className="font-mono">{m.source}</span> → <span className="font-mono">{m.target}</span>
-          {m.mode ? ` (${m.mode}${m.rw === false ? ", ro" : ""})` : (m.rw === false ? " (ro)" : "")}
-        </div>
-      ))}
+    <div className="space-y-1">
+      {list.map((m, i) => {
+        const zebra = i % 2 === 0 ? "bg-slate-900/30" : "bg-slate-900/10";
+        return (
+          <div key={i} className={`grid grid-cols-3 gap-3 items-center px-2 py-1.5 rounded ${zebra}`}>
+            <div className="text-slate-300 text-sm font-mono truncate" title={m.source}>{m.source}</div>
+            <div className="text-slate-400 text-sm text-center">mapped →</div>
+            <div className="text-slate-300 text-sm font-mono truncate" title={m.target}>
+              {m.target}
+              {m.mode ? ` (${m.mode}${m.rw === false ? ", ro" : ""})` : (m.rw === false ? " (ro)" : "")}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
+
+/* ---------- Collapsible wrapper ---------- */
 
 function CollapsibleSection({
   title,
@@ -75,7 +164,7 @@ function CollapsibleSection({
       <button
         type="button"
         className="w-full flex items-center justify-between px-3 py-2 hover:bg-slate-900/40"
-        onClick={() => setOpen(o => !o)}
+        onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
       >
         <div className="flex items-center gap-2">
@@ -115,7 +204,7 @@ export default function StackDetailView({
     setFiles(j.files || []);
   }
 
-  // Load runtime + files; keep as-is
+  // Load runtime + files
   useEffect(() => {
     let cancel = false;
     (async () => {
@@ -146,7 +235,7 @@ export default function StackDetailView({
     return () => { cancel = true; };
   }, [host.name, stackName, stackIacId]);
 
-  // Load EFFECTIVE Auto DevOps for this stack id
+  // Load EFFECTIVE Auto DevOps
   useEffect(() => {
     let cancel = false;
     (async () => {
@@ -185,7 +274,7 @@ export default function StackDetailView({
     setEditPath(null);
   }
 
-  // Toggle stack Auto DevOps OVERRIDE (decoupled)
+  // Toggle stack Auto DevOps OVERRIDE
   async function toggleAutoDevOps(checked: boolean) {
     let id = stackIacId;
     if (!id) {
@@ -263,23 +352,37 @@ export default function StackDetailView({
           <Card className="bg-slate-900/50 border-slate-800">
             <CardHeader className="pb-2 flex items-center justify-between">
               <CardTitle className="text-slate-200 text-lg">Active Containers</CardTitle>
-              <Button size="sm" variant="outline" className="border-slate-700" onClick={() => setRevealEnvAll(v => !v)} title={revealEnvAll ? "Hide all env" : "Reveal all env"}>
+              <Button
+                size="sm"
+                variant="outline"
+                className="border-slate-700"
+                onClick={() => setRevealEnvAll(v => !v)}
+                title={revealEnvAll ? "Hide all env" : "Reveal all env"}
+              >
                 {revealEnvAll ? <EyeOff className="h-4 w-4 mr-1" /> : <Eye className="h-4 w-4 mr-1" />} {revealEnvAll ? "Hide env" : "Reveal env"}
               </Button>
             </CardHeader>
             <CardContent className="space-y-3">
-              {containers.length === 0 && <div className="text-sm text-slate-500">No containers are currently running for this stack on {host.name}.</div>}
+              {containers.length === 0 && (
+                <div className="text-sm text-slate-500">
+                  No containers are currently running for this stack on {host.name}.
+                </div>
+              )}
+
               {containers.map((c, i) => {
-                const envCount = Object.keys(c.env || {}).length;
-                const labelCount = Object.keys(c.labels || {}).length;
+                const envEntries = Object.entries(c.env || {});
+                const labelEntries = Object.entries(c.labels || {}).sort(([a],[b]) => a.localeCompare(b));
+                const envCount = envEntries.length;
+                const labelCount = labelEntries.length;
                 const volCount = (c.volumes || []).length;
+
                 return (
                   <div key={i} className="rounded-lg border border-slate-800 p-3 space-y-3">
                     <div className="flex items-center justify-between">
                       <div className="font-medium text-slate-200">{c.name}</div>
                     </div>
 
-                    {/* Top facts stay side-by-side for readability */}
+                    {/* Top details in two even columns */}
                     <div className="grid md:grid-cols-2 gap-3">
                       <div className="space-y-2 md:pr-3 md:border-r md:border-slate-800">
                         <Fact label="CMD" value={<span className="font-mono">{(c.cmd || []).join(" ") || "—"}</span>} />
@@ -293,34 +396,33 @@ export default function StackDetailView({
                       </div>
                     </div>
 
-                    {/* Collapsible single-column sections */}
+                    {/* Collapsible sections with unified row style */}
                     <div className="space-y-2">
-                      <CollapsibleSection title="Environment" count={envCount} defaultOpen={false}>
+                      <CollapsibleSection title="Environment Variables" count={envCount}>
                         {envCount === 0 ? (
                           <div className="text-sm text-slate-500">No environment variables.</div>
                         ) : (
                           <div className="space-y-1">
-                            {Object.entries(c.env || {}).map(([k, v]) => (<EnvRow key={k} k={k} v={v} forceShow={revealEnvAll} />))}
-                          </div>
-                        )}
-                      </CollapsibleSection>
-
-                      <CollapsibleSection title="Labels" count={labelCount} defaultOpen={false}>
-                        {labelCount === 0 ? (
-                          <div className="text-sm text-slate-500">No labels.</div>
-                        ) : (
-                          <div className="space-y-1">
-                            {(Object.entries(c.labels || {}).sort(([a],[b]) => a.localeCompare(b))).map(([k,v]) => (
-                              <div key={k} className="flex items-center justify-between gap-2 text-sm">
-                                <div className="text-slate-300">{k}</div>
-                                <div className="text-slate-400 font-mono truncate max-w-[22rem]" title={v}>{v}</div>
-                              </div>
+                            {envEntries.map(([k, v], idx) => (
+                              <EnvRow key={k} k={k} v={v} forceShow={revealEnvAll} index={idx} />
                             ))}
                           </div>
                         )}
                       </CollapsibleSection>
 
-                      <CollapsibleSection title="Volumes" count={volCount} defaultOpen={false}>
+                      <CollapsibleSection title="Labels" count={labelCount}>
+                        {labelCount === 0 ? (
+                          <div className="text-sm text-slate-500">No labels.</div>
+                        ) : (
+                          <div className="space-y-1">
+                            {labelEntries.map(([k, v], idx) => (
+                              <LabelRow key={k} k={k} v={v} index={idx} />
+                            ))}
+                          </div>
+                        )}
+                      </CollapsibleSection>
+
+                      <CollapsibleSection title="Volumes" count={volCount}>
                         <VolsBlock vols={c.volumes} />
                       </CollapsibleSection>
                     </div>
@@ -381,11 +483,16 @@ export default function StackDetailView({
                         <td className="p-2">
                           <div className="flex items-center gap-2">
                             <Button size="sm" variant="outline" className="border-slate-700" onClick={() => setEditPath(f.rel_path)}>Edit</Button>
-                            <Button size="icon" variant="ghost" onClick={async () => {
-                              if (!stackIacId) return;
-                              const r = await fetch(`/api/iac/stacks/${stackIacId}/file?path=${encodeURIComponent(f.rel_path)}`, { method: "DELETE", credentials: "include" });
-                              if (r.ok) refreshFiles();
-                            }} title="Delete">
+                            <Button
+                              size="icon"
+                              variant="ghost"
+                              onClick={async () => {
+                                if (!stackIacId) return;
+                                const r = await fetch(`/api/iac/stacks/${stackIacId}/file?path=${encodeURIComponent(f.rel_path)}`, { method: "DELETE", credentials: "include" });
+                                if (r.ok) refreshFiles();
+                              }}
+                              title="Delete"
+                            >
                               <Trash2 className="h-4 w-4 text-rose-300" />
                             </Button>
                           </div>

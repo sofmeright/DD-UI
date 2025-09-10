@@ -5,7 +5,7 @@ CREATE TABLE IF NOT EXISTS iac_service_state (
   id                BIGSERIAL PRIMARY KEY,
   stack_id          BIGINT NOT NULL REFERENCES iac_stacks(id) ON DELETE CASCADE,
   service_name      TEXT   NOT NULL,
-  last_deploy_uid   TEXT   NOT NULL,  -- random per deploy/service
+  last_deploy_uid   TEXT   NOT NULL,  -- stable until spec digest changes
   last_spec_digest  TEXT   NOT NULL,  -- deterministic spec hash
   enrolled          BOOLEAN NOT NULL DEFAULT TRUE,
   first_seen        TIMESTAMPTZ NOT NULL DEFAULT now(),

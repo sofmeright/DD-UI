@@ -1,4 +1,3 @@
-// src/api/deploy.go
 package main
 
 import (
@@ -99,8 +98,6 @@ func deployStack(ctx context.Context, stackID int64) error {
 
 // writeDDUIOverlay writes a last-applied Compose file that injects deterministic
 // DDUI labels into every service. It also persists the enrollment state (UID+spec hash).
-// UID is **stable** per service until the effective spec digest changes. This prevents
-// needless recreates and makes drift detection/attribution robust.
 func writeDDUIOverlay(ctx context.Context, stageDir string, stackID int64, spec *desiredSpec) (string, error) {
 	type svcOverlay struct {
 		Labels map[string]string `yaml:"labels,omitempty"`
@@ -122,22 +119,26 @@ func writeDDUIOverlay(ctx context.Context, stageDir string, stackID int64, spec 
 		s := spec.Services[name]
 		specHash := computeServiceSpecDigest(spec.Project, spec.FilesDigest, name, s)
 
-		// Reuse prior UID if digest unchanged; otherwise mint a new one.
-		prevUID, prevDigest, ok, _ := getServiceState(ctx, stackID, name)
+		// Reuse prior UID if the spec digest hasn't changed.
+		var prevUID, prevDigest string
+		_ = db.QueryRow(ctx, `
+			SELECT last_deploy_uid, last_spec_digest
+			FROM iac_service_state
+			WHERE stack_id=$1 AND service_name=$2
+		`, stackID, name).Scan(&prevUID, &prevDigest)
+
 		uid := prevUID
-		if !ok || prevDigest != specHash || strings.TrimSpace(uid) == "" {
-			uid = randomHex(16)
+		if uid == "" || prevDigest != specHash {
+			uid = randomHex(16) // new enrollment or digest changed
 		}
 
 		lbls := map[string]string{
-			// Internal, small, namespaced labels
 			dduiLabelManaged: "true",
 			dduiLabelStackID: fmt.Sprintf("%d", stackID),
 			dduiLabelService: name,
 			dduiLabelSpec:    specHash,
 			dduiLabelUID:     uid,
-
-			// Compatibility labels, human-friendly & grep-able
+			// Compatibility labels (surfaced in UI/filters)
 			"DDUI_CONTAINER_UID": uid,
 			"DDUI_SPEC_DIGEST":   specHash,
 		}
@@ -158,20 +159,6 @@ func writeDDUIOverlay(ctx context.Context, stageDir string, stackID int64, spec 
 		return "", err
 	}
 	return path, nil
-}
-
-// getServiceState returns the last stored UID & spec digest for a service (if any).
-func getServiceState(ctx context.Context, stackID int64, service string) (uid, digest string, ok bool, err error) {
-	err = db.QueryRow(ctx, `
-		SELECT last_deploy_uid, last_spec_digest
-		FROM iac_service_state
-		WHERE stack_id=$1 AND service_name=$2
-	`, stackID, service).Scan(&uid, &digest)
-	if err != nil {
-		// Treat "no rows" or other read errors as "no prior state" — safest for now (non-prod)
-		return "", "", false, nil
-	}
-	return uid, digest, true, nil
 }
 
 // upsertServiceState tracks service enrollment to make pruning safe and drift deterministic.

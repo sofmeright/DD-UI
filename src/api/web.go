@@ -1,4 +1,3 @@
-// src/api/web.go
 package main
 
 import (
@@ -1799,8 +1798,8 @@ type desiredSpec struct {
 
 type desiredServiceSpec struct {
 	Service         string   `json:"service"`
-	Image           string   `json:"image"`                       // canonical repo:tag (digest stripped, tag defaults to :latest)
-	ImageAlternates []string `json:"image_alternates,omitempty"`  // other acceptable string forms (for tolerant drift compare)
+	Image           string   `json:"image"`                        // canonical repo:tag (digest stripped, tag defaults to :latest)
+	ImageAlternates []string `json:"image_alternates,omitempty"`   // other acceptable string forms (for tolerant drift compare)
 	ContainerName   string   `json:"container_name,omitempty"`
 	ExpectedNames   []string `json:"expected_names,omitempty"` // if container_name empty
 	Ports           []string `json:"ports,omitempty"`
@@ -1878,7 +1877,7 @@ func buildDesiredSpec(ctx context.Context, stackID int64) (*desiredSpec, error) 
 		}
 	}
 	for _, p := range envCandidates {
-		if b, err := readPossiblySopsFile(ctx, p, true /*dotenv*/); err == nil && len(b) > 0 {
+		if b, err := readPossiblySopsFile(ctx, p, true /* dotenv */); err == nil && len(b) > 0 {
 			mergeDotenv(envMap, string(b))
 		}
 	}
@@ -1894,7 +1893,7 @@ func buildDesiredSpec(ctx context.Context, stackID int64) (*desiredSpec, error) 
 		if err != nil {
 			continue
 		}
-		// Interpolation happens before YAML parse in Compose; we emulate by resolving in the specific fields we extract.
+		// Interpolation happens before YAML parse in Compose; emulate for the fields we extract.
 		var y any
 		if err := yaml.Unmarshal(cnt, &y); err != nil {
 			continue
@@ -1906,7 +1905,7 @@ func buildDesiredSpec(ctx context.Context, stackID int64) (*desiredSpec, error) 
 			if svcMap == nil {
 				continue
 			}
-			// Build service-local env for interpolation (Compose doesn't do this, but we do for drift sanity)
+			// Build service-local env for interpolation
 			svcEnv := envFromService(svcMap["environment"])
 			envSvc := mergeEnvs(envMap, svcEnv)
 
@@ -1919,7 +1918,7 @@ func buildDesiredSpec(ctx context.Context, stackID int64) (*desiredSpec, error) 
 			// container_name (optional)
 			cn := resolveVars(strOf(svcMap["container_name"]), envSvc)
 
-			// ports (string or object form; we try to keep them as simple strings for compare)
+			// ports
 			var ports []string
 			if lst, ok := asList(svcMap["ports"]); ok {
 				for _, v := range lst {
@@ -1927,7 +1926,7 @@ func buildDesiredSpec(ctx context.Context, stackID int64) (*desiredSpec, error) 
 				}
 			}
 
-			// volumes (keep raw strings for compare)
+			// volumes
 			var vols []string
 			if lst, ok := asList(svcMap["volumes"]); ok {
 				for _, v := range lst {
@@ -1935,10 +1934,10 @@ func buildDesiredSpec(ctx context.Context, stackID int64) (*desiredSpec, error) 
 				}
 			}
 
-			// environment keys only (no values returned)
+			// environment keys only
 			envKeys := envKeysOnly(svcMap["environment"])
 
-			// Always compute tolerant expected names (even if container_name is present)
+			// Expected container names (compose defaults)
 			expected := expectedNamesFor(stackName, svcName, cn)
 
 			// Merge (later files override earlier)
@@ -2144,7 +2143,8 @@ func resolveVars(s string, env map[string]string) string {
 	})
 }
 
-// canonicalImage normalizes to "repo:tag" (drop @digest, default :latest)
+// canonicalImage normalizes to "repo:tag" (drop @digest, default :latest).
+// It correctly handles registries with ports, e.g. "localhost:5000/repo" -> "localhost:5000/repo:latest".
 func canonicalImage(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -2154,13 +2154,14 @@ func canonicalImage(s string) string {
 	if i := strings.IndexByte(s, '@'); i > 0 {
 		s = s[:i]
 	}
-	// if no tag specified and string contains a slash (repo) but no ':'
-	if !strings.Contains(s, ":") {
-		// Don't treat "localhost:5000/repo" port as tag: already contains ':'
-		// Here we only add :latest if there's no tag after last slash.
-		s = s + ":latest"
-	} else {
-		// Special case registry with port handled above
+	// If the part after the last slash lacks a ':', append :latest
+	lastSlash := strings.LastIndexByte(s, '/')
+	namePart := s
+	if lastSlash >= 0 {
+		namePart = s[lastSlash+1:]
+	}
+	if !strings.Contains(namePart, ":") {
+		return s + ":latest"
 	}
 	return s
 }
@@ -2185,12 +2186,11 @@ func uniq(ss []string) []string {
 // imageAlternates returns a small tolerant set of strings that should be considered equal to the canonical image.
 func imageAlternates(raw, canon string) []string {
 	alts := []string{canon}
-	// If raw was already canonical except for default tag expansion, include it too
 	trimmed := strings.TrimSpace(raw)
 	if trimmed != "" {
-		// strip digest and resolve defaults if any remained
-		base := canonicalImage(resolveVars(strings.SplitN(trimmed, "@", 2)[0], map[string]string{}))
-		alts = append(alts, base)
+		// strip digest then apply canonicalization again on the raw base
+		base := strings.SplitN(trimmed, "@", 2)[0]
+		alts = append(alts, canonicalImage(base))
 	}
 	return uniq(alts)
 }

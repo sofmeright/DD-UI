@@ -5,7 +5,6 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -29,60 +28,6 @@ type Health struct {
 	Status    string    `json:"status"`
 	StartedAt time.Time `json:"startedAt"`
 	Edition   string    `json:"edition"`
-}
-
-/* ---------------- Theming helpers ---------------- */
-
-func themeHex(name, def string) string {
-	v := strings.TrimSpace(env(name, ""))
-	if v == "" {
-		// Allow alias prefix DDUI_THEMING_* as a fallback
-		if strings.HasPrefix(name, "DDUI_THEME_") {
-			alias := "DDUI_THEMING_" + strings.TrimPrefix(name, "DDUI_THEME_")
-			v = strings.TrimSpace(env(alias, ""))
-		}
-	}
-	if v == "" {
-		return def
-	}
-	if !strings.HasPrefix(v, "#") {
-		return "#" + v
-	}
-	return v
-}
-
-func hexToRGB(hex string) (r, g, b int, ok bool) {
-	s := strings.TrimPrefix(strings.TrimSpace(hex), "#")
-	switch len(s) {
-	case 3:
-		_, err := fmt.Sscanf(s, "%1x%1x%1x", &r, &g, &b)
-		if err != nil {
-			return 0, 0, 0, false
-		}
-		r = r * 17
-		g = g * 17
-		b = b * 17
-		return r, g, b, true
-	case 6:
-		_, err := fmt.Sscanf(s, "%02x%02x%02x", &r, &g, &b)
-		return r, g, b, err == nil
-	default:
-		return 0, 0, 0, false
-	}
-}
-
-func rgba(hex string, alpha float64) string {
-	r, g, b, ok := hexToRGB(hex)
-	if !ok {
-		return "rgba(0,0,0,0)"
-	}
-	if alpha < 0 {
-		alpha = 0
-	}
-	if alpha > 1 {
-		alpha = 1
-	}
-	return fmt.Sprintf("rgba(%d,%d,%d,%.3f)", r, g, b, alpha)
 }
 
 func makeRouter() http.Handler {
@@ -1243,122 +1188,6 @@ func makeRouter() http.Handler {
 		fs.ServeHTTP(w, req)
 	})
 
-	// -------- Runtime theme stylesheet
-	r.Get("/theme.css", func(w http.ResponseWriter, req *http.Request) {
-		// Base palette (override via env)
-		bg := themeHex("DDUI_THEME_BG", "#0b1220")                 // app background
-		surface := themeHex("DDUI_THEME_SURFACE", "#0f172a")       // cards/blocks
-		border := themeHex("DDUI_THEME_BORDER", "#1f2937")
-		text := themeHex("DDUI_THEME_TEXT", "#e5e7eb")
-		textMuted := themeHex("DDUI_THEME_TEXT_MUTED", "#94a3b8")
-
-		primary := themeHex("DDUI_THEME_PRIMARY", "#22d3ee")
-		success := themeHex("DDUI_THEME_SUCCESS", "#059669")
-		warning := themeHex("DDUI_THEME_WARNING", "#f59e0b")
-		danger  := themeHex("DDUI_THEME_DANGER",  "#e11d48")
-		info    := themeHex("DDUI_THEME_INFO",    "#6366f1")
-
-		css := fmt.Sprintf(`/* generated at runtime */
-:root{
-  --ui-bg:%[1]s;
-  --ui-surface:%[2]s;
-  --ui-surface-2:%[11]s; /* slightly translucent variant */
-  --ui-surface-3:%[12]s; /* even lighter translucency */
-  --ui-border:%[3]s;
-  --ui-text:%[4]s;
-  --ui-text-muted:%[5]s;
-  --ui-primary:%[6]s;
-  --ui-success:%[7]s;
-  --ui-warning:%[8]s;
-  --ui-danger:%[9]s;
-  --ui-info:%[10]s;
-
-  /* row helpers for alternating stripes */
-  --ui-row-odd:%[12]s;
-  --ui-row-even:%[11]s;
-}
-
-	/* global */
-	html, body { background-color: var(--ui-bg); color: var(--ui-text); }
-
-	/* ---------------- Neutrals (bg) ---------------- */
-	.bg-slate-950, .bg-slate-900, .bg-slate-800,
-	.bg-zinc-950, .bg-zinc-900, .bg-zinc-800,
-	.bg-neutral-950, .bg-neutral-900, .bg-neutral-800,
-	.bg-gray-950, .bg-gray-900, .bg-gray-800 { background-color: var(--ui-surface) !important; }
-
-	.bg-slate-900\/50, .bg-zinc-900\/50, .bg-neutral-900\/50, .bg-gray-900\/50 { background-color: var(--ui-surface-2) !important; }
-	.bg-slate-900\/40, .bg-zinc-900\/40, .bg-neutral-900\/40, .bg-gray-900\/40 { background-color: var(--ui-surface-3) !important; }
-
-	/* Alternating rows (opt-in via utility classes) */
-	.striped > *:nth-child(odd)  { background-color: var(--ui-row-odd)  !important; }
-	.striped > *:nth-child(even) { background-color: var(--ui-row-even) !important; }
-
-	/* ---------------- Neutrals (text) ---------------- */
-	.text-slate-50, .text-slate-100, .text-slate-200, .text-slate-300,
-	.text-zinc-50,  .text-zinc-100,  .text-zinc-200,  .text-zinc-300,
-	.text-neutral-50,.text-neutral-100,.text-neutral-200,.text-neutral-300,
-	.text-gray-50,  .text-gray-100,  .text-gray-200,  .text-gray-300 { color: var(--ui-text) !important; }
-
-	.text-slate-400, .text-slate-500,
-	.text-zinc-400,  .text-zinc-500,
-	.text-neutral-400,.text-neutral-500,
-	.text-gray-400,  .text-gray-500 { color: var(--ui-text-muted) !important; }
-
-	/* ---------------- Neutrals (borders & rings) ---------------- */
-	.border-slate-700, .border-slate-800, .border-slate-900,
-	.border-zinc-700,  .border-zinc-800,  .border-zinc-900,
-	.border-neutral-700,.border-neutral-800,.border-neutral-900,
-	.border-gray-700,  .border-gray-800,  .border-gray-900 { border-color: var(--ui-border) !important; }
-
-	.ring-slate-700, .ring-slate-800, .ring-slate-900,
-	.ring-zinc-700,  .ring-zinc-800,  .ring-zinc-900,
-	.ring-neutral-700,.ring-neutral-800,.ring-neutral-900,
-	.ring-gray-700,  .ring-gray-800,  .ring-gray-900 { --tw-ring-color: var(--ui-border) !important; }
-
-	/* ---------------- Accents / status ---------------- */
-	.bg-emerald-800, .hover\:bg-emerald-900:hover  { background-color: var(--ui-success) !important; }
-	.text-emerald-300                               { color: var(--ui-success) !important; }
-
-	.bg-amber-900\/30, .text-amber-300              { background-color: %[13]s !important; color: var(--ui-warning) !important; }
-
-	.border-rose-800, .text-rose-200                { border-color: var(--ui-danger) !important; color: var(--ui-danger) !important; }
-	.bg-rose-950\/50                                { background-color: %[14]s !important; }
-
-	.bg-indigo-900\/40, .border-indigo-700\/40, .text-indigo-200 { background-color: %[15]s !important; border-color: %[16]s !important; color: var(--ui-info) !important; }
-
-	/* ---------------- Primary/link/buttons harmonization ---------------- */
-	a, .text-sky-400, .text-cyan-300, .text-indigo-300 { color: var(--ui-primary) !important; }
-	.bg-sky-500, .bg-cyan-500, .bg-indigo-500 { background-color: var(--ui-primary) !important; }
-	.hover\:bg-sky-600:hover, .hover\:bg-cyan-600:hover, .hover\:bg-indigo-600:hover { background-color: %[17]s !important; }
-	.focus\:ring-sky-500:focus, .focus\:ring-cyan-500:focus, .focus\:ring-indigo-500:focus { --tw-ring-color: var(--ui-primary) !important; }
-
-	/* inputs */
-	.placeholder-slate-400::placeholder,
-	.placeholder-zinc-400::placeholder,
-	.placeholder-neutral-400::placeholder,
-	.placeholder-gray-400::placeholder { color: var(--ui-text-muted) !important; opacity:.9; }
-
-	/* Make monospace blocks inherit the theme text color */
-	.font-mono { color: inherit; }
-	`,
-			bg, surface, border, text, textMuted,
-			primary, success, warning, danger, info,
-			rgba(surface, 0.60), // [11] surface-2
-			rgba(surface, 0.40), // [12] surface-3
-			rgba(warning, 0.30), // [13] amber panel
-			rgba(danger, 0.50),  // [14] rose panel
-			rgba(info, 0.40),    // [15] indigo bg
-			rgba(info, 0.40),    // [16] indigo border
-			rgba(primary, 0.85), // [17] primary hover approx
-		)
-
-		w.Header().Set("Content-Type", "text/css; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write([]byte(css))
-	})
-
-
 	// SPA fallback (last)
 	r.Get("/*", func(w http.ResponseWriter, req *http.Request) {
 		if strings.HasPrefix(req.URL.Path, "/api") || strings.HasPrefix(req.URL.Path, "/auth") {
@@ -1370,20 +1199,7 @@ func makeRouter() http.Handler {
 			http.ServeFile(w, req, path)
 			return
 		}
-		index := filepath.Join(uiRoot, "index.html")
-		b, err := os.ReadFile(index)
-		if err != nil {
-			http.ServeFile(w, req, index) // fallback
-			return
-		}
-		// Inject theme link before </head> if not already present
-		html := string(b)
-		if !strings.Contains(html, `/theme.css`) && strings.Contains(html, "</head>") {
-			html = strings.Replace(html, "</head>", `  <link rel="stylesheet" href="/theme.css"></head>`, 1)
-		}
-		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		w.Header().Set("Cache-Control", "no-store")
-		_, _ = w.Write([]byte(html))
+		http.ServeFile(w, req, filepath.Join(uiRoot, "index.html"))
 	})
 
 	return r

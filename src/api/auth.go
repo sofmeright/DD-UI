@@ -10,8 +10,10 @@ import (
 	"errors"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/coreos/go-oidc/v3/oidc"
@@ -38,6 +40,56 @@ var (
 	cfg                AuthConfig
 	endSessionEndpoint string // discovered from .well-known
 )
+
+// ---- server-side id_token store (per-session) ----
+
+type idTokenEntry struct {
+	token string
+	exp   time.Time
+}
+type idTokenStore struct {
+	mu sync.RWMutex
+	m  map[string]idTokenEntry // sid -> entry
+}
+
+func (s *idTokenStore) put(sid, token string, exp time.Time) {
+	if sid == "" || token == "" {
+		return
+	}
+	s.mu.Lock()
+	if s.m == nil {
+		s.m = make(map[string]idTokenEntry)
+	}
+	s.m[sid] = idTokenEntry{token: token, exp: exp}
+	s.mu.Unlock()
+}
+func (s *idTokenStore) pop(sid string) string {
+	if sid == "" {
+		return ""
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	ent, ok := s.m[sid]
+	if ok {
+		delete(s.m, sid)
+		if time.Now().Before(ent.exp) {
+			return ent.token
+		}
+	}
+	return ""
+}
+func (s *idTokenStore) sweep() {
+	now := time.Now()
+	s.mu.Lock()
+	for k, v := range s.m {
+		if now.After(v.exp) {
+			delete(s.m, k)
+		}
+	}
+	s.mu.Unlock()
+}
+
+var idtStore idTokenStore
 
 type AuthConfig struct {
 	Issuer        string
@@ -125,8 +177,6 @@ func InitAuthFromEnv() error {
 	redirect := env("OIDC_REDIRECT_URL", "")
 
 	// Derive SecureCookies if COOKIE_SECURE is unset.
-	// - If redirect URI is https, use secure cookies.
-	// - If it's http (dev), allow non-secure cookies so the session works locally.
 	secureStr := strings.TrimSpace(env("DDUI_COOKIE_SECURE", ""))
 	var secure bool
 	if secureStr == "" {
@@ -185,8 +235,6 @@ func InitAuthFromEnv() error {
 	}
 
 	// ---- Session cookie store
-	// Use SameSite=None for broadest compatibility when API/UI run on different origins;
-	// fall back to Lax for non-secure local dev.
 	sameSite := http.SameSiteLaxMode
 	if cfg.SecureCookies {
 		sameSite = http.SameSiteNoneMode
@@ -200,6 +248,15 @@ func InitAuthFromEnv() error {
 		SameSite: sameSite,
 		Domain:   cfg.CookieDomain,
 	}
+
+	// start background sweeper for server-side id_tokens
+	go func() {
+		t := time.NewTicker(10 * time.Minute)
+		defer t.Stop()
+		for range t.C {
+			idtStore.sweep()
+		}
+	}()
 
 	return nil
 }
@@ -221,7 +278,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	tmp, _ := store.Get(r, oauthTmpName)
 	tmp.Values["state"] = state
 	tmp.Values["nonce"] = nonce
-	// If we’re embedding in an iframe on another origin, Lax will be blocked.
+	// If embedded in an iframe, None is required.
 	sameSite := http.SameSiteLaxMode
 	if cfg.SecureCookies {
 		sameSite = http.SameSiteNoneMode
@@ -231,7 +288,7 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 		MaxAge:   300, // 5 minutes
 		HttpOnly: true,
 		Secure:   cfg.SecureCookies,
-		SameSite: sameSite, // None when secure, so iframe flows work
+		SameSite: sameSite,
 		Domain:   cfg.CookieDomain,
 	}
 	_ = tmp.Save(r, w)
@@ -262,7 +319,7 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// --- raw id_token for verification only (do NOT persist in cookie) ---
+	// --- raw id_token for verification + server-side storage only ---
 	rawID, ok := tok.Extra("id_token").(string)
 	if !ok {
 		http.Error(w, "no id_token", http.StatusBadGateway)
@@ -309,11 +366,25 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		Pic:   claims.Pic,
 	}
 
-	// Save user (minimal) — do NOT store id_token to avoid oversized cookies
+	// Save minimal session + sid; store id_token server-side keyed by sid
 	sess, _ := store.Get(r, sessionName)
+	sid, _ := sess.Values["sid"].(string)
+	if strings.TrimSpace(sid) == "" {
+		sid = randHex(32)
+		sess.Values["sid"] = sid
+	}
 	sess.Values["user"] = u
 	sess.Values["exp"] = time.Now().Add(7 * 24 * time.Hour).Unix()
 	_ = sess.Save(r, w)
+
+	// expiry = min(session 7d, token exp if present)
+	exp := time.Now().Add(7 * 24 * time.Hour)
+	if claims.Exp > 0 {
+		if te := time.Unix(claims.Exp, 0); te.Before(exp) {
+			exp = te
+		}
+	}
+	idtStore.put(sid, rawID, exp)
 
 	log.Printf("auth: login ok sub=%s email=%s", u.Sub, u.Email)
 
@@ -321,11 +392,12 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func LogoutHandler(w http.ResponseWriter, r *http.Request) {
-	// we no longer persist id_token in the cookie; fall back to local clear
-	// (RP-initiated logout will be skipped unless you add a server-side store)
+	// retrieve sid/id_token for RP-initiated logout BEFORE clearing
+	sess, _ := store.Get(r, sessionName)
+	sid, _ := sess.Values["sid"].(string)
+	rawID := idtStore.pop(sid) // empty if absent/expired
 
 	// expire main session
-	sess, _ := store.Get(r, sessionName)
 	for k := range sess.Values {
 		delete(sess.Values, k)
 	}
@@ -355,6 +427,24 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 		Domain:   cfg.CookieDomain,
 	}
 	_ = tmp.Save(r, w)
+
+	// If discovery had an end_session_endpoint and we have an id_token, do RP-initiated logout.
+	if endSessionEndpoint != "" && strings.TrimSpace(rawID) != "" {
+		u, _ := url.Parse(endSessionEndpoint)
+		q := u.Query()
+		q.Set("id_token_hint", rawID)
+		if cfg.PostLogoutRedirectURL != "" {
+			q.Set("post_logout_redirect_uri", cfg.PostLogoutRedirectURL)
+		}
+		// Some IdPs (and specs) allow/expect client_id too — harmless if ignored
+		if cfg.ClientID != "" {
+			q.Set("client_id", cfg.ClientID)
+		}
+		u.RawQuery = q.Encode()
+		log.Printf("auth: rp-logout redirecting to OP end_session_endpoint")
+		http.Redirect(w, r, u.String(), http.StatusSeeOther) // 303
+		return
+	}
 
 	// Fallback: JSON callers get 204, otherwise go home
 	if r.Header.Get("Accept") == "application/json" {

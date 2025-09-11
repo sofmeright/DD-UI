@@ -338,8 +338,8 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 	for _, s := range base {
 		e := EnhancedIacStackOut{IacStackOut: s}
 
-		// Project is derived solely from stack name (user-intended name).
-		project := composeProjectNameFromStack(s.Name)
+		// Gather runtime by Compose project label (derived from scope + stack)
+		project := composeProjectNameFromParts(s.ScopeName, s.Name)
 
 		ff := filters.NewArgs()
 		ff.Add("label", "com.docker.compose.project="+project)

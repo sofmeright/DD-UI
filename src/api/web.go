@@ -1137,7 +1137,7 @@ func makeRouter() http.Handler {
 				var updatedAt time.Time
 				err := db.QueryRow(r.Context(), `
 					SELECT id, repo_id, scope_kind::text, scope_name, stack_name, rel_path,
-					       iac_enabled, deploy_kind::text, sops_status::text, auto_apply_override, updated_at
+						iac_enabled, deploy_kind::text, sops_status::text, auto_apply_override, updated_at
 					FROM iac_stacks
 					WHERE id=$1
 				`, id).Scan(
@@ -1154,32 +1154,30 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"stack": row})
 			})
 
-			// Patch IaC stack (decoupled + compat)
+			// Patch IaC stack (no implicit override writes)
 			priv.Patch("/iac/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {
 				idStr := chi.URLParam(r, "id")
 				id, _ := strconv.ParseInt(idStr, 10, 64)
 
 				var body struct {
 					IacEnabled        *bool `json:"iac_enabled,omitempty"`
-					AutoDevOps        *bool `json:"auto_devops,omitempty"`
-					AutoDevOpsInherit *bool `json:"auto_devops_inherit,omitempty"`
+					AutoDevOps        *bool `json:"auto_devops,omitempty"`          // explicit override set/clear (when provided)
+					AutoDevOpsInherit *bool `json:"auto_devops_inherit,omitempty"`  // when true, clear override (set NULL)
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					http.Error(w, "bad json", http.StatusBadRequest)
 					return
 				}
 
-				// Update iac_enabled only (decoupled)
-				var touchedIac bool
+				// Only update iac_enabled if caller asked
 				if body.IacEnabled != nil {
 					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET iac_enabled=$1 WHERE id=$2`, *body.IacEnabled, id); err != nil {
 						http.Error(w, err.Error(), http.StatusBadRequest)
 						return
 					}
-					touchedIac = true
 				}
 
-				// Clear override if requested
+				// Clear explicit override if requested
 				if body.AutoDevOpsInherit != nil && *body.AutoDevOpsInherit {
 					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_apply_override=NULL WHERE id=$1`, id); err != nil {
 						http.Error(w, err.Error(), http.StatusBadRequest)
@@ -1187,17 +1185,12 @@ func makeRouter() http.Handler {
 					}
 				}
 
-				// Set explicit auto devops override
+				// Set explicit override when provided
 				if body.AutoDevOps != nil {
 					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_apply_override=$1 WHERE id=$2`, *body.AutoDevOps, id); err != nil {
 						http.Error(w, err.Error(), http.StatusBadRequest)
 						return
 					}
-				}
-
-				// Compatibility: if only iac_enabled was set, mirror into auto_apply_override
-				if touchedIac && body.AutoDevOps == nil && (body.AutoDevOpsInherit == nil || !*body.AutoDevOpsInherit) {
-					_, _ = db.Exec(r.Context(), `UPDATE iac_stacks SET auto_apply_override=$1 WHERE id=$2`, *body.IacEnabled, id)
 				}
 
 				eff, _ := shouldAutoApply(r.Context(), id)

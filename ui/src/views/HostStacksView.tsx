@@ -240,7 +240,14 @@ export default function HostStacksView({
 
           if (is) {
             for (const svc of services) {
-              const exists = rows.some((r) => r.name === (svc.container_name || svc.service_name));
+              // A service exists if any runtime container in this stack reports the same compose_service,
+              // or if its container's actual name matches an explicit container_name the user set.
+              const exists =
+              (rcs || []).some(
+                (c) =>
+                  (c.compose_service && c.compose_service === svc.service_name) ||
+                  (!!svc.container_name && c.name === svc.container_name)
+              );
               if (!exists) {
                 rows.push({
                   name: svc.container_name || svc.service_name,

@@ -60,7 +60,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 		return nil
 	}
 
-	// Compose project name = sanitized stack name (no scope).
+	// Derive Compose project label (normalized) from scope+stack
 	projectName := deriveComposeProjectName(ctx, stackID)
 	if strings.TrimSpace(projectName) == "" {
 		projectName = fmt.Sprintf("ddui_%d", stackID)

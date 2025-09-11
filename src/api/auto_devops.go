@@ -3,44 +3,50 @@ package main
 
 import (
 	"context"
-	"fmt"
+	"errors"
+	"strings"
 )
 
-// shouldAutoApply returns true when it's appropriate to apply changes automatically.
-// Policy (independent of image tags):
-//   • Stack must be iac_enabled AND have any content (compose/env/scripts/other).
-//   • If no successful deployment stamp exists → allow (initial deploy).
-//   • If current bundle hash (tracked IaC files) != latest successful stamp hash → allow.
-//   • Else → false.
+// shouldAutoApply resolves effective Auto DevOps as:
+// 1) explicit per-stack override (iac_stacks.auto_apply_override) if set
+// 2) scope override: host_settings or group_settings (based on stack scope)
+// 3) global DB override (app_settings.devops_apply) if set
+// 4) DDUI_DEVOPS_APPLY env flag (default "false")
+// Manual deployments bypass this gate.
 func shouldAutoApply(ctx context.Context, stackID int64) (bool, error) {
-	var enabled bool
-	if err := db.QueryRow(ctx, `SELECT iac_enabled FROM iac_stacks WHERE id=$1`, stackID).Scan(&enabled); err != nil {
-		return false, fmt.Errorf("shouldAutoApply: load stack: %w", err)
-	}
-	if !enabled {
-		return false, nil
+	var scopeKind, scopeName string
+	var stackOv *bool
+
+	err := db.QueryRow(ctx, `
+		SELECT scope_kind::text, scope_name, auto_apply_override
+		FROM iac_stacks WHERE id=$1
+	`, stackID).Scan(&scopeKind, &scopeName, &stackOv)
+	if err != nil {
+		return false, errors.New("stack not found")
 	}
 
-	has, err := stackHasContent(ctx, stackID)
-	if err != nil {
-		return false, fmt.Errorf("shouldAutoApply: check content: %w", err)
-	}
-	if !has {
-		return false, nil
+	// 1) Stack override wins if present
+	if stackOv != nil {
+		return *stackOv, nil
 	}
 
-	curHash, err := ComputeCurrentBundleHash(ctx, stackID)
-	if err != nil {
-		return false, fmt.Errorf("shouldAutoApply: compute bundle hash: %w", err)
+	// 2) Scope override
+	switch strings.ToLower(scopeKind) {
+	case "host":
+		if hov, _ := getHostDevopsOverride(ctx, scopeName); hov != nil {
+			return *hov, nil
+		}
+	case "group":
+		if gov, _ := getGroupDevopsOverride(ctx, scopeName); gov != nil {
+			return *gov, nil
+		}
 	}
 
-	stamp, err := GetLatestDeploymentStamp(ctx, stackID)
-	if err != nil {
-		// Either table missing or simply no successful stamp yet → initial deploy allowed
-		return true, nil
+	// 3) Global DB override
+	if glob, ok := getAppSettingBool(ctx, "devops_apply"); ok && glob != nil {
+		return *glob, nil
 	}
-	if stamp.DeploymentHash != curHash {
-		return true, nil
-	}
-	return false, nil
+
+	// 4) Env fallback (default false if absent/invalid)
+	return envBool("DDUI_DEVOPS_APPLY", "false"), nil
 }

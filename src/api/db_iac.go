@@ -321,6 +321,13 @@ type EnhancedIacStackOut struct {
 	Containers       []ContainerBrief `json:"containers"`
 }
 
+// composeProjectName builds the Compose project name the same way deploy.go does
+// (scopeName + "_" + stackName, normalized).
+func composeProjectName(scopeName, stackName string) string {
+	base := strings.ToLower(strings.TrimSpace(scopeName) + "_" + strings.TrimSpace(stackName))
+	return sanitizeProject(base)
+}
+
 // listEnhancedIacStacksForHost returns stacks with runtime info and drift:
 // • Drift if current bundle hash != latest successful stamp hash (files changed).
 // • Drift if no containers are present while stack has content & is enabled.

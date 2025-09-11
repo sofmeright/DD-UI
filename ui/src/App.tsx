@@ -4,6 +4,7 @@ import { Routes, Route, useNavigate, useLocation, useParams } from "react-router
 import LeftNav from "@/components/LeftNav";
 import LoginGate from "@/components/LoginGate";
 import HostsView from "@/views/HostsView";
+import StacksView from "@/views/StacksView";
 import HostStacksView from "@/views/HostStacksView";
 import StackDetailView from "@/views/StackDetailView";
 import ImagesView from "@/views/ImagesView";
@@ -24,26 +25,22 @@ export default function App() {
   
   const navigate = useNavigate();
   const location = useLocation();
-
-  // Helper: current host from URL (fallback to first host)
-  const currentHostFromPath = () => {
-    const m = location.pathname.match(/^\/hosts\/([^/]+)/);
-    return (m && decodeURIComponent(m[1])) || hosts[0]?.name || "";
-  };
   
-  // Determine current page from URL (for LeftNav highlighting)
+  // Determine current page from URL (for LeftNav highlight)
   const getCurrentPage = () => {
     const path = location.pathname;
     if (path === "/hosts") return "hosts";
-    if (path.startsWith("/hosts/")) {
-      const seg = path.split("/")[3]; // ['', 'hosts', '<host>', '<section>', ...]
-      if (seg === "images") return "images";
-      if (seg === "networks") return "networks";
-      if (seg === "volumes") return "volumes";
-      // default for /hosts/:hostName or /hosts/:hostName/stacks(/...)
-      return "stacks";
-    }
+    if (/^\/hosts\/[^/]+\/stacks/.test(path)) return "stacks";
+    if (/^\/hosts\/[^/]+\/images/.test(path)) return "images";
+    if (/^\/hosts\/[^/]+\/networks/.test(path)) return "networks";
+    if (/^\/hosts\/[^/]+\/volumes/.test(path)) return "volumes";
     return "hosts";
+  };
+
+  // Current host inferred from URL, fallback to first host if needed
+  const currentHostFromPath = () => {
+    const m = location.pathname.match(/^\/hosts\/([^/]+)/);
+    return (m && decodeURIComponent(m[1])) || hosts[0]?.name || "";
   };
 
   useEffect(() => {
@@ -148,36 +145,34 @@ export default function App() {
   if (sessionChecked && !authed) return <LoginGate />;
   if (!sessionChecked) return <div className="min-h-screen bg-slate-950" />;
 
-  // Route components
+  // Pages bound to new routes
+
+  // Stacks list WITH DROPDOWN (wrap StacksView and remount on :hostName to avoid stale data)
   const HostStacksPage = () => {
     const { hostName } = useParams<{ hostName: string }>();
-    const host = hosts.find(h => h.name === hostName);
-    if (!host) {
-      navigate('/hosts');
-      return null;
-    }
     return (
-      <HostStacksView
-        host={host}
-        onSync={() => refreshMetricsForHosts([host.name])}
-        onOpenStack={(stackName, iacId) =>
-          navigate(`/hosts/${encodeURIComponent(hostName!)}/stacks/${encodeURIComponent(stackName)}${iacId ? `?iacId=${iacId}` : ""}`)
+      <StacksView
+        key={hostName || "all"}
+        hosts={hosts}
+        onOpenStack={(host, stackName, iacId) =>
+          navigate(`/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}${iacId ? `?iacId=${iacId}` : ""}`)
         }
       />
     );
   };
 
+  // Stack details
   const StackDetailPage = () => {
     const { hostName, stackName } = useParams<{ hostName: string; stackName: string }>();
     const searchParams = new URLSearchParams(location.search);
-    const iacId = searchParams.get('iacId') ? parseInt(searchParams.get('iacId')!) : undefined;
-    
+    const iacId = searchParams.get("iacId") ? parseInt(searchParams.get("iacId")!) : undefined;
+
     const host = hosts.find(h => h.name === hostName);
     if (!host || !stackName) {
-      navigate('/hosts');
+      navigate("/hosts");
       return null;
     }
-    
+
     return (
       <StackDetailView
         host={host}
@@ -186,6 +181,20 @@ export default function App() {
         onBack={() => navigate(`/hosts/${encodeURIComponent(host.name)}/stacks`)}
       />
     );
+  };
+
+  // Simple wrappers so images/networks/volumes remount on :hostName (prevents stale UI)
+  const HostImagesPage = () => {
+    const { hostName } = useParams<{ hostName: string }>();
+    return <ImagesView key={hostName || "all"} hosts={hosts} />;
+  };
+  const HostNetworksPage = () => {
+    const { hostName } = useParams<{ hostName: string }>();
+    return <NetworksView key={hostName || "all"} hosts={hosts} />;
+  };
+  const HostVolumesPage = () => {
+    const { hostName } = useParams<{ hostName: string }>();
+    return <VolumesView key={hostName || "all"} hosts={hosts} />;
   };
 
   return (
@@ -215,10 +224,11 @@ export default function App() {
         }}
       />
 
-      {/* Right side layout retained */}
+      {/* Right side: layout unchanged */}
       <div className="flex-1 min-w-0 max-h-screen flex flex-col">
         <main className="flex-1 overflow-y-auto overflow-x-hidden p-3 sm:p-4 lg:p-6">
           <Routes>
+            {/* Only the allowed states */}
             <Route path="/hosts" element={
               <HostsView
                 metrics={metrics}
@@ -235,12 +245,13 @@ export default function App() {
             } />
             <Route path="/hosts/:hostName/stacks" element={<HostStacksPage />} />
             <Route path="/hosts/:hostName/stacks/:stackName" element={<StackDetailPage />} />
-            <Route path="/hosts/:hostName/images" element={<ImagesView hosts={hosts} />} />
-            <Route path="/hosts/:hostName/networks" element={<NetworksView hosts={hosts} />} />
-            <Route path="/hosts/:hostName/volumes" element={<VolumesView hosts={hosts} />} />
+            <Route path="/hosts/:hostName/images" element={<HostImagesPage />} />
+            <Route path="/hosts/:hostName/networks" element={<HostNetworksPage />} />
+            <Route path="/hosts/:hostName/volumes" element={<HostVolumesPage />} />
           </Routes>
         </main>
 
+        {/* Footer preserved */}
         <footer className="shrink-0 border-t border-slate-800 bg-slate-950/80">
           <div className="px-3 sm:px-4 lg:px-6 py-2 text-[10px] leading-none text-slate-500 text-center">
             © {new Date().getFullYear()} PrecisionPlanIT &amp; SoFMeRight (Kai)

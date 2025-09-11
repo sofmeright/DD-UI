@@ -179,7 +179,7 @@ export default function App() {
   };
 
   return (
-    <div className="min-h-screen flex">
+    <div className="min-h-screen bg-slate-950 flex">
       <LeftNav
         page={getCurrentPage()}
         onGoHosts={() => navigate('/hosts')}
@@ -188,48 +188,60 @@ export default function App() {
         onGoNetworks={() => navigate('/networks')}
         onGoVolumes={() => navigate('/volumes')}
       />
-      <div className="flex-1 min-w-0">
-        <Routes>
-          <Route path="/" element={
-            <HostsView
-              metrics={metrics}
-              hosts={hosts}
-              filteredHosts={filteredHosts}
-              loading={loading}
-              err={err}
-              scanning={scanning}
-              onScanAll={handleScanAll}
-              onFilter={setFilterQuery}
-              onOpenHost={(hostName) => navigate(`/hosts/${hostName}`)}
-              refreshMetricsForHosts={() => refreshMetricsForHosts(hosts.map(h => h.name))}
-            />
-          } />
-          <Route path="/hosts" element={
-            <HostsView
-              metrics={metrics}
-              hosts={hosts}
-              filteredHosts={filteredHosts}
-              loading={loading}
-              err={err}
-              scanning={scanning}
-              onScanAll={handleScanAll}
-              onFilter={setFilterQuery}
-              onOpenHost={(hostName) => navigate(`/hosts/${hostName}`)}
-              refreshMetricsForHosts={() => refreshMetricsForHosts(hosts.map(h => h.name))}
-            />
-          } />
-          <Route path="/hosts/:hostName" element={<HostStacksPage />} />
-          <Route path="/stacks" element={
-            <StacksView
-              hosts={hosts}
-              onOpenStack={(host, stackName, iacId) => navigate(`/stacks/${stackName}?host=${host.name}${iacId ? `&iacId=${iacId}` : ''}`)}
-            />
-          } />
-          <Route path="/stacks/:stackName" element={<StackDetailPage />} />
-          <Route path="/images" element={<ImagesView hosts={hosts} />} />
-          <Route path="/networks" element={<NetworksView hosts={hosts} />} />
-          <Route path="/volumes" element={<VolumesView hosts={hosts} />} />
-        </Routes>
+
+      {/* Right side: keep all functionality; only layout/padding/overflow adjusted */}
+      <div className="flex-1 min-w-0 max-h-screen flex flex-col">
+        {/* Main content area */}
+        <main className="flex-1 overflow-y-auto overflow-x-hidden p-3 sm:p-4 lg:p-6">
+          <Routes>
+            <Route path="/" element={
+              <HostsView
+                metrics={metrics}
+                hosts={hosts}
+                filteredHosts={filteredHosts}
+                loading={loading}
+                err={err}
+                scanning={scanning}
+                onScanAll={handleScanAll}
+                onFilter={setFilterQuery}
+                onOpenHost={(hostName) => navigate(`/hosts/${hostName}`)}
+                refreshMetricsForHosts={() => refreshMetricsForHosts(hosts.map(h => h.name))}
+              />
+            } />
+            <Route path="/hosts" element={
+              <HostsView
+                metrics={metrics}
+                hosts={hosts}
+                filteredHosts={filteredHosts}
+                loading={loading}
+                err={err}
+                scanning={scanning}
+                onScanAll={handleScanAll}
+                onFilter={setFilterQuery}
+                onOpenHost={(hostName) => navigate(`/hosts/${hostName}`)}
+                refreshMetricsForHosts={() => refreshMetricsForHosts(hosts.map(h => h.name))}
+              />
+            } />
+            <Route path="/hosts/:hostName" element={<HostStacksPage />} />
+            <Route path="/stacks" element={
+              <StacksView
+                hosts={hosts}
+                onOpenStack={(host, stackName, iacId) => navigate(`/stacks/${stackName}?host=${host.name}${iacId ? `&iacId=${iacId}` : ''}`)}
+              />
+            } />
+            <Route path="/stacks/:stackName" element={<StackDetailPage />} />
+            <Route path="/images" element={<ImagesView hosts={hosts} />} />
+            <Route path="/networks" element={<NetworksView hosts={hosts} />} />
+            <Route path="/volumes" element={<VolumesView hosts={hosts} />} />
+          </Routes>
+        </main>
+
+        {/* Footer credits (minimal, matches theme) */}
+        <footer className="shrink-0 border-t border-slate-800 bg-slate-950/80">
+          <div className="px-3 sm:px-4 lg:px-6 py-2 text-[10px] leading-none text-slate-500 text-center">
+            © {new Date().getFullYear()} PrecisionPlanIT &amp; SoFMeRight (Kai)
+          </div>
+        </footer>
       </div>
     </div>
   );

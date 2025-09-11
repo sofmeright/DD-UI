@@ -1,3 +1,4 @@
+// src/api/deploy.go
 package main
 
 import (
@@ -70,8 +71,8 @@ func deployStack(ctx context.Context, stackID int64) error {
 	}
 
 	// Derive a stable Compose project name so we can find containers by label
-	projectName, err := deriveComposeProjectName(ctx, stackID)
-	if err != nil || projectName == "" {
+	projectName := deriveComposeProjectName(ctx, stackID) // <- now single return
+	if projectName == "" {
 		// Fall back to directory-based default if anything goes wrong
 		projectName = "ddui_" + fmt.Sprint(stackID)
 	}

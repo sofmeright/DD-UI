@@ -264,16 +264,20 @@ func deleteIacFileRow(ctx context.Context, stackID int64, relPath string) error 
 
 // stackHasContent returns true if the stack has any tracked files or a compose_file set.
 func stackHasContent(ctx context.Context, stackID int64) (bool, error) {
-	var n int64
-	if err := db.QueryRow(ctx, `SELECT COUNT(1) FROM iac_stack_files WHERE stack_id=$1`).Scan(&n); err != nil {
+	var has bool
+	// Use a single query with explicit placeholders for each reference to avoid driver quirks.
+	err := db.QueryRow(ctx, `
+		SELECT
+			EXISTS (SELECT 1 FROM iac_stack_files WHERE stack_id = $1)
+			OR EXISTS (
+				SELECT 1 FROM iac_stacks
+				WHERE id = $2 AND COALESCE(compose_file, '') <> ''
+			)
+	`, stackID, stackID).Scan(&has)
+	if err != nil {
 		return false, err
 	}
-	if n > 0 {
-		return true, nil
-	}
-	var compose string
-	_ = db.QueryRow(ctx, `SELECT COALESCE(compose_file,'') FROM iac_stacks WHERE id=$1`, stackID).Scan(&compose)
-	return strings.TrimSpace(compose) != "", nil
+	return has, nil
 }
 
 // ComputeCurrentBundleHash calculates a deterministic hash over all tracked files

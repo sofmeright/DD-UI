@@ -1,5 +1,5 @@
 // ui/src/views/HostsStacksView.tsx
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -46,7 +46,7 @@ export default function HostStacksView({
   const [streamLogs, setStreamLogs] = useState<{ ctr: string } | null>(null);
   const [consoleTarget, setConsoleTarget] = useState<{ ctr: string; cmd?: string } | null>(null);
 
-  // Lightweight info modal (used for one-shot text like Stats)
+  // Lightweight info modal
   const [infoModal, setInfoModal] = useState<{ title: string; text: string } | null>(null);
 
   function matchRow(r: MergedRow, q: string) {
@@ -103,7 +103,6 @@ export default function HostStacksView({
     }
   }
 
-  // Open live logs (EventSource)
   function openLiveLogs(ctr: string) {
     setStreamLogs({ ctr });
   }
@@ -114,7 +113,6 @@ export default function HostStacksView({
       setLoading(true);
       setErr(null);
       try {
-        // Keep existing rich runtime + IaC fetches (created_ts, IP, ports, etc.)
         const [rc, ri] = await Promise.all([
           fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`, { credentials: "include" }),
           fetch(`/api/hosts/${encodeURIComponent(host.name)}/iac`, { credentials: "include" }),
@@ -128,8 +126,8 @@ export default function HostStacksView({
         const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
         const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
 
-        // NEW: fetch enhanced to source DRIFT + Compose config-hash (no image comparison)
-        let enhancedByName = new Map<
+        // Enhanced drift/runtime (source drift & config-hash from backend)
+        const enhancedByName = new Map<
           string,
           { drift_detected: boolean; drift_reason?: string; containers?: Array<{ name: string; config_hash?: string }> }
         >();
@@ -155,10 +153,10 @@ export default function HostStacksView({
             }
           }
         } catch {
-          // ignore; we can still render without enhanced
+          /* ignore */
         }
 
-        // Fetch per-stack effective Auto DevOps (unchanged)
+        // Per-stack effective Auto DevOps
         const effMap: Record<number, boolean> = {};
         await Promise.all(
           (iacStacks || [])
@@ -172,7 +170,7 @@ export default function HostStacksView({
                   effMap[j.stack.id] = !!j.stack.effective_auto_devops;
                 }
               } catch {
-                /* ignore per-stack errors */
+                /* ignore */
               }
             })
         );
@@ -187,8 +185,8 @@ export default function HostStacksView({
         const iacByStack = new Map<string, IacStack>();
         for (const s of iacStacks) iacByStack.set(s.name, s);
 
-        // Map for config-hash by container name (from enhanced)
-        const cfgHashByName = new Map<string, string>(); // NEW
+        // config-hash by container name
+        const cfgHashByName = new Map<string, string>();
         for (const [sname, e] of enhancedByName.entries()) {
           for (const c of e.containers || []) {
             if (c?.name && c?.config_hash) cfgHashByName.set(c.name, c.config_hash);
@@ -207,7 +205,6 @@ export default function HostStacksView({
 
           const rows: MergedRow[] = [];
 
-          // We no longer use desiredImageFor to compute drift (image mismatch removed).
           function desiredImageFor(c: ApiContainer): string | undefined {
             if (!is || services.length === 0) return undefined;
             const svc = services.find(
@@ -221,24 +218,23 @@ export default function HostStacksView({
           for (const c of rcs) {
             const portsLines = formatPortsLines((c as any).ports);
             const portsText = portsLines.join("\n");
-            const desired = desiredImageFor(c);
+            const _desired = desiredImageFor(c);
 
-            // NEW: stop flagging row-level drift based on image mismatch
             rows.push({
               name: c.name,
               state: c.state,
               stack: sname,
               imageRun: c.image,
-              imageIac: undefined, // don’t render desired image next to runtime (requested)
+              imageIac: undefined, // do not compare images for drift
               created: formatDT(c.created_ts),
               ip: c.ip_addr,
               portsText,
               owner: c.owner || "—",
-              drift: false, // runtime rows no longer marked as drift via image check
-              // @ts-ignore stash config-hash for optional display (not in MergedRow type)
+              drift: false, // runtime rows not marked as drift via image mismatch
+              // @ts-ignore: stash for optional badge/details
               configHash: cfgHashByName.get(c.name) || undefined,
-              // @ts-ignore stash desired for missing rows comparison context only
-              _desiredImage: desired,
+              // @ts-ignore
+              _desiredImage: _desired,
             } as any);
           }
 
@@ -251,18 +247,17 @@ export default function HostStacksView({
                   state: "missing",
                   stack: sname,
                   imageRun: undefined,
-                  imageIac: svc.image, // keep showing IaC image for **missing** containers only
+                  imageIac: svc.image, // keep IaC image for missing only
                   created: "—",
                   ip: "—",
                   portsText: "—",
                   owner: "—",
-                  drift: true, // missing container is drift at row level
+                  drift: true,
                 });
               }
             }
           }
 
-          // NEW: stack-level drift comes from backend enhanced result if available
           const enh = enhancedByName.get(sname);
           let stackDrift: "in_sync" | "drift" | "unknown" = "unknown";
           if (enh) {
@@ -277,7 +272,7 @@ export default function HostStacksView({
           const mergedRow: MergedStack = {
             name: sname,
             drift: stackDrift,
-            iacEnabled: effectiveAuto, // switch reflects EFFECTIVE auto-devops
+            iacEnabled: effectiveAuto,
             pullPolicy: hasIac ? is?.pull_policy : undefined,
             sops: hasIac ? is?.sops_status === "all" : false,
             deployKind: hasIac ? is?.deploy_kind || "compose" : sname === "(none)" ? "unmanaged" : "unmanaged",
@@ -287,7 +282,7 @@ export default function HostStacksView({
             hasContent,
           };
 
-          // @ts-ignore expose drift reason for tooltip
+          // @ts-ignore: drift reason tooltip
           if (enh?.drift_reason) (mergedRow as any).driftReason = enh.drift_reason;
 
           merged.push(mergedRow);
@@ -305,16 +300,38 @@ export default function HostStacksView({
     };
   }, [host.name, onSync]);
 
+  // --- Name validation helpers (warn-only; Compose will normalize) ---
+  function dockerSanitizePreview(s: string): string {
+    const lowered = s.trim().toLowerCase().replaceAll(" ", "_");
+    return lowered.replace(/[^a-z0-9_-]/g, "_") || "default";
+  }
+  function hasUnsupportedChars(s: string): boolean {
+    // Allow letters (any case), digits, space, hyphen, underscore. Anything else -> warn.
+    return /[^A-Za-z0-9 _-]/.test(s);
+  }
+
   async function createStackFlow() {
     const existing = new Set(stacks.map((s) => s.name));
     let name = prompt("New stack name:");
     if (!name) return;
     name = name.trim();
     if (!name) return;
+
     if (existing.has(name)) {
       alert("A stack with that name already exists.");
       return;
     }
+
+    if (hasUnsupportedChars(name)) {
+      const preview = dockerSanitizePreview(name);
+      const ok = confirm(
+        `Heads up: Docker Compose will normalize this name for the project label.\n` +
+          `You entered:  "${name}"\n` +
+          `Compose uses: "${preview}"\n\nProceed with "${name}"?`
+      );
+      if (!ok) return;
+    }
+
     try {
       const r = await fetch(`/api/iac/stacks`, {
         method: "POST",
@@ -323,7 +340,7 @@ export default function HostStacksView({
         body: JSON.stringify({
           scope_kind: "host",
           scope_name: host.name,
-          stack_name: name,
+          stack_name: name, // store EXACT name as entered; Compose sanitizes at deploy
           iac_enabled: false,
         }),
       });
@@ -350,9 +367,7 @@ export default function HostStacksView({
     const s = stacks[sIndex];
     if (!s.iacId || !s.hasContent) {
       if (enabled) {
-        alert(
-          "This stack needs compose files or services before Auto DevOps can be enabled. Add content first."
-        );
+        alert("This stack needs compose files or services before Auto DevOps can be enabled. Add content first.");
       }
       return;
     }
@@ -368,11 +383,7 @@ export default function HostStacksView({
   async function deleteStackAt(index: number) {
     const s = stacks[index];
     if (!s.iacId) return;
-    if (
-      !confirm(
-        `Delete IaC for stack "${s.name}"? This removes IaC files/metadata but not runtime containers.`
-      )
-    )
+    if (!confirm(`Delete IaC for stack "${s.name}"? This removes IaC files/metadata but not runtime containers.`))
       return;
     const r = await fetch(`/api/iac/stacks/${s.iacId}`, { method: "DELETE", credentials: "include" });
     if (!r.ok) {
@@ -397,7 +408,6 @@ export default function HostStacksView({
     );
   }
 
-  // Close infoModal with Escape for accessibility
   useEffect(() => {
     if (!infoModal) return;
     const onEsc = (e: KeyboardEvent) => {
@@ -411,23 +421,15 @@ export default function HostStacksView({
     <div className="space-y-4">
       {/* Streaming Logs Modal */}
       {streamLogs && (
-        <LiveLogsModal
-          host={host.name}
-          container={streamLogs.ctr}
-          onClose={() => setStreamLogs(null)}
-        />
+        <LiveLogsModal host={host.name} container={streamLogs.ctr} onClose={() => setStreamLogs(null)} />
       )}
 
       {/* Console Modal */}
       {consoleTarget && (
-        <ConsoleModal
-          host={host.name}
-          container={consoleTarget.ctr}
-          onClose={() => setConsoleTarget(null)}
-        />
+        <ConsoleModal host={host.name} container={consoleTarget.ctr} onClose={() => setConsoleTarget(null)} />
       )}
 
-      {/* Lightweight Info Modal (used for Stats or simple text output) */}
+      {/* Info Modal */}
       {infoModal && (
         <div
           className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
@@ -444,12 +446,7 @@ export default function HostStacksView({
               <div className="text-slate-200 font-semibold" id="info-title">
                 {infoModal.title}
               </div>
-              <Button
-                size="sm"
-                variant="outline"
-                className="border-slate-700"
-                onClick={() => setInfoModal(null)}
-              >
+              <Button size="sm" variant="outline" className="border-slate-700" onClick={() => setInfoModal(null)}>
                 Close
               </Button>
             </div>
@@ -469,7 +466,7 @@ export default function HostStacksView({
             <RefreshCw className="h-4 w-4 mr-1" /> Sync
           </Button>
           <Button onClick={createStackFlow} variant="outline" className="border-slate-700 text-slate-200">
-            <Eye className="hidden" /> {/* placeholder to avoid import shake issues */}
+            <Eye className="hidden" />
             New Stack
           </Button>
           <div className="relative w-72">
@@ -504,7 +501,6 @@ export default function HostStacksView({
                 </button>
               </CardTitle>
               <div className="flex items-center gap-2">
-                {/* NEW: drift reason as tooltip; badge now driven by backend */}
                 <span title={(s as any).driftReason || ""}>{DriftBadge(s.drift)}</span>
                 <Badge variant="outline" className="border-slate-700 text-slate-300">
                   {s.deployKind || "unknown"}
@@ -516,9 +512,7 @@ export default function HostStacksView({
                   s.sops ? (
                     <Badge className="bg-indigo-900/40 border-indigo-700/40 text-indigo-200">SOPS</Badge>
                   ) : (
-                    <Badge variant="outline" className="border-slate-700 text-slate-300">
-                      no SOPS
-                    </Badge>
+                    <Badge variant="outline" className="border-slate-700 text-slate-300">no SOPS</Badge>
                   )
                 ) : (
                   <Badge variant="outline" className="border-slate-700 text-slate-300">No IaC</Badge>
@@ -536,12 +530,7 @@ export default function HostStacksView({
                 disabled={!s.iacId || !s.hasContent}
               />
               {s.iacId && (
-                <Button
-                  size="icon"
-                  variant="ghost"
-                  title="Delete IaC for this stack"
-                  onClick={() => deleteStackAt(idx)}
-                >
+                <Button size="icon" variant="ghost" title="Delete IaC for this stack" onClick={() => deleteStackAt(idx)}>
                   <Trash2 className="h-4 w-4 text-rose-300" />
                 </Button>
               )}
@@ -568,20 +557,12 @@ export default function HostStacksView({
                     .map((r) => {
                       const st = (r.state || "").toLowerCase();
                       const isRunning =
-                        st.includes("running") ||
-                        st.includes("up") ||
-                        st.includes("healthy") ||
-                        st.includes("restarting");
+                        st.includes("running") || st.includes("up") || st.includes("healthy") || st.includes("restarting");
                       const isPaused = st.includes("paused");
-
-                      // NEW: optional config-hash short
                       const cfgShort = (r as any).configHash ? String((r as any).configHash).slice(0, 12) : "";
 
                       return (
-                        <tr
-                          key={r.name}
-                          className="border-t border-slate-800 hover:bg-slate-900/40 align-top"
-                        >
+                        <tr key={r.name} className="border-t border-slate-800 hover:bg-slate-900/40 align-top">
                           <td className="px-2 py-1.5 font-medium text-slate-200 truncate">{r.name}</td>
                           <td className="px-2 py-1.5 text-slate-300">
                             <StatePill state={r.state} />
@@ -591,7 +572,6 @@ export default function HostStacksView({
                               <div className="max-w-[24rem] truncate" title={r.imageRun || ""}>
                                 {r.imageRun || "—"}
                               </div>
-                              {/* NEW: show config-hash next to runtime image (no image comparison) */}
                               {cfgShort && (
                                 <span
                                   className="text-[10px] px-1.5 py-0.5 rounded border border-slate-700 text-slate-400"
@@ -600,7 +580,6 @@ export default function HostStacksView({
                                   cfg {cfgShort}
                                 </span>
                               )}
-                              {/* Keep IaC image only for rows representing missing services */}
                               {r.imageIac && r.state === "missing" && (
                                 <>
                                   <ChevronRight className="h-4 w-4 text-slate-500" />
@@ -614,26 +593,16 @@ export default function HostStacksView({
                           <td className="px-2 py-1.5 text-slate-300">{r.created || "—"}</td>
                           <td className="px-2 py-1.5 text-slate-300">{r.ip || "—"}</td>
                           <td className="px-2 py-1.5 text-slate-300 align-top">
-                            <div className="max-w-56 whitespace-pre-line leading-tight">
-                              {r.portsText || "—"}
-                            </div>
+                            <div className="max-w-56 whitespace-pre-line leading-tight">{r.portsText || "—"}</div>
                           </td>
                           <td className="px-2 py-1.5 text-slate-300">{r.owner || "—"}</td>
                           <td className="px-2 py-1">
                             <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap py-0.5">
                               {!isRunning && !isPaused && (
-                                <ActionBtn
-                                  title="Start"
-                                  icon={Play}
-                                  onClick={() => doCtrAction(r.name, "start")}
-                                />
+                                <ActionBtn title="Start" icon={Play} onClick={() => doCtrAction(r.name, "start")} />
                               )}
                               {isRunning && (
-                                <ActionBtn
-                                  title="Stop"
-                                  icon={Pause}
-                                  onClick={() => doCtrAction(r.name, "stop")}
-                                />
+                                <ActionBtn title="Stop" icon={Pause} onClick={() => doCtrAction(r.name, "stop")} />
                               )}
                               {(isRunning || isPaused) && (
                                 <ActionBtn
@@ -643,11 +612,7 @@ export default function HostStacksView({
                                 />
                               )}
                               {isRunning && !isPaused && (
-                                <ActionBtn
-                                  title="Pause"
-                                  icon={Pause}
-                                  onClick={() => doCtrAction(r.name, "pause")}
-                                />
+                                <ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />
                               )}
                               {isPaused && (
                                 <ActionBtn
@@ -659,16 +624,8 @@ export default function HostStacksView({
 
                               <span className="mx-1 h-4 w-px bg-slate-700/60" />
 
-                              <ActionBtn
-                                title="Live logs"
-                                icon={FileText}
-                                onClick={() => openLiveLogs(r.name)}
-                              />
-                              <ActionBtn
-                                title="Inspect"
-                                icon={Bug}
-                                onClick={() => onOpenStack(s.name, s.iacId)}
-                              />
+                              <ActionBtn title="Live logs" icon={FileText} onClick={() => openLiveLogs(r.name)} />
+                              <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
                               <ActionBtn
                                 title="Stats"
                                 icon={Activity}
@@ -688,21 +645,12 @@ export default function HostStacksView({
 
                               <span className="mx-1 h-4 w-px bg-slate-700/60" />
 
-                              <ActionBtn
-                                title="Kill"
-                                icon={ZapOff}
-                                onClick={() => doCtrAction(r.name, "kill")}
-                              />
-                              <ActionBtn
-                                title="Remove"
-                                icon={Trash2}
-                                onClick={() => doCtrAction(r.name, "remove")}
-                              />
-
+                              <ActionBtn title="Kill" icon={ZapOff} onClick={() => doCtrAction(r.name, "kill")} />
+                              <ActionBtn title="Remove" icon={Trash2} onClick={() => doCtrAction(r.name, "remove")} />
                               <ActionBtn
                                 title="Console"
                                 icon={Terminal}
-                                onClick={() => setConsoleTarget({ ctr: r.name /* shell picker in modal */ })}
+                                onClick={() => setConsoleTarget({ ctr: r.name })}
                                 disabled={!isRunning}
                               />
                             </div>
@@ -720,9 +668,7 @@ export default function HostStacksView({
                 </tbody>
               </table>
             </div>
-            <div className="pt-2 text-xs text-slate-400">
-              Tip: click the stack title to open the full compare & editor view.
-            </div>
+            <div className="pt-2 text-xs text-slate-400">Tip: click the stack title to open the full compare & editor view.</div>
           </CardContent>
         </Card>
       ))}
@@ -730,12 +676,8 @@ export default function HostStacksView({
       <Card className="bg-slate-900/40 border-slate-800">
         <CardContent className="py-4 flex flex-wrap items-center gap-3 text-sm text-slate-300">
           Security by default:
-          <span className="px-2 py-1 rounded bg-slate-800/60 border border-slate-700">
-            AGE key never persisted
-          </span>
-          <span className="px-2 py-1 rounded bg-slate-800/60 border border-slate-700">
-            Decrypt to tmpfs only
-          </span>
+          <span className="px-2 py-1 rounded bg-slate-800/60 border border-slate-700">AGE key never persisted</span>
+          <span className="px-2 py-1 rounded bg-slate-800/60 border border-slate-700">Decrypt to tmpfs only</span>
           <span className="px-2 py-1 rounded bg-slate-800/60 border border-slate-700">Redacted logs</span>
           <span className="px-2 py-1 rounded bg-slate-800/60 border border-slate-700">Obscured paths</span>
         </CardContent>

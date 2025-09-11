@@ -1,3 +1,4 @@
+// src/api/db_iac.go
 package main
 
 import (
@@ -151,7 +152,6 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 		return nil, err
 	}
 
-	// gather group names from host row (assuming stored in DB; fallback empty)
 	groups := h.Groups
 	if groups == nil {
 		groups = []string{}
@@ -278,9 +278,7 @@ func stackHasContent(ctx context.Context, stackID int64) (bool, error) {
 	return strings.TrimSpace(compose) != "", nil
 }
 
-// ComputeCurrentBundleHash returns a stable roll-up hash of all tracked IaC files
-// (compose/env/scripts/other) for a stack. Hash is independent of image tags and
-// changes whenever any file content changes.
+// ComputeCurrentBundleHash returns a stable roll-up hash of all tracked IaC files.
 func ComputeCurrentBundleHash(ctx context.Context, stackID int64) (string, error) {
 	files, err := listFilesForStack(ctx, stackID)
 	if err != nil {
@@ -288,8 +286,8 @@ func ComputeCurrentBundleHash(ctx context.Context, stackID int64) (string, error
 	}
 	lines := make([]string, 0, len(files))
 	for _, f := range files {
-		// Stable line per file; include role and rel_path so moves rename the bundle.
-		lines = append(lines, fmt.Sprintf("%s|%s|%s|%d", strings.ToLower(f.Role), f.RelPath, strings.ToLower(f.Sha256Hex), f.SizeBytes))
+		lines = append(lines, fmt.Sprintf("%s|%s|%s|%d",
+			strings.ToLower(f.Role), f.RelPath, strings.ToLower(f.Sha256Hex), f.SizeBytes))
 	}
 	sort.Strings(lines)
 	h := sha256.New()
@@ -301,7 +299,7 @@ func ComputeCurrentBundleHash(ctx context.Context, stackID int64) (string, error
 	return hex.EncodeToString(sum), nil
 }
 
-/* ---------- Enhanced IaC view: runtime + drift (file-change & compose config-hash) ---------- */
+/* ---------- Enhanced IaC (runtime + drift) ---------- */
 
 type ContainerBrief struct {
 	ID         string `json:"id"`
@@ -320,18 +318,12 @@ type EnhancedIacStackOut struct {
 	Containers       []ContainerBrief `json:"containers"`
 }
 
-// listEnhancedIacStacksForHost returns stacks with runtime info and drift:
-// • Drift if current bundle hash != latest successful stamp hash (files changed).
-// • Drift if no containers are present while stack has content & is enabled.
-// • We DO NOT compare image names; cards can show runtime image and other info.
 func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]EnhancedIacStackOut, error) {
-	// Base stacks for host/groups
 	base, err := listIacStacksForHost(ctx, hostName)
 	if err != nil {
 		return nil, err
 	}
 
-	// Docker client for host (single call)
 	h, err := GetHostByName(ctx, hostName)
 	if err != nil {
 		return nil, err
@@ -346,10 +338,12 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 	for _, s := range base {
 		e := EnhancedIacStackOut{IacStackOut: s}
 
-		// Gather runtime by Compose project label (derived from scope + stack)
-		project := composeProjectNameFromParts(s.ScopeName, s.Name)
+		// Project is derived solely from stack name (user-intended name).
+		project := composeProjectNameFromStack(s.Name)
+
 		ff := filters.NewArgs()
 		ff.Add("label", "com.docker.compose.project="+project)
+
 		ctrs, lerr := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: ff})
 		if lerr == nil {
 			for _, c := range ctrs {
@@ -368,14 +362,13 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 					Name:       name,
 					Service:    lbl("com.docker.compose.service"),
 					Image:      c.Image,
-					State:      c.State, // running/created/exited/paused/restarting
+					State:      c.State,
 					ConfigHash: lbl("com.docker.compose.config-hash"),
 				})
 			}
 		}
 
-		// Determine drift:
-		// 1) File-change vs last successful deployment stamp.
+		// Drift rule 1: IaC bundle changed since last successful deployment.
 		curHash, _ := ComputeCurrentBundleHash(ctx, s.ID)
 		if stamp, serr := GetLatestDeploymentStamp(ctx, s.ID); serr == nil {
 			e.LatestDeployment = stamp
@@ -383,13 +376,9 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 				e.DriftDetected = true
 				e.DriftReason = "IaC changed since last deploy"
 			}
-		} else if strings.Contains(serr.Error(), "deployment stamps feature not available") {
-			// Migration not applied — don't mark drift here; rely on runtime signal below.
-		} else {
-			// No successful stamp yet → initial deploy opportunity if enabled/content.
 		}
 
-		// 2) If enabled + has content but no containers (by our project) → needs deploy.
+		// Drift rule 2: Enabled + has content but no containers labeled with our project.
 		if !e.DriftDetected && s.IacEnabled {
 			if has, _ := stackHasContent(ctx, s.ID); has {
 				if len(e.Containers) == 0 {

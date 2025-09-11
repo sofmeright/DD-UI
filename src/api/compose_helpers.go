@@ -7,39 +7,49 @@ import (
 	"strings"
 )
 
-// sanitizeProject normalizes a Compose project name to docker-compose-friendly chars.
+// Compose allows lowercase letters, digits, hyphen, underscore.
+// We accept any user input, but normalize for Docker at deploy time.
+// NOTE: We do NOT trim leading/trailing '-' or '_' so we don't "refuse" them.
 var projRe = regexp.MustCompile(`[^a-z0-9_-]+`)
 
+// sanitizeProject converts a user-facing stack name into a Compose project name.
+// - lowercase
+// - spaces -> underscore
+// - any char outside [a-z0-9_-] -> underscore
+// If the result ends up empty, fall back to "default".
 func sanitizeProject(s string) string {
-	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return "default"
+	}
+	s = strings.ToLower(s)
 	s = strings.ReplaceAll(s, " ", "_")
 	s = projRe.ReplaceAllString(s, "_")
-	s = strings.Trim(s, "_-")
 	if s == "" {
-		s = "default"
+		return "default"
 	}
 	return s
 }
 
-// composeProjectNameFromParts builds the project name from scope & stack.
-func composeProjectNameFromParts(scopeName, stackName string) string {
-	base := strings.TrimSpace(scopeName) + "_" + strings.TrimSpace(stackName)
-	return sanitizeProject(base)
+// composeProjectNameFromStack uses ONLY the stack name (no scope) as the project basis.
+func composeProjectNameFromStack(stackName string) string {
+	return sanitizeProject(stackName)
 }
 
-// deriveComposeProjectName fetches scope/stack for a stack ID and returns the project name.
+// Back-compat shim: if older call sites still pass (scope, stack),
+// we now intentionally ignore scope and keep only the stack.
+func composeProjectNameFromParts(_ string, stackName string) string {
+	return composeProjectNameFromStack(stackName)
+}
+
+// deriveComposeProjectName reads stack_name and returns the sanitized Compose project name.
 func deriveComposeProjectName(ctx context.Context, stackID int64) string {
-	var scopeName, stackName string
-	_ = db.QueryRow(ctx, `
-		SELECT scope_name, stack_name
-		FROM iac_stacks
-		WHERE id=$1
-	`, stackID).Scan(&scopeName, &stackName)
-	return composeProjectNameFromParts(scopeName, stackName)
+	var stackName string
+	_ = db.QueryRow(ctx, `SELECT stack_name FROM iac_stacks WHERE id=$1`, stackID).Scan(&stackName)
+	return composeProjectNameFromStack(stackName)
 }
 
-// composeProjectName is a back-compat shim for legacy call sites that pass only stackID.
-// It uses context.Background() to look up scope/stack.
+// Legacy convenience (lookups with background context).
 func composeProjectName(stackID int64) string {
 	return deriveComposeProjectName(context.Background(), stackID)
 }

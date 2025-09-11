@@ -19,18 +19,9 @@ import (
 // ctxManualKey marks a deploy as "manual", which bypasses Auto DevOps gating.
 type ctxManualKey struct{}
 
-// deployStack stages a mirror of the stack into a scope-aware builds dir,
-// auto-decrypts any SOPS-protected env files into that stage (same names),
-// then runs `docker compose up -d` with the staged compose files.
-// Originals are never modified and plaintext only lives in the stage dir.
-//
-// IMPORTANT: Non-manual invocations are **gated** by shouldAutoApply(ctx, stackID).
-// Manual invocations bypass Auto DevOps (still require files to exist).
-//
-// We DO NOT run any follow-up `docker compose` commands after `up`.
-// Post-deploy stamping/association is done by inspecting containers via the Docker SDK.
+// deployStack: stage -> docker compose up -d (project = stack name) -> stamp -> associate via labels.
 func deployStack(ctx context.Context, stackID int64) error {
-	// Auto-DevOps gate (unless manual override)
+	// Auto-DevOps gate (unless manual)
 	if man, _ := ctx.Value(ctxManualKey{}).(bool); !man {
 		allowed, aerr := shouldAutoApply(ctx, stackID)
 		if aerr != nil {
@@ -42,7 +33,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 		}
 	}
 
-	// Working dir for compose (stack root on disk)
+	// Resolve root and rel path
 	root, err := getRepoRootForStack(ctx, stackID)
 	if err != nil {
 		return err
@@ -53,7 +44,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 		return errors.New("deploy: stack has no rel_path")
 	}
 
-	// Stage files for compose
+	// Stage compose files (and decrypt .env if applicable)
 	stageDir, stagedComposes, cleanup, derr := stageStackForCompose(ctx, stackID)
 	if derr != nil {
 		return derr
@@ -64,36 +55,32 @@ func deployStack(ctx context.Context, stackID int64) error {
 		}
 	}()
 
-	// Nothing to deploy? No-op (kept for clarity)
 	if len(stagedComposes) == 0 {
 		log.Printf("deploy: stack %d: no compose files tracked; skipping", stackID)
 		return nil
 	}
 
-	// Derive a stable Compose project name so we can find containers by label
-	projectName := deriveComposeProjectName(ctx, stackID) // <- now single return
-	if projectName == "" {
-		// Fall back to directory-based default if anything goes wrong
-		projectName = "ddui_" + fmt.Sprint(stackID)
+	// Compose project name = sanitized stack name (no scope).
+	projectName := deriveComposeProjectName(ctx, stackID)
+	if strings.TrimSpace(projectName) == "" {
+		projectName = fmt.Sprintf("ddui_%d", stackID)
 	}
 
-	// Create deployment stamp for tracking (best effort)
-	// We hash the concatenated staged compose content (same as before).
+	// Build a deployment stamp (best effort) from staged compose content.
 	var allComposeContent []byte
-	for _, composeFile := range stagedComposes {
-		content, rerr := os.ReadFile(composeFile)
+	for _, f := range stagedComposes {
+		b, rerr := os.ReadFile(f)
 		if rerr != nil {
-			return fmt.Errorf("failed to read staged compose file %s: %v", composeFile, rerr)
+			return fmt.Errorf("failed to read staged compose file %s: %v", f, rerr)
 		}
-		allComposeContent = append(allComposeContent, content...)
+		allComposeContent = append(allComposeContent, b...)
 	}
-	stamp, serr := CreateDeploymentStamp(ctx, stackID, "compose", /*user*/"", allComposeContent, nil)
+	stamp, serr := CreateDeploymentStamp(ctx, stackID, "compose", "", allComposeContent, nil)
 	if serr != nil {
 		log.Printf("deploy: failed to create deployment stamp: %v", serr)
-		// Continue deployment even if stamp creation fails
 	}
 
-	// Build: docker compose -p <project> -f <files...> up -d --remove-orphans
+	// docker compose -p <project> -f ... up -d --remove-orphans
 	args := []string{"compose", "-p", projectName}
 	for _, f := range stagedComposes {
 		args = append(args, "-f", f)
@@ -106,21 +93,18 @@ func deployStack(ctx context.Context, stackID int64) error {
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		// Mark deployment as failed if we created a stamp
 		if stamp != nil {
 			_ = UpdateDeploymentStampStatus(ctx, stamp.ID, "failed")
 		}
-		// Log full output so we can see the reason
 		log.Printf("deploy: docker compose failed: %v\n----\n%s\n----", err, string(out))
 		return fmt.Errorf("docker compose up failed: %v\n%s", err, string(out))
 	}
 
-	// Mark deployment as successful and associate containers by inspecting labels.
+	// Mark success and associate containers by project label.
 	if stamp != nil {
 		if uerr := UpdateDeploymentStampStatus(ctx, stamp.ID, "success"); uerr != nil {
 			log.Printf("deploy: failed to update deployment stamp status: %v", uerr)
 		}
-		// Retry a few times to give containers time to appear
 		go func(pj string, stampID int64, depHash string) {
 			backoff := []time.Duration{1 * time.Second, 2 * time.Second, 3 * time.Second, 5 * time.Second}
 			for i := 0; i < len(backoff); i++ {
@@ -131,8 +115,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 					return
 				}
 			}
-			// last attempt without backoff logging
-			if err := associateByProjectInspect(context.Background(), pj, stampID, depHash); err != nil {
+			if err := associateByProjectInspect(context.Background(), pj, stamp.ID, stamp.DeploymentHash); err != nil {
 				log.Printf("deploy: association (inspect) still failing for project=%s: %v", pj, err)
 			}
 		}(projectName, stamp.ID, stamp.DeploymentHash)
@@ -144,7 +127,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 	return nil
 }
 
-// associateByProjectInspect finds containers via the Compose project label and stamps them.
+// associateByProjectInspect stamps all containers with the given Compose project.
 func associateByProjectInspect(ctx context.Context, project string, stampID int64, deploymentHash string) error {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
@@ -155,10 +138,7 @@ func associateByProjectInspect(ctx context.Context, project string, stampID int6
 	flt := filters.NewArgs()
 	flt.Add("label", "com.docker.compose.project="+project)
 
-	list, err := cli.ContainerList(ctx, container.ListOptions{
-		All:     true,
-		Filters: flt,
-	})
+	list, err := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: flt})
 	if err != nil {
 		return err
 	}

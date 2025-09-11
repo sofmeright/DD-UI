@@ -1,7 +1,7 @@
-// src/api/deploy.go
 package main
 
 import (
+	"bufio"
 	"context"
 	"errors"
 	"fmt"
@@ -22,8 +22,8 @@ type ctxManualKey struct{}
 //
 // IMPORTANT: Non-manual invocations are **gated** by shouldAutoApply(ctx, stackID).
 // Manual invocations bypass Auto DevOps (still require files to exist).
-// 
-// Creates deployment stamps for tracking and drift detection.
+// Also records a deployment stamp keyed to the IaC bundle hash and associates
+// containers by querying `docker compose ps -q` (no global --label needed).
 func deployStack(ctx context.Context, stackID int64) error {
 	// Auto-DevOps gate (unless manual override)
 	if man, _ := ctx.Value(ctxManualKey{}).(bool); !man {
@@ -32,7 +32,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 			return aerr
 		}
 		if !allowed {
-			log.Printf("deploy: stack %d skipped (auto_devops disabled by effective policy)", stackID)
+			log.Printf("deploy: stack %d skipped (auto_devops disabled or no change)", stackID)
 			return nil
 		}
 	}
@@ -61,24 +61,18 @@ func deployStack(ctx context.Context, stackID int64) error {
 		return nil
 	}
 
-	// Create deployment stamp for tracking
-	deploymentMethod := "compose"
-	deploymentUser := "" // TODO: Extract from context when available
-	
-	// Read staged compose files to generate deployment hash
-	var allComposeContent []byte
-	for _, composeFile := range stagedComposes {
-		content, err := os.ReadFile(composeFile)
-		if err != nil {
-			return fmt.Errorf("failed to read staged compose file %s: %v", composeFile, err)
-		}
-		allComposeContent = append(allComposeContent, content...)
+	// Compute desired bundle hash (compose/env/scripts from DB)
+	bundleHash, err := ComputeCurrentBundleHash(ctx, stackID)
+	if err != nil {
+		return fmt.Errorf("failed to compute bundle hash: %w", err)
 	}
 
-	stamp, err := CreateDeploymentStamp(ctx, stackID, deploymentMethod, deploymentUser, allComposeContent, nil)
+	// Create deployment stamp (pending)
+	deploymentMethod := "compose"
+	deploymentUser := "" // TODO: Extract from context when available
+	stamp, err := CreateDeploymentStampWithHash(ctx, stackID, deploymentMethod, deploymentUser, bundleHash, nil)
 	if err != nil {
 		log.Printf("deploy: failed to create deployment stamp: %v", err)
-		// Continue deployment even if stamp creation fails
 	}
 
 	// docker compose -f <files...> up -d --remove-orphans
@@ -86,15 +80,6 @@ func deployStack(ctx context.Context, stackID int64) error {
 	for _, f := range stagedComposes {
 		args = append(args, "-f", f)
 	}
-	
-	// Add deployment stamp labels to all containers
-	if stamp != nil {
-		args = append(args, "--label", fmt.Sprintf("ddui.deployment.stamp_id=%d", stamp.ID))
-		args = append(args, "--label", fmt.Sprintf("ddui.deployment.hash=%s", stamp.DeploymentHash))
-		args = append(args, "--label", fmt.Sprintf("ddui.deployment.timestamp=%s", stamp.DeploymentTimestamp.Format("2006-01-02T15:04:05Z")))
-		args = append(args, "--label", fmt.Sprintf("ddui.stack.id=%d", stackID))
-	}
-	
 	args = append(args, "up", "-d", "--remove-orphans")
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -103,7 +88,6 @@ func deployStack(ctx context.Context, stackID int64) error {
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		// Mark deployment as failed if we have a stamp
 		if stamp != nil {
 			_ = UpdateDeploymentStampStatus(ctx, stamp.ID, "failed")
 		}
@@ -111,56 +95,74 @@ func deployStack(ctx context.Context, stackID int64) error {
 		return fmt.Errorf("docker compose up failed: %v\n%s", err, string(out))
 	}
 
-	// Mark deployment as successful
+	// Mark deployment as successful and associate containers
 	if stamp != nil {
 		if err := UpdateDeploymentStampStatus(ctx, stamp.ID, "success"); err != nil {
 			log.Printf("deploy: failed to update deployment stamp status: %v", err)
 		}
-		
-		// Associate containers with the deployment stamp
-		go func() {
-			// Small delay to allow containers to be created
-			time.Sleep(2 * time.Second)
-			associateContainersWithStamp(context.Background(), stackID, stamp.ID, stamp.DeploymentHash)
-		}()
+
+		// Associate containers via `docker compose ps -q` with retry (no labels needed)
+		go func(stampID int64, depHash string) {
+			const (
+				maxAttempts = 10
+				delay       = 1 * time.Second
+			)
+			for attempt := 1; attempt <= maxAttempts; attempt++ {
+				ids, perr := composeProjectContainerIDs(stageDir, stagedComposes)
+				if perr != nil {
+					log.Printf("deploy: compose ps failed (attempt %d/%d): %v", attempt, maxAttempts, perr)
+				} else if len(ids) > 0 {
+					updated, uerr := AssociateContainersWithStampIDs(context.Background(), ids, stampID, depHash)
+					if uerr != nil {
+						log.Printf("deploy: association update failed: %v", uerr)
+					} else if updated > 0 {
+						log.Printf("deploy: associated %d containers with stamp %d", updated, stampID)
+						return
+					}
+				}
+				time.Sleep(delay)
+			}
+			log.Printf("deploy: association retries exhausted for stamp %d", stampID)
+		}(stamp.ID, stamp.DeploymentHash)
 	}
 
-	log.Printf("deploy: stack %d deployed (compose=%d, stage=%s, repoRoot=%s, stamp=%v)", 
+	log.Printf("deploy: stack %d deployed (compose=%d, stage=%s, repoRoot=%s, stamp=%v)",
 		stackID, len(stagedComposes), stageDir, root, stamp != nil)
 	return nil
 }
 
-// associateContainersWithStamp finds containers deployed by this stack and associates them with the deployment stamp
-func associateContainersWithStamp(ctx context.Context, stackID int64, stampID int64, deploymentHash string) {
-	// Query containers that belong to this stack and were recently created
-	rows, err := db.Query(ctx, `
-		SELECT container_id 
-		FROM containers 
-		WHERE stack_id = $1 
-		  AND (deployment_stamp_id IS NULL OR deployment_stamp_id != $2)
-		  AND created_ts > now() - interval '5 minutes'
-	`, stackID, stampID)
+// composeProjectContainerIDs returns container IDs for the staged compose project.
+func composeProjectContainerIDs(dir string, files []string) ([]string, error) {
+	args := []string{"compose"}
+	for _, f := range files {
+		args = append(args, "-f", f)
+	}
+	args = append(args, "ps", "-q")
+
+	cmd := exec.Command("docker", args...)
+	cmd.Dir = dir
+	cmd.Env = os.Environ()
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		log.Printf("deploy: failed to query containers for stamp association: %v", err)
-		return
+		return nil, err
 	}
-	defer rows.Close()
-
-	var containerIDs []string
-	for rows.Next() {
-		var containerID string
-		if err := rows.Scan(&containerID); err != nil {
-			continue
-		}
-		containerIDs = append(containerIDs, containerID)
+	if err := cmd.Start(); err != nil {
+		return nil, err
 	}
 
-	// Associate each container with the deployment stamp
-	for _, containerID := range containerIDs {
-		if err := AssociateContainerWithStamp(ctx, containerID, stampID, deploymentHash); err != nil {
-			log.Printf("deploy: failed to associate container %s with stamp %d: %v", containerID, stampID, err)
-		} else {
-			log.Printf("deploy: associated container %s with deployment stamp %d", containerID, stampID)
+	var ids []string
+	sc := bufio.NewScanner(stdout)
+	for sc.Scan() {
+		line := strings.TrimSpace(sc.Text())
+		if line != "" {
+			ids = append(ids, line)
 		}
 	}
+	if err := sc.Err(); err != nil {
+		return nil, err
+	}
+	if err := cmd.Wait(); err != nil {
+		return nil, err
+	}
+	return ids, nil
 }

@@ -1,4 +1,3 @@
-// src/api/db_deployment_stamps.go
 package main
 
 import (
@@ -24,12 +23,11 @@ type DeploymentStamp struct {
 	UpdatedAt           time.Time `json:"updated_at"`
 }
 
-// CreateDeploymentStamp creates a new deployment stamp for tracking
+// CreateDeploymentStamp creates a new deployment stamp by hashing raw config bytes.
+// (Kept for compatibility; new flow prefers CreateDeploymentStampWithHash.)
 func CreateDeploymentStamp(ctx context.Context, stackID int64, method, user string, config []byte, envVars map[string]string) (*DeploymentStamp, error) {
-	// Generate deployment hash from normalized config
 	deploymentHash := generateDeploymentHash(config)
-	
-	// Generate environment hash from resolved variables
+
 	envHash := ""
 	if len(envVars) > 0 {
 		envHash = generateEnvHash(envVars)
@@ -47,7 +45,28 @@ func CreateDeploymentStamp(ctx context.Context, stackID int64, method, user stri
 		&stamp.DeploymentMethod, &stamp.DeploymentUser, &stamp.DeploymentEnvHash,
 		&stamp.DeploymentStatus, &stamp.CreatedAt, &stamp.UpdatedAt,
 	)
-	
+	return &stamp, err
+}
+
+// CreateDeploymentStampWithHash creates a stamp from a precomputed bundle hash.
+func CreateDeploymentStampWithHash(ctx context.Context, stackID int64, method, user, bundleHash string, envVars map[string]string) (*DeploymentStamp, error) {
+	envHash := ""
+	if len(envVars) > 0 {
+		envHash = generateEnvHash(envVars)
+	}
+	var stamp DeploymentStamp
+	err := db.QueryRow(ctx, `
+		INSERT INTO deployment_stamps
+		(stack_id, deployment_hash, deployment_method, deployment_user, deployment_env_hash, deployment_status)
+		VALUES ($1, $2, $3, $4, $5, 'pending')
+		RETURNING id, stack_id, deployment_hash, deployment_timestamp, deployment_method,
+		          COALESCE(deployment_user, ''), COALESCE(deployment_env_hash, ''), deployment_status,
+		          created_at, updated_at
+	`, stackID, bundleHash, method, user, envHash).Scan(
+		&stamp.ID, &stamp.StackID, &stamp.DeploymentHash, &stamp.DeploymentTimestamp,
+		&stamp.DeploymentMethod, &stamp.DeploymentUser, &stamp.DeploymentEnvHash,
+		&stamp.DeploymentStatus, &stamp.CreatedAt, &stamp.UpdatedAt,
+	)
 	return &stamp, err
 }
 
@@ -77,9 +96,8 @@ func GetLatestDeploymentStamp(ctx context.Context, stackID int64) (*DeploymentSt
 		&stamp.DeploymentMethod, &stamp.DeploymentUser, &stamp.DeploymentEnvHash,
 		&stamp.DeploymentStatus, &stamp.CreatedAt, &stamp.UpdatedAt,
 	)
-	
 	if err != nil {
-		// Check if it's a table not found error - gracefully handle missing migration
+		// Table missing? Gracefully hint at migration.
 		if strings.Contains(err.Error(), "relation \"deployment_stamps\" does not exist") {
 			return nil, fmt.Errorf("deployment stamps feature not available - migration 015 not applied")
 		}
@@ -98,6 +116,22 @@ func AssociateContainerWithStamp(ctx context.Context, containerID string, stampI
 	return err
 }
 
+// AssociateContainersWithStampIDs batch-links containers to a deployment stamp
+func AssociateContainersWithStampIDs(ctx context.Context, containerIDs []string, stampID int64, deploymentHash string) (int64, error) {
+	if len(containerIDs) == 0 {
+		return 0, nil
+	}
+	cmd, err := db.Exec(ctx, `
+		UPDATE containers
+		SET deployment_stamp_id = $1, deployment_hash = $2, updated_at = now()
+		WHERE container_id = ANY($3)
+	`, stampID, deploymentHash, containerIDs)
+	if err != nil {
+		return 0, err
+	}
+	return cmd.RowsAffected(), nil
+}
+
 // GetContainerDeploymentInfo retrieves deployment information for a container
 func GetContainerDeploymentInfo(ctx context.Context, containerID string) (*DeploymentStamp, error) {
 	var stamp DeploymentStamp
@@ -113,7 +147,6 @@ func GetContainerDeploymentInfo(ctx context.Context, containerID string) (*Deplo
 		&stamp.DeploymentMethod, &stamp.DeploymentUser, &stamp.DeploymentEnvHash,
 		&stamp.DeploymentStatus, &stamp.CreatedAt, &stamp.UpdatedAt,
 	)
-	
 	if err != nil {
 		return nil, err
 	}
@@ -128,7 +161,6 @@ func generateDeploymentHash(config []byte) string {
 
 // generateEnvHash creates a hash of resolved environment variables
 func generateEnvHash(envVars map[string]string) string {
-	// Sort keys for consistent hashing
 	jsonBytes, _ := json.Marshal(envVars)
 	hash := sha256.Sum256(jsonBytes)
 	return hex.EncodeToString(hash[:])
@@ -139,7 +171,6 @@ func GetDeploymentStampsForStack(ctx context.Context, stackID int64, limit int) 
 	if limit <= 0 {
 		limit = 50
 	}
-	
 	rows, err := db.Query(ctx, `
 		SELECT id, stack_id, deployment_hash, deployment_timestamp, deployment_method,
 		       COALESCE(deployment_user, ''), COALESCE(deployment_env_hash, ''), deployment_status,
@@ -167,6 +198,5 @@ func GetDeploymentStampsForStack(ctx context.Context, stackID int64, limit int) 
 		}
 		stamps = append(stamps, stamp)
 	}
-	
 	return stamps, rows.Err()
 }

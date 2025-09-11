@@ -1,11 +1,13 @@
-// src/api/db_iac.go
 package main
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"time"
 )
@@ -140,13 +142,6 @@ type IacStackOut struct {
 	Services   []IacServiceRow `json:"services"`
 }
 
-type EnhancedIacStackOut struct {
-	IacStackOut
-	LatestDeployment *DeploymentStamp `json:"latest_deployment,omitempty"`
-	DriftDetected    bool             `json:"drift_detected"`
-	DriftReason      string           `json:"drift_reason,omitempty"`
-}
-
 func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, error) {
 	h, err := GetHostByName(ctx, hostName)
 	if err != nil {
@@ -269,7 +264,7 @@ func deleteIacFileRow(ctx context.Context, stackID int64, relPath string) error 
 // stackHasContent returns true if the stack has any tracked files or a compose_file set.
 func stackHasContent(ctx context.Context, stackID int64) (bool, error) {
 	var n int64
-	if err := db.QueryRow(ctx, `SELECT COUNT(1) FROM iac_stack_files WHERE stack_id=$1`, stackID).Scan(&n); err != nil {
+	if err := db.QueryRow(ctx, `SELECT COUNT(1) FROM iac_stack_files WHERE stack_id=$1`).Scan(&n); err != nil {
 		return false, err
 	}
 	if n > 0 {
@@ -280,96 +275,50 @@ func stackHasContent(ctx context.Context, stackID int64) (bool, error) {
 	return strings.TrimSpace(compose) != "", nil
 }
 
-// listEnhancedIacStacksForHost returns stacks with deployment stamp-based drift detection
-func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]EnhancedIacStackOut, error) {
-	// Get base stacks
-	baseStacks, err := listIacStacksForHost(ctx, hostName)
-	if err != nil {
-		return nil, err
+// ComputeCurrentBundleHash calculates a deterministic hash over all tracked files
+// (compose/env/scripts/etc.) for the given stack. Any change to a tracked file
+// will change this hash and thus signal "needs redeploy".
+func ComputeCurrentBundleHash(ctx context.Context, stackID int64) (string, error) {
+	type row struct {
+		role string
+		path string
+		sha  string
+		size int64
 	}
-
-	var enhancedStacks []EnhancedIacStackOut
-	for _, stack := range baseStacks {
-		enhanced := EnhancedIacStackOut{
-			IacStackOut: stack,
-		}
-
-		// Get latest deployment stamp
-		latestStamp, err := GetLatestDeploymentStamp(ctx, stack.ID)
-		if err == nil {
-			enhanced.LatestDeployment = latestStamp
-			
-			// Check for drift by comparing current deployment hash with expected
-			driftDetected, reason := checkStackDrift(ctx, stack.ID, latestStamp.DeploymentHash)
-			enhanced.DriftDetected = driftDetected
-			enhanced.DriftReason = reason
-		} else {
-			// Check if migration is missing
-			if strings.Contains(err.Error(), "migration 015 not applied") {
-				enhanced.DriftDetected = false
-				enhanced.DriftReason = "Enhanced drift detection not available - migration 015 not applied"
-			} else {
-				// No deployment stamp found - this could indicate drift or first deployment
-				enhanced.DriftDetected = true
-				enhanced.DriftReason = "No deployment stamp found - manual deployment or first time deployment"
-			}
-		}
-
-		enhancedStacks = append(enhancedStacks, enhanced)
-	}
-
-	return enhancedStacks, nil
-}
-
-// checkStackDrift compares the current expected deployment hash with running containers
-func checkStackDrift(ctx context.Context, stackID int64, expectedHash string) (bool, string) {
-	// Check if containers with this stack have the expected deployment hash
 	rows, err := db.Query(ctx, `
-		SELECT container_id, COALESCE(deployment_hash, ''), state
-		FROM containers 
-		WHERE stack_id = $1 
-		  AND state IN ('running', 'paused', 'restarting')
+		SELECT role, rel_path, sha256_hex, size_bytes
+		FROM iac_stack_files
+		WHERE stack_id=$1
 	`, stackID)
 	if err != nil {
-		// Check if deployment_hash column doesn't exist (migration not applied)
-		if strings.Contains(err.Error(), "column \"deployment_hash\" does not exist") {
-			return false, "Enhanced drift detection not available - migration 015 not applied"
-		}
-		return true, fmt.Sprintf("Failed to query containers: %v", err)
+		return "", err
 	}
 	defer rows.Close()
 
-	var runningContainers int
-	var containersWithWrongHash int
-	var containersWithoutHash int
-
+	var files []row
 	for rows.Next() {
-		var containerID, deploymentHash, state string
-		if err := rows.Scan(&containerID, &deploymentHash, &state); err != nil {
-			continue
+		var r row
+		if err := rows.Scan(&r.role, &r.path, &r.sha, &r.size); err != nil {
+			return "", err
 		}
-		
-		runningContainers++
-		
-		if deploymentHash == "" {
-			containersWithoutHash++
-		} else if deploymentHash != expectedHash {
-			containersWithWrongHash++
-		}
+		files = append(files, r)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
 	}
 
-	// Determine drift status
-	if runningContainers == 0 {
-		return true, "No running containers found for stack"
-	}
-	
-	if containersWithoutHash > 0 {
-		return true, fmt.Sprintf("%d containers missing deployment stamps", containersWithoutHash)
-	}
-	
-	if containersWithWrongHash > 0 {
-		return true, fmt.Sprintf("%d containers have different deployment hash", containersWithWrongHash)
-	}
+	// Deterministic ordering
+	sort.Slice(files, func(i, j int) bool {
+		if files[i].role != files[j].role {
+			return files[i].role < files[j].role
+		}
+		return files[i].path < files[j].path
+	})
 
-	return false, "All containers match expected deployment"
+	h := sha256.New()
+	for _, f := range files {
+		// stable serialization: role \t path \t sha \t size \n
+		fmt.Fprintf(h, "%s\t%s\t%s\t%d\n", f.role, f.path, f.sha, f.size)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
 }

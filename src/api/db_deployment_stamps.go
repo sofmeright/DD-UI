@@ -1,4 +1,3 @@
-// src/api/db_deployment_stamps.go
 package main
 
 import (
@@ -24,8 +23,7 @@ type DeploymentStamp struct {
 	UpdatedAt           time.Time `json:"updated_at"`
 }
 
-// CreateDeploymentStamp creates a new deployment stamp by hashing raw config bytes.
-// (Kept for compatibility; new flow prefers CreateDeploymentStampWithHash.)
+// CreateDeploymentStamp keeps the original API (hash from config bytes).
 func CreateDeploymentStamp(ctx context.Context, stackID int64, method, user string, config []byte, envVars map[string]string) (*DeploymentStamp, error) {
 	deploymentHash := generateDeploymentHash(config)
 
@@ -37,10 +35,11 @@ func CreateDeploymentStamp(ctx context.Context, stackID int64, method, user stri
 	var stamp DeploymentStamp
 	err := db.QueryRow(ctx, `
 		INSERT INTO deployment_stamps 
-		(stack_id, deployment_hash, deployment_method, deployment_user, deployment_env_hash, deployment_status)
+			(stack_id, deployment_hash, deployment_method, deployment_user, deployment_env_hash, deployment_status)
 		VALUES ($1, $2, $3, $4, $5, 'pending')
 		RETURNING id, stack_id, deployment_hash, deployment_timestamp, deployment_method, 
-		          deployment_user, deployment_env_hash, deployment_status, created_at, updated_at
+		          COALESCE(deployment_user, ''), COALESCE(deployment_env_hash, ''), deployment_status, 
+		          created_at, updated_at
 	`, stackID, deploymentHash, method, user, envHash).Scan(
 		&stamp.ID, &stamp.StackID, &stamp.DeploymentHash, &stamp.DeploymentTimestamp,
 		&stamp.DeploymentMethod, &stamp.DeploymentUser, &stamp.DeploymentEnvHash,
@@ -49,21 +48,22 @@ func CreateDeploymentStamp(ctx context.Context, stackID int64, method, user stri
 	return &stamp, err
 }
 
-// CreateDeploymentStampWithHash creates a stamp from a precomputed bundle hash.
-func CreateDeploymentStampWithHash(ctx context.Context, stackID int64, method, user, bundleHash string, envVars map[string]string) (*DeploymentStamp, error) {
+// CreateDeploymentStampWithHash is used by deploy.go when we already computed the bundle hash.
+func CreateDeploymentStampWithHash(ctx context.Context, stackID int64, method, user, deploymentHash string, envVars map[string]string) (*DeploymentStamp, error) {
 	envHash := ""
 	if len(envVars) > 0 {
 		envHash = generateEnvHash(envVars)
 	}
+
 	var stamp DeploymentStamp
 	err := db.QueryRow(ctx, `
-		INSERT INTO deployment_stamps
-		(stack_id, deployment_hash, deployment_method, deployment_user, deployment_env_hash, deployment_status)
+		INSERT INTO deployment_stamps 
+			(stack_id, deployment_hash, deployment_method, deployment_user, deployment_env_hash, deployment_status)
 		VALUES ($1, $2, $3, $4, $5, 'pending')
-		RETURNING id, stack_id, deployment_hash, deployment_timestamp, deployment_method,
-		          COALESCE(deployment_user, ''), COALESCE(deployment_env_hash, ''), deployment_status,
+		RETURNING id, stack_id, deployment_hash, deployment_timestamp, deployment_method, 
+		          COALESCE(deployment_user, ''), COALESCE(deployment_env_hash, ''), deployment_status, 
 		          created_at, updated_at
-	`, stackID, bundleHash, method, user, envHash).Scan(
+	`, stackID, deploymentHash, method, user, envHash).Scan(
 		&stamp.ID, &stamp.StackID, &stamp.DeploymentHash, &stamp.DeploymentTimestamp,
 		&stamp.DeploymentMethod, &stamp.DeploymentUser, &stamp.DeploymentEnvHash,
 		&stamp.DeploymentStatus, &stamp.CreatedAt, &stamp.UpdatedAt,
@@ -71,7 +71,7 @@ func CreateDeploymentStampWithHash(ctx context.Context, stackID int64, method, u
 	return &stamp, err
 }
 
-// UpdateDeploymentStampStatus updates the status of a deployment stamp
+// UpdateDeploymentStampStatus updates the status of a deployment stamp.
 func UpdateDeploymentStampStatus(ctx context.Context, stampID int64, status string) error {
 	_, err := db.Exec(ctx, `
 		UPDATE deployment_stamps 
@@ -81,7 +81,7 @@ func UpdateDeploymentStampStatus(ctx context.Context, stampID int64, status stri
 	return err
 }
 
-// GetLatestDeploymentStamp gets the most recent successful deployment stamp for a stack
+// GetLatestDeploymentStamp gets the most recent successful deployment stamp for a stack.
 func GetLatestDeploymentStamp(ctx context.Context, stackID int64) (*DeploymentStamp, error) {
 	var stamp DeploymentStamp
 	err := db.QueryRow(ctx, `
@@ -98,8 +98,8 @@ func GetLatestDeploymentStamp(ctx context.Context, stackID int64) (*DeploymentSt
 		&stamp.DeploymentStatus, &stamp.CreatedAt, &stamp.UpdatedAt,
 	)
 	if err != nil {
-		// Table missing? Gracefully hint at migration.
-		if strings.Contains(err.Error(), "relation \"deployment_stamps\" does not exist") {
+		// Gracefully handle missing table (migration not applied)
+		if strings.Contains(err.Error(), `relation "deployment_stamps" does not exist`) {
 			return nil, fmt.Errorf("deployment stamps feature not available - migration 015 not applied")
 		}
 		return nil, err
@@ -107,7 +107,7 @@ func GetLatestDeploymentStamp(ctx context.Context, stackID int64) (*DeploymentSt
 	return &stamp, nil
 }
 
-// AssociateContainerWithStamp links a container to a deployment stamp
+// AssociateContainerWithStamp links a single container to a deployment stamp (kept for existing callers).
 func AssociateContainerWithStamp(ctx context.Context, containerID string, stampID int64, deploymentHash string) error {
 	_, err := db.Exec(ctx, `
 		UPDATE containers 
@@ -117,7 +117,7 @@ func AssociateContainerWithStamp(ctx context.Context, containerID string, stampI
 	return err
 }
 
-// AssociateContainersWithStampIDs batch-links containers to a deployment stamp
+// AssociateContainersWithStampIDs links many containers at once (the new bulk path used after compose).
 func AssociateContainersWithStampIDs(ctx context.Context, containerIDs []string, stampID int64, deploymentHash string) (int64, error) {
 	if len(containerIDs) == 0 {
 		return 0, nil
@@ -125,7 +125,7 @@ func AssociateContainersWithStampIDs(ctx context.Context, containerIDs []string,
 	cmd, err := db.Exec(ctx, `
 		UPDATE containers
 		SET deployment_stamp_id = $1, deployment_hash = $2, updated_at = now()
-		WHERE container_id = ANY($3)
+		WHERE container_id = ANY($3::text[])
 	`, stampID, deploymentHash, containerIDs)
 	if err != nil {
 		return 0, err
@@ -133,7 +133,7 @@ func AssociateContainersWithStampIDs(ctx context.Context, containerIDs []string,
 	return cmd.RowsAffected(), nil
 }
 
-// GetContainerDeploymentInfo retrieves deployment information for a container
+// GetContainerDeploymentInfo retrieves deployment information for a container.
 func GetContainerDeploymentInfo(ctx context.Context, containerID string) (*DeploymentStamp, error) {
 	var stamp DeploymentStamp
 	err := db.QueryRow(ctx, `
@@ -154,20 +154,21 @@ func GetContainerDeploymentInfo(ctx context.Context, containerID string) (*Deplo
 	return &stamp, nil
 }
 
-// generateDeploymentHash creates a consistent hash of the deployment configuration
+/* --------- small helpers --------- */
+
 func generateDeploymentHash(config []byte) string {
-	hash := sha256.Sum256(config)
-	return hex.EncodeToString(hash[:])
+	sum := sha256.Sum256(config)
+	return hex.EncodeToString(sum[:])
 }
 
-// generateEnvHash creates a hash of resolved environment variables
 func generateEnvHash(envVars map[string]string) string {
+	// stable JSON -> hash
 	jsonBytes, _ := json.Marshal(envVars)
-	hash := sha256.Sum256(jsonBytes)
-	return hex.EncodeToString(hash[:])
+	sum := sha256.Sum256(jsonBytes)
+	return hex.EncodeToString(sum[:])
 }
 
-// GetDeploymentStampsForStack returns all deployment stamps for a stack
+// GetDeploymentStampsForStack returns stamps for a stack (useful for UI history panes).
 func GetDeploymentStampsForStack(ctx context.Context, stackID int64, limit int) ([]DeploymentStamp, error) {
 	if limit <= 0 {
 		limit = 50
@@ -188,16 +189,15 @@ func GetDeploymentStampsForStack(ctx context.Context, stackID int64, limit int) 
 
 	var stamps []DeploymentStamp
 	for rows.Next() {
-		var stamp DeploymentStamp
-		err := rows.Scan(
-			&stamp.ID, &stamp.StackID, &stamp.DeploymentHash, &stamp.DeploymentTimestamp,
-			&stamp.DeploymentMethod, &stamp.DeploymentUser, &stamp.DeploymentEnvHash,
-			&stamp.DeploymentStatus, &stamp.CreatedAt, &stamp.UpdatedAt,
-		)
-		if err != nil {
+		var s DeploymentStamp
+		if err := rows.Scan(
+			&s.ID, &s.StackID, &s.DeploymentHash, &s.DeploymentTimestamp,
+			&s.DeploymentMethod, &s.DeploymentUser, &s.DeploymentEnvHash,
+			&s.DeploymentStatus, &s.CreatedAt, &s.UpdatedAt,
+		); err != nil {
 			return nil, err
 		}
-		stamps = append(stamps, stamp)
+		stamps = append(stamps, s)
 	}
 	return stamps, rows.Err()
 }

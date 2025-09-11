@@ -587,7 +587,7 @@ export default function StackDetailView({
             <span className="ml-1 inline-flex items-center gap-2 text-xs text-emerald-300">
               <RefreshCw className="h-3 w-3 animate-spin" />
               Watching updates…
-              <Button size="xs" variant="ghost" className="h-6 px-2 text-emerald-200" onClick={stopWatch} title="Stop watching">
+              <Button size="sm" variant="ghost" className="h-6 px-2 text-emerald-200" onClick={stopWatch} title="Stop watching">
                 <Square className="h-3 w-3 mr-1" /> Stop
               </Button>
             </span>

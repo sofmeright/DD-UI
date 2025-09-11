@@ -5,13 +5,15 @@ import { Button } from "@/components/ui/button";
 
 export default function LeftNav({
   page,
-  onGoDeployments,
+  onGoHosts,
+  onGoStacks,
   onGoImages,
   onGoNetworks,
   onGoVolumes,
 }: {
   page: string;
-  onGoDeployments: () => void;
+  onGoHosts: () => void;
+  onGoStacks: () => void;
   onGoImages: () => void;
   onGoNetworks: () => void;
   onGoVolumes: () => void;
@@ -48,10 +50,17 @@ export default function LeftNav({
       </div>
 
       <div className="px-4 py-3 text-xs tracking-wide uppercase text-slate-400">
+        Infrastructure
+      </div>
+      <nav className="px-2 pb-4 space-y-1">
+        {item("hosts", "Hosts", onGoHosts)}
+        {item("stacks", "Stacks", onGoStacks)}
+      </nav>
+
+      <div className="px-4 py-3 text-xs tracking-wide uppercase text-slate-400">
         Resources
       </div>
       <nav className="px-2 pb-4 space-y-1">
-        {item("deployments", "Deployments", onGoDeployments)}
         {item("images", "Images", onGoImages)}
         {item("networks", "Networks", onGoNetworks)}
         {item("volumes", "Volumes", onGoVolumes)}

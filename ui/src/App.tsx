@@ -1,8 +1,10 @@
 // ui/src/App.tsx
 import React, { useEffect, useMemo, useState } from "react";
+import { Routes, Route, useNavigate, useLocation, useParams } from "react-router-dom";
 import LeftNav from "@/components/LeftNav";
 import LoginGate from "@/components/LoginGate";
-import DeploymentsView from "@/views/DeploymentsView";
+import HostsView from "@/views/HostsView";
+import StacksView from "@/views/StacksView";
 import HostStacksView from "@/views/HostStacksView";
 import StackDetailView from "@/views/StackDetailView";
 import ImagesView from "@/views/ImagesView";
@@ -17,12 +19,23 @@ export default function App() {
   const [err, setErr] = useState<string | null>(null);
   const [scanning, setScanning] = useState(false);
   const [metricsCache, setMetricsCache] = useState<Record<string, { stacks: number; containers: number; drift: number; errors: number }>>({});
-  const [page, setPage] = useState<"deployments" | "host" | "stack" | "images" | "networks" | "volumes">("deployments");
-  const [activeHost, setActiveHost] = useState<Host | null>(null);
-  const [activeStack, setActiveStack] = useState<{ name: string; iacId?: number } | null>(null);
   const [sessionChecked, setSessionChecked] = useState(false);
   const [authed, setAuthed] = useState<boolean>(false);
   const [filterQuery, setFilterQuery] = useState("");
+  
+  const navigate = useNavigate();
+  const location = useLocation();
+  
+  // Determine current page from URL
+  const getCurrentPage = () => {
+    const path = location.pathname;
+    if (path.startsWith('/hosts')) return 'hosts';
+    if (path.startsWith('/stacks')) return 'stacks';
+    if (path.startsWith('/images')) return 'images';
+    if (path.startsWith('/networks')) return 'networks';
+    if (path.startsWith('/volumes')) return 'volumes';
+    return 'hosts'; // default
+  };
 
   useEffect(() => {
     let cancel = false;
@@ -123,33 +136,63 @@ export default function App() {
     } finally { setScanning(false); }
   }
 
-  function openHost(name: string) {
-    const h = hosts.find(x => x.name === name) || { name } as Host;
-    setActiveHost(h); setActiveStack(null); setPage("host"); refreshMetricsForHosts([name]);
-  }
-
-  function openStack(name: string, iacId?: number) {
-    if (!activeHost) return; setActiveStack({ name, iacId }); setPage("stack");
-  }
-
   if (sessionChecked && !authed) return <LoginGate />;
   if (!sessionChecked) return <div className="min-h-screen bg-slate-950" />;
 
-  const hostMetrics = activeHost ? (metricsCache[activeHost.name] || { stacks: 0, containers: 0, drift: 0, errors: 0 }) : null;
+  // Route components
+  const HostStacksPage = () => {
+    const { hostName } = useParams<{ hostName: string }>();
+    const host = hosts.find(h => h.name === hostName);
+    if (!host) {
+      navigate('/hosts');
+      return null;
+    }
+    return (
+      <HostStacksView
+        host={host}
+        onBack={() => navigate('/hosts')}
+        onSync={() => refreshMetricsForHosts([host.name])}
+        onOpenStack={(stackName, iacId) => navigate(`/stacks/${stackName}${iacId ? `?host=${hostName}&iacId=${iacId}` : `?host=${hostName}`}`)}
+      />
+    );
+  };
+
+  const StackDetailPage = () => {
+    const { stackName } = useParams<{ stackName: string }>();
+    const searchParams = new URLSearchParams(location.search);
+    const hostName = searchParams.get('host');
+    const iacId = searchParams.get('iacId') ? parseInt(searchParams.get('iacId')!) : undefined;
+    
+    const host = hosts.find(h => h.name === hostName);
+    if (!host || !stackName) {
+      navigate('/stacks');
+      return null;
+    }
+    
+    return (
+      <StackDetailView
+        host={host}
+        stackName={stackName}
+        iacId={iacId}
+        onBack={() => navigate('/stacks')}
+      />
+    );
+  };
 
   return (
     <div className="min-h-screen flex">
       <LeftNav
-        page={page}
-        onGoDeployments={() => setPage("deployments")}
-        onGoImages={() => setPage("images")}
-        onGoNetworks={() => setPage("networks")}
-        onGoVolumes={() => setPage("volumes")}
+        page={getCurrentPage()}
+        onGoHosts={() => navigate('/hosts')}
+        onGoStacks={() => navigate('/stacks')}
+        onGoImages={() => navigate('/images')}
+        onGoNetworks={() => navigate('/networks')}
+        onGoVolumes={() => navigate('/volumes')}
       />
       <div className="flex-1 min-w-0">
-        <main className="px-6 py-6 space-y-6">
-          {page === 'deployments' && (
-            <DeploymentsView
+        <Routes>
+          <Route path="/" element={
+            <HostsView
               metrics={metrics}
               hosts={hosts}
               filteredHosts={filteredHosts}
@@ -158,34 +201,36 @@ export default function App() {
               scanning={scanning}
               onScanAll={handleScanAll}
               onFilter={setFilterQuery}
-              onOpenHost={openHost}
-              refreshMetricsForHosts={refreshMetricsForHosts}
+              onOpenHost={(host) => navigate(`/hosts/${host.name}`)}
+              refreshMetricsForHosts={() => refreshMetricsForHosts(hosts.map(h => h.name))}
             />
-          )}
-
-          {page === 'host' && activeHost && (
-            <>
-              {/* quick metrics row for host */}
-              <div className="grid md:grid-cols-4 gap-4">
-                <div className="bg-transparent" />
-                <div className="bg-transparent" />
-                <div className="bg-transparent" />
-                <div className="bg-transparent" />
-              </div>
-              <HostStacksView host={activeHost} onBack={() => setPage('deployments')} onSync={handleScanAll} onOpenStack={openStack} />
-            </>
-          )}
-
-          {page === 'stack' && activeHost && activeStack && (
-            <StackDetailView host={activeHost} stackName={activeStack.name} iacId={activeStack.iacId} onBack={() => setPage('host')} />
-          )}
-
-          {page === 'images' && <ImagesView hosts={hosts} />}
-          {page === 'networks' && <NetworksView hosts={hosts} />}
-          {page === 'volumes' && <VolumesView hosts={hosts} />}
-
-          <div className="pt-6 pb-10 text-center text-xs text-slate-500">© 2025 PrecisionPlanIT &amp; SoFMeRight (Kai)</div>
-        </main>
+          } />
+          <Route path="/hosts" element={
+            <HostsView
+              metrics={metrics}
+              hosts={hosts}
+              filteredHosts={filteredHosts}
+              loading={loading}
+              err={err}
+              scanning={scanning}
+              onScanAll={handleScanAll}
+              onFilter={setFilterQuery}
+              onOpenHost={(host) => navigate(`/hosts/${host.name}`)}
+              refreshMetricsForHosts={() => refreshMetricsForHosts(hosts.map(h => h.name))}
+            />
+          } />
+          <Route path="/hosts/:hostName" element={<HostStacksPage />} />
+          <Route path="/stacks" element={
+            <StacksView
+              hosts={hosts}
+              onOpenStack={(host, stackName, iacId) => navigate(`/stacks/${stackName}?host=${host.name}${iacId ? `&iacId=${iacId}` : ''}`)}
+            />
+          } />
+          <Route path="/stacks/:stackName" element={<StackDetailPage />} />
+          <Route path="/images" element={<ImagesView hosts={hosts} />} />
+          <Route path="/networks" element={<NetworksView hosts={hosts} />} />
+          <Route path="/volumes" element={<VolumesView hosts={hosts} />} />
+        </Routes>
       </div>
     </div>
   );

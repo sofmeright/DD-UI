@@ -4,7 +4,6 @@ import { Routes, Route, useNavigate, useLocation, useParams } from "react-router
 import LeftNav from "@/components/LeftNav";
 import LoginGate from "@/components/LoginGate";
 import HostsView from "@/views/HostsView";
-import StacksView from "@/views/StacksView";
 import HostStacksView from "@/views/HostStacksView";
 import StackDetailView from "@/views/StackDetailView";
 import ImagesView from "@/views/ImagesView";
@@ -25,16 +24,26 @@ export default function App() {
   
   const navigate = useNavigate();
   const location = useLocation();
+
+  // Helper: current host from URL (fallback to first host)
+  const currentHostFromPath = () => {
+    const m = location.pathname.match(/^\/hosts\/([^/]+)/);
+    return (m && decodeURIComponent(m[1])) || hosts[0]?.name || "";
+  };
   
-  // Determine current page from URL
+  // Determine current page from URL (for LeftNav highlighting)
   const getCurrentPage = () => {
     const path = location.pathname;
-    if (path.startsWith('/hosts')) return 'hosts';
-    if (path.startsWith('/stacks')) return 'stacks';
-    if (path.startsWith('/images')) return 'images';
-    if (path.startsWith('/networks')) return 'networks';
-    if (path.startsWith('/volumes')) return 'volumes';
-    return 'hosts'; // default
+    if (path === "/hosts") return "hosts";
+    if (path.startsWith("/hosts/")) {
+      const seg = path.split("/")[3]; // ['', 'hosts', '<host>', '<section>', ...]
+      if (seg === "images") return "images";
+      if (seg === "networks") return "networks";
+      if (seg === "volumes") return "volumes";
+      // default for /hosts/:hostName or /hosts/:hostName/stacks(/...)
+      return "stacks";
+    }
+    return "hosts";
   };
 
   useEffect(() => {
@@ -151,20 +160,21 @@ export default function App() {
       <HostStacksView
         host={host}
         onSync={() => refreshMetricsForHosts([host.name])}
-        onOpenStack={(stackName, iacId) => navigate(`/stacks/${stackName}${iacId ? `?host=${hostName}&iacId=${iacId}` : `?host=${hostName}`}`)}
+        onOpenStack={(stackName, iacId) =>
+          navigate(`/hosts/${encodeURIComponent(hostName!)}/stacks/${encodeURIComponent(stackName)}${iacId ? `?iacId=${iacId}` : ""}`)
+        }
       />
     );
   };
 
   const StackDetailPage = () => {
-    const { stackName } = useParams<{ stackName: string }>();
+    const { hostName, stackName } = useParams<{ hostName: string; stackName: string }>();
     const searchParams = new URLSearchParams(location.search);
-    const hostName = searchParams.get('host');
     const iacId = searchParams.get('iacId') ? parseInt(searchParams.get('iacId')!) : undefined;
     
     const host = hosts.find(h => h.name === hostName);
     if (!host || !stackName) {
-      navigate('/stacks');
+      navigate('/hosts');
       return null;
     }
     
@@ -173,7 +183,7 @@ export default function App() {
         host={host}
         stackName={stackName}
         iacId={iacId}
-        onBack={() => navigate('/stacks')}
+        onBack={() => navigate(`/hosts/${encodeURIComponent(host.name)}/stacks`)}
       />
     );
   };
@@ -183,31 +193,32 @@ export default function App() {
       <LeftNav
         page={getCurrentPage()}
         onGoHosts={() => navigate('/hosts')}
-        onGoStacks={() => navigate('/stacks')}
-        onGoImages={() => navigate('/images')}
-        onGoNetworks={() => navigate('/networks')}
-        onGoVolumes={() => navigate('/volumes')}
+        onGoStacks={() => {
+          const h = currentHostFromPath();
+          if (h) navigate(`/hosts/${encodeURIComponent(h)}/stacks`);
+          else navigate('/hosts');
+        }}
+        onGoImages={() => {
+          const h = currentHostFromPath();
+          if (h) navigate(`/hosts/${encodeURIComponent(h)}/images`);
+          else navigate('/hosts');
+        }}
+        onGoNetworks={() => {
+          const h = currentHostFromPath();
+          if (h) navigate(`/hosts/${encodeURIComponent(h)}/networks`);
+          else navigate('/hosts');
+        }}
+        onGoVolumes={() => {
+          const h = currentHostFromPath();
+          if (h) navigate(`/hosts/${encodeURIComponent(h)}/volumes`);
+          else navigate('/hosts');
+        }}
       />
 
-      {/* Right side: keep all functionality; only layout/padding/overflow adjusted */}
+      {/* Right side layout retained */}
       <div className="flex-1 min-w-0 max-h-screen flex flex-col">
-        {/* Main content area */}
         <main className="flex-1 overflow-y-auto overflow-x-hidden p-3 sm:p-4 lg:p-6">
           <Routes>
-            <Route path="/" element={
-              <HostsView
-                metrics={metrics}
-                hosts={hosts}
-                filteredHosts={filteredHosts}
-                loading={loading}
-                err={err}
-                scanning={scanning}
-                onScanAll={handleScanAll}
-                onFilter={setFilterQuery}
-                onOpenHost={(hostName) => navigate(`/hosts/${hostName}`)}
-                refreshMetricsForHosts={() => refreshMetricsForHosts(hosts.map(h => h.name))}
-              />
-            } />
             <Route path="/hosts" element={
               <HostsView
                 metrics={metrics}
@@ -218,25 +229,18 @@ export default function App() {
                 scanning={scanning}
                 onScanAll={handleScanAll}
                 onFilter={setFilterQuery}
-                onOpenHost={(hostName) => navigate(`/hosts/${hostName}`)}
+                onOpenHost={(hostName) => navigate(`/hosts/${encodeURIComponent(hostName)}/stacks`)}
                 refreshMetricsForHosts={() => refreshMetricsForHosts(hosts.map(h => h.name))}
               />
             } />
-            <Route path="/hosts/:hostName" element={<HostStacksPage />} />
-            <Route path="/stacks" element={
-              <StacksView
-                hosts={hosts}
-                onOpenStack={(host, stackName, iacId) => navigate(`/stacks/${stackName}?host=${host.name}${iacId ? `&iacId=${iacId}` : ''}`)}
-              />
-            } />
-            <Route path="/stacks/:stackName" element={<StackDetailPage />} />
-            <Route path="/images" element={<ImagesView hosts={hosts} />} />
-            <Route path="/networks" element={<NetworksView hosts={hosts} />} />
-            <Route path="/volumes" element={<VolumesView hosts={hosts} />} />
+            <Route path="/hosts/:hostName/stacks" element={<HostStacksPage />} />
+            <Route path="/hosts/:hostName/stacks/:stackName" element={<StackDetailPage />} />
+            <Route path="/hosts/:hostName/images" element={<ImagesView hosts={hosts} />} />
+            <Route path="/hosts/:hostName/networks" element={<NetworksView hosts={hosts} />} />
+            <Route path="/hosts/:hostName/volumes" element={<VolumesView hosts={hosts} />} />
           </Routes>
         </main>
 
-        {/* Footer credits (minimal, matches theme) */}
         <footer className="shrink-0 border-t border-slate-800 bg-slate-950/80">
           <div className="px-3 sm:px-4 lg:px-6 py-2 text-[10px] leading-none text-slate-500 text-center">
             © {new Date().getFullYear()} PrecisionPlanIT &amp; SoFMeRight (Kai)

@@ -114,6 +114,7 @@ export default function HostStacksView({
       setLoading(true);
       setErr(null);
       try {
+        // Keep existing rich runtime + IaC fetches (created_ts, IP, ports, etc.)
         const [rc, ri] = await Promise.all([
           fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`, { credentials: "include" }),
           fetch(`/api/hosts/${encodeURIComponent(host.name)}/iac`, { credentials: "include" }),
@@ -127,7 +128,37 @@ export default function HostStacksView({
         const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
         const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
 
-        // Fetch per-stack effective Auto DevOps
+        // NEW: fetch enhanced to source DRIFT + Compose config-hash (no image comparison)
+        let enhancedByName = new Map<
+          string,
+          { drift_detected: boolean; drift_reason?: string; containers?: Array<{ name: string; config_hash?: string }> }
+        >();
+        try {
+          const re = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/enhanced-iac`, {
+            credentials: "include",
+          });
+          if (re.ok) {
+            const ej = await re.json();
+            const items = Array.isArray(ej?.stacks) ? ej.stacks : [];
+            for (const s of items) {
+              const nm = (s?.name || s?.stack_name || "").toString();
+              if (!nm) continue;
+              const ctrs = Array.isArray(s?.containers) ? s.containers : [];
+              enhancedByName.set(nm, {
+                drift_detected: !!s?.drift_detected,
+                drift_reason: s?.drift_reason || "",
+                containers: ctrs.map((c: any) => ({
+                  name: (c?.name || "").toString(),
+                  config_hash: (c?.config_hash || "").toString(),
+                })),
+              });
+            }
+          }
+        } catch {
+          // ignore; we can still render without enhanced
+        }
+
+        // Fetch per-stack effective Auto DevOps (unchanged)
         const effMap: Record<number, boolean> = {};
         await Promise.all(
           (iacStacks || [])
@@ -156,6 +187,14 @@ export default function HostStacksView({
         const iacByStack = new Map<string, IacStack>();
         for (const s of iacStacks) iacByStack.set(s.name, s);
 
+        // Map for config-hash by container name (from enhanced)
+        const cfgHashByName = new Map<string, string>(); // NEW
+        for (const [sname, e] of enhancedByName.entries()) {
+          for (const c of e.containers || []) {
+            if (c?.name && c?.config_hash) cfgHashByName.set(c.name, c.config_hash);
+          }
+        }
+
         const names = new Set<string>([...rtByStack.keys(), ...iacByStack.keys()]);
         const merged: MergedStack[] = [];
 
@@ -168,6 +207,7 @@ export default function HostStacksView({
 
           const rows: MergedRow[] = [];
 
+          // We no longer use desiredImageFor to compute drift (image mismatch removed).
           function desiredImageFor(c: ApiContainer): string | undefined {
             if (!is || services.length === 0) return undefined;
             const svc = services.find(
@@ -182,19 +222,24 @@ export default function HostStacksView({
             const portsLines = formatPortsLines((c as any).ports);
             const portsText = portsLines.join("\n");
             const desired = desiredImageFor(c);
-            const drift = !!(desired && desired.trim() && desired.trim() !== (c.image || "").trim());
+
+            // NEW: stop flagging row-level drift based on image mismatch
             rows.push({
               name: c.name,
               state: c.state,
               stack: sname,
               imageRun: c.image,
-              imageIac: desired,
+              imageIac: undefined, // don’t render desired image next to runtime (requested)
               created: formatDT(c.created_ts),
               ip: c.ip_addr,
               portsText,
               owner: c.owner || "—",
-              drift,
-            });
+              drift: false, // runtime rows no longer marked as drift via image check
+              // @ts-ignore stash config-hash for optional display (not in MergedRow type)
+              configHash: cfgHashByName.get(c.name) || undefined,
+              // @ts-ignore stash desired for missing rows comparison context only
+              _desiredImage: desired,
+            } as any);
           }
 
           if (is) {
@@ -206,29 +251,33 @@ export default function HostStacksView({
                   state: "missing",
                   stack: sname,
                   imageRun: undefined,
-                  imageIac: svc.image,
+                  imageIac: svc.image, // keep showing IaC image for **missing** containers only
                   created: "—",
                   ip: "—",
                   portsText: "—",
                   owner: "—",
-                  drift: true,
+                  drift: true, // missing container is drift at row level
                 });
               }
             }
           }
 
+          // NEW: stack-level drift comes from backend enhanced result if available
+          const enh = enhancedByName.get(sname);
           let stackDrift: "in_sync" | "drift" | "unknown" = "unknown";
-          if (hasIac) {
-            stackDrift = rows.some((r) => r.drift) ? "drift" : "in_sync";
+          if (enh) {
+            stackDrift = enh.drift_detected ? "drift" : "in_sync";
+          } else if (hasIac) {
+            stackDrift = "unknown";
           }
 
           const effectiveAuto =
             is && typeof (is as any).id === "number" && effMap[(is as any).id] ? true : false;
 
-          merged.push({
+          const mergedRow: MergedStack = {
             name: sname,
             drift: stackDrift,
-            iacEnabled: effectiveAuto, // <- switch reflects EFFECTIVE auto-devops
+            iacEnabled: effectiveAuto, // switch reflects EFFECTIVE auto-devops
             pullPolicy: hasIac ? is?.pull_policy : undefined,
             sops: hasIac ? is?.sops_status === "all" : false,
             deployKind: hasIac ? is?.deploy_kind || "compose" : sname === "(none)" ? "unmanaged" : "unmanaged",
@@ -236,7 +285,12 @@ export default function HostStacksView({
             iacId: (is as any)?.id,
             hasIac,
             hasContent,
-          });
+          };
+
+          // @ts-ignore expose drift reason for tooltip
+          if (enh?.drift_reason) (mergedRow as any).driftReason = enh.drift_reason;
+
+          merged.push(mergedRow);
         }
 
         if (!cancel) setStacks(merged);
@@ -450,7 +504,8 @@ export default function HostStacksView({
                 </button>
               </CardTitle>
               <div className="flex items-center gap-2">
-                {DriftBadge(s.drift)}
+                {/* NEW: drift reason as tooltip; badge now driven by backend */}
+                <span title={(s as any).driftReason || ""}>{DriftBadge(s.drift)}</span>
                 <Badge variant="outline" className="border-slate-700 text-slate-300">
                   {s.deployKind || "unknown"}
                 </Badge>
@@ -518,6 +573,10 @@ export default function HostStacksView({
                         st.includes("healthy") ||
                         st.includes("restarting");
                       const isPaused = st.includes("paused");
+
+                      // NEW: optional config-hash short
+                      const cfgShort = (r as any).configHash ? String((r as any).configHash).slice(0, 12) : "";
+
                       return (
                         <tr
                           key={r.name}
@@ -532,15 +591,20 @@ export default function HostStacksView({
                               <div className="max-w-[24rem] truncate" title={r.imageRun || ""}>
                                 {r.imageRun || "—"}
                               </div>
-                              {r.imageIac && (
+                              {/* NEW: show config-hash next to runtime image (no image comparison) */}
+                              {cfgShort && (
+                                <span
+                                  className="text-[10px] px-1.5 py-0.5 rounded border border-slate-700 text-slate-400"
+                                  title={(r as any).configHash}
+                                >
+                                  cfg {cfgShort}
+                                </span>
+                              )}
+                              {/* Keep IaC image only for rows representing missing services */}
+                              {r.imageIac && r.state === "missing" && (
                                 <>
                                   <ChevronRight className="h-4 w-4 text-slate-500" />
-                                  <div
-                                    className={`max-w-[24rem] truncate ${
-                                      r.drift ? "text-amber-300" : "text-slate-300"
-                                    }`}
-                                    title={r.imageIac}
-                                  >
+                                  <div className="max-w-[24rem] truncate text-slate-300" title={r.imageIac}>
                                     {r.imageIac}
                                   </div>
                                 </>

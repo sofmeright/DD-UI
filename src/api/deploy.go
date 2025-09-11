@@ -1,3 +1,4 @@
+// src/api/deploy.go
 package main
 
 import (
@@ -20,19 +21,19 @@ type ctxManualKey struct{}
 // then runs `docker compose up -d` with the staged compose files.
 // Originals are never modified and plaintext only lives in the stage dir.
 //
-// IMPORTANT: Non-manual invocations are **gated** by shouldAutoApply(ctx, stackID).
+// IMPORTANT: Non-manual invocations are **gated** by shouldAutoDeployNow(ctx, stackID).
 // Manual invocations bypass Auto DevOps (still require files to exist).
 // Also records a deployment stamp keyed to the IaC bundle hash and associates
 // containers by querying `docker compose ps -q` (no global --label needed).
 func deployStack(ctx context.Context, stackID int64) error {
 	// Auto-DevOps gate (unless manual override)
 	if man, _ := ctx.Value(ctxManualKey{}).(bool); !man {
-		allowed, aerr := shouldAutoApply(ctx, stackID)
+		allowed, aerr := shouldAutoDeployNow(ctx, stackID)
 		if aerr != nil {
 			return aerr
 		}
 		if !allowed {
-			log.Printf("deploy: stack %d skipped (auto_devops disabled or no change)", stackID)
+			log.Printf("deploy: stack %d skipped (policy or no bundle changes)", stackID)
 			return nil
 		}
 	}

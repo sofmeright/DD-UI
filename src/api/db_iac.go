@@ -1,3 +1,4 @@
+// src/api/db_iac.go
 package main
 
 import (
@@ -211,7 +212,7 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 	return stacks, nil
 }
 
-/* ===== New helpers for editor APIs ===== */
+/* ===== New helpers for editor APIs and bundle hashing ===== */
 
 type IacFileMetaRow struct {
 	Role      string    `json:"role"`
@@ -321,4 +322,103 @@ func ComputeCurrentBundleHash(ctx context.Context, stackID int64) (string, error
 		fmt.Fprintf(h, "%s\t%s\t%s\t%d\n", f.role, f.path, f.sha, f.size)
 	}
 	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+/* ===== Enhanced stacks + stamp-based drift (used by /hosts/{name}/enhanced-iac) ===== */
+
+type EnhancedIacStackOut struct {
+	IacStackOut
+	LatestDeployment *DeploymentStamp `json:"latest_deployment,omitempty"`
+	DriftDetected    bool             `json:"drift_detected"`
+	DriftReason      string           `json:"drift_reason,omitempty"`
+}
+
+func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]EnhancedIacStackOut, error) {
+	// Get base stacks
+	baseStacks, err := listIacStacksForHost(ctx, hostName)
+	if err != nil {
+		return nil, err
+	}
+
+	var enhancedStacks []EnhancedIacStackOut
+	for _, stack := range baseStacks {
+		enhanced := EnhancedIacStackOut{
+			IacStackOut: stack,
+		}
+
+		// Get latest deployment stamp
+		latestStamp, err := GetLatestDeploymentStamp(ctx, stack.ID)
+		if err == nil {
+			enhanced.LatestDeployment = latestStamp
+
+			// Check for drift by comparing running container stamps with expected
+			driftDetected, reason := checkStackDrift(ctx, stack.ID, latestStamp.DeploymentHash)
+			enhanced.DriftDetected = driftDetected
+			enhanced.DriftReason = reason
+		} else {
+			// If stamps table is missing, mark as unavailable rather than hard-fail
+			if strings.Contains(err.Error(), "migration 015 not applied") ||
+				strings.Contains(strings.ToLower(err.Error()), "not available") {
+				enhanced.DriftDetected = false
+				enhanced.DriftReason = "Enhanced drift detection not available - migration 015 not applied"
+			} else {
+				// No successful deployment yet → do not scream drift; surface as info
+				enhanced.DriftDetected = false
+				enhanced.DriftReason = "No successful deployment recorded yet"
+			}
+		}
+
+		enhancedStacks = append(enhancedStacks, enhanced)
+	}
+
+	return enhancedStacks, nil
+}
+
+// checkStackDrift compares expected deployment hash with running containers.
+// It avoids immediate false-positives if stamps aren’t associated yet.
+func checkStackDrift(ctx context.Context, stackID int64, expectedHash string) (bool, string) {
+	rows, err := db.Query(ctx, `
+		SELECT container_id, COALESCE(deployment_hash, ''), state
+		FROM containers 
+		WHERE stack_id = $1 
+		  AND state IN ('running', 'paused', 'restarting')
+	`, stackID)
+	if err != nil {
+		// If column is missing (migration not applied), don’t flag drift.
+		if strings.Contains(err.Error(), "column \"deployment_hash\" does not exist") {
+			return false, "Enhanced drift detection not available - migration 015 not applied"
+		}
+		return true, fmt.Sprintf("Failed to query containers: %v", err)
+	}
+	defer rows.Close()
+
+	var runningContainers int
+	var wrongHash int
+	var missingHash int
+
+	for rows.Next() {
+		var containerID, deploymentHash, state string
+		if err := rows.Scan(&containerID, &deploymentHash, &state); err != nil {
+			continue
+		}
+		runningContainers++
+		if deploymentHash == "" {
+			missingHash++
+		} else if deploymentHash != expectedHash {
+			wrongHash++
+		}
+	}
+
+	if runningContainers == 0 {
+		// No containers — can be “not deployed yet”; don’t flag as drift.
+		return false, "No running containers found for stack"
+	}
+	if missingHash > 0 {
+		// Likely just deployed; association happens async. Don’t hard-fail.
+		return false, fmt.Sprintf("%d containers pending deployment stamp association", missingHash)
+	}
+	if wrongHash > 0 {
+		return true, fmt.Sprintf("%d containers have different deployment hash", wrongHash)
+	}
+	return false, "All containers match expected deployment"
 }

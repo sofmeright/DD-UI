@@ -1,4 +1,3 @@
-// src/api/deploy.go
 package main
 
 import (
@@ -19,7 +18,7 @@ import (
 // ctxManualKey marks a deploy as "manual", which bypasses Auto DevOps gating.
 type ctxManualKey struct{}
 
-// deployStack: stage -> docker compose up -d (project = stack name) -> stamp -> associate via labels.
+// deployStack: stage -> docker compose up -d (-p = RAW stack_name) -> stamp -> associate via label (sanitized form).
 func deployStack(ctx context.Context, stackID int64) error {
 	// Auto-DevOps gate (unless manual)
 	if man, _ := ctx.Value(ctxManualKey{}).(bool); !man {
@@ -33,7 +32,13 @@ func deployStack(ctx context.Context, stackID int64) error {
 		}
 	}
 
-	// Resolve root and rel path
+	// Resolve stack name (RAW) and stage dir
+	rawProjectName, err := fetchStackName(ctx, stackID)
+	if err != nil || strings.TrimSpace(rawProjectName) == "" {
+		return errors.New("deploy: could not resolve stack name")
+	}
+	labelProject := composeProjectLabelFromStack(rawProjectName) // for lookups only
+
 	root, err := getRepoRootForStack(ctx, stackID)
 	if err != nil {
 		return err
@@ -60,12 +65,6 @@ func deployStack(ctx context.Context, stackID int64) error {
 		return nil
 	}
 
-	// Derive Compose project label (normalized) from scope+stack
-	projectName := deriveComposeProjectName(ctx, stackID)
-	if strings.TrimSpace(projectName) == "" {
-		projectName = fmt.Sprintf("ddui_%d", stackID)
-	}
-
 	// Build a deployment stamp (best effort) from staged compose content.
 	var allComposeContent []byte
 	for _, f := range stagedComposes {
@@ -80,8 +79,8 @@ func deployStack(ctx context.Context, stackID int64) error {
 		log.Printf("deploy: failed to create deployment stamp: %v", serr)
 	}
 
-	// docker compose -p <project> -f ... up -d --remove-orphans
-	args := []string{"compose", "-p", projectName}
+	// docker compose -p <RAW stack_name> -f ... up -d --remove-orphans
+	args := []string{"compose", "-p", rawProjectName}
 	for _, f := range stagedComposes {
 		args = append(args, "-f", f)
 	}
@@ -100,25 +99,25 @@ func deployStack(ctx context.Context, stackID int64) error {
 		return fmt.Errorf("docker compose up failed: %v\n%s", err, string(out))
 	}
 
-	// Mark success and associate containers by project label.
+	// Mark success and associate containers by the **label** project (sanitized).
 	if stamp != nil {
 		if uerr := UpdateDeploymentStampStatus(ctx, stamp.ID, "success"); uerr != nil {
 			log.Printf("deploy: failed to update deployment stamp status: %v", uerr)
 		}
-		go func(pj string, stampID int64, depHash string) {
+		go func(label string, stampID int64, depHash string) {
 			backoff := []time.Duration{1 * time.Second, 2 * time.Second, 3 * time.Second, 5 * time.Second}
 			for i := 0; i < len(backoff); i++ {
 				if i > 0 {
 					time.Sleep(backoff[i])
 				}
-				if err := associateByProjectInspect(context.Background(), pj, stampID, depHash); err == nil {
+				if err := associateByProjectInspect(context.Background(), label, stampID, depHash); err == nil {
 					return
 				}
 			}
-			if err := associateByProjectInspect(context.Background(), pj, stamp.ID, stamp.DeploymentHash); err != nil {
-				log.Printf("deploy: association (inspect) still failing for project=%s: %v", pj, err)
+			if err := associateByProjectInspect(context.Background(), label, stamp.ID, stamp.DeploymentHash); err != nil {
+				log.Printf("deploy: association (inspect) still failing for project=%s: %v", label, err)
 			}
-		}(projectName, stamp.ID, stamp.DeploymentHash)
+		}(labelProject, stamp.ID, stamp.DeploymentHash)
 	}
 
 	log.Printf("deploy: stack %d deployed (compose=%d, stage=%s, repoRoot=%s, stamp=%v)",
@@ -127,8 +126,8 @@ func deployStack(ctx context.Context, stackID int64) error {
 	return nil
 }
 
-// associateByProjectInspect stamps all containers with the given Compose project.
-func associateByProjectInspect(ctx context.Context, project string, stampID int64, deploymentHash string) error {
+// associateByProjectInspect stamps all containers with the given Compose project label value.
+func associateByProjectInspect(ctx context.Context, projectLabel string, stampID int64, deploymentHash string) error {
 	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
 	if err != nil {
 		return err
@@ -136,14 +135,14 @@ func associateByProjectInspect(ctx context.Context, project string, stampID int6
 	defer cli.Close()
 
 	flt := filters.NewArgs()
-	flt.Add("label", "com.docker.compose.project="+project)
+	flt.Add("label", "com.docker.compose.project="+projectLabel)
 
 	list, err := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: flt})
 	if err != nil {
 		return err
 	}
 	if len(list) == 0 {
-		return fmt.Errorf("no containers yet for compose project=%s", project)
+		return fmt.Errorf("no containers yet for compose project=%s", projectLabel)
 	}
 
 	var assocErrs int

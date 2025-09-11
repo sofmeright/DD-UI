@@ -1,4 +1,3 @@
-// src/api/compose_helpers.go
 package main
 
 import (
@@ -7,11 +6,12 @@ import (
 	"strings"
 )
 
-// NOTE: Compose projects accept [a-z0-9][a-z0-9_-]* (Compose normalizes).
-// We keep the user's *display* name untouched in the UI, and only
-// normalize the internal *project label* passed to docker compose -p.
+// Compose normalizes the project name internally (lowercase, [a-z0-9_-]) for the
+// com.docker.compose.project label. We use this ONLY for lookups, not to change
+// what the user typed. We still pass the raw stack_name to `docker compose -p`.
 var projRe = regexp.MustCompile(`[^a-z0-9_-]+`)
 
+// sanitizeProject mirrors Compose's normalization enough for label matching.
 func sanitizeProject(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = strings.ReplaceAll(s, " ", "_")
@@ -23,23 +23,26 @@ func sanitizeProject(s string) string {
 	return s
 }
 
-// Compose project label = <scope_name>_<stack_name> (normalized for Compose)
-func composeProjectNameFromParts(scopeName, stackName string) string {
-	base := strings.TrimSpace(scopeName) + "_" + strings.TrimSpace(stackName)
-	return sanitizeProject(base)
+// composeProjectLabelFromStack returns the label value Compose will use for the project,
+// derived ONLY from the stack name (no scope prefix).
+func composeProjectLabelFromStack(stackName string) string {
+	return sanitizeProject(stackName)
 }
 
-func deriveComposeProjectName(ctx context.Context, stackID int64) string {
-	var scopeName, stackName string
-	_ = db.QueryRow(ctx, `
-		SELECT scope_name, stack_name
+// fetchStackName returns the raw stack_name exactly as stored (what user typed).
+func fetchStackName(ctx context.Context, stackID int64) (string, error) {
+	var name string
+	err := db.QueryRow(ctx, `
+		SELECT stack_name
 		FROM iac_stacks
 		WHERE id=$1
-	`, stackID).Scan(&scopeName, &stackName)
-	return composeProjectNameFromParts(scopeName, stackName)
+	`, stackID).Scan(&name)
+	return name, err
 }
 
-// Legacy shim (do not add new callers)
+// Legacy shim for old callers that expected a "compose project name" from stackID.
+// It now returns the **label form** (sanitized) based on stack_name only.
 func composeProjectName(stackID int64) string {
-	return deriveComposeProjectName(context.Background(), stackID)
+	name, _ := fetchStackName(context.Background(), stackID)
+	return composeProjectLabelFromStack(name)
 }

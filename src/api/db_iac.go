@@ -338,11 +338,11 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 	for _, s := range base {
 		e := EnhancedIacStackOut{IacStackOut: s}
 
-		// Gather runtime by Compose project label (derived from scope + stack)
-		project := composeProjectNameFromParts(s.ScopeName, s.Name)
+		// Gather runtime by Compose project label (derived ONLY from the stack name)
+		projectLabel := composeProjectLabelFromStack(s.Name)
 
 		ff := filters.NewArgs()
-		ff.Add("label", "com.docker.compose.project="+project)
+		ff.Add("label", "com.docker.compose.project="+projectLabel)
 
 		ctrs, lerr := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: ff})
 		if lerr == nil {

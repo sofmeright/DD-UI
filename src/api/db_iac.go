@@ -304,9 +304,15 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 			enhanced.DriftDetected = driftDetected
 			enhanced.DriftReason = reason
 		} else {
-			// No deployment stamp found - this could indicate drift or first deployment
-			enhanced.DriftDetected = true
-			enhanced.DriftReason = "No deployment stamp found - manual deployment or first time deployment"
+			// Check if migration is missing
+			if strings.Contains(err.Error(), "migration 015 not applied") {
+				enhanced.DriftDetected = false
+				enhanced.DriftReason = "Enhanced drift detection not available - migration 015 not applied"
+			} else {
+				// No deployment stamp found - this could indicate drift or first deployment
+				enhanced.DriftDetected = true
+				enhanced.DriftReason = "No deployment stamp found - manual deployment or first time deployment"
+			}
 		}
 
 		enhancedStacks = append(enhancedStacks, enhanced)
@@ -319,12 +325,16 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 func checkStackDrift(ctx context.Context, stackID int64, expectedHash string) (bool, string) {
 	// Check if containers with this stack have the expected deployment hash
 	rows, err := db.Query(ctx, `
-		SELECT container_id, deployment_hash, state
+		SELECT container_id, COALESCE(deployment_hash, ''), state
 		FROM containers 
 		WHERE stack_id = $1 
 		  AND state IN ('running', 'paused', 'restarting')
 	`, stackID)
 	if err != nil {
+		// Check if deployment_hash column doesn't exist (migration not applied)
+		if strings.Contains(err.Error(), "column \"deployment_hash\" does not exist") {
+			return false, "Enhanced drift detection not available - migration 015 not applied"
+		}
 		return true, fmt.Sprintf("Failed to query containers: %v", err)
 	}
 	defer rows.Close()

@@ -6,6 +6,8 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"time"
 )
 
@@ -77,6 +79,10 @@ func GetLatestDeploymentStamp(ctx context.Context, stackID int64) (*DeploymentSt
 	)
 	
 	if err != nil {
+		// Check if it's a table not found error - gracefully handle missing migration
+		if strings.Contains(err.Error(), "relation \"deployment_stamps\" does not exist") {
+			return nil, fmt.Errorf("deployment stamps feature not available - migration 015 not applied")
+		}
 		return nil, err
 	}
 	return &stamp, nil

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 )
 
@@ -351,7 +352,7 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 		project := composeProjectName(s.ID)
 		ff := filters.NewArgs()
 		ff.Add("label", "com.docker.compose.project="+project)
-		ctrs, lerr := cli.ContainerList(ctx, types.ContainerListOptions{All: true, Filters: ff})
+		ctrs, lerr := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: ff})
 		if lerr == nil {
 			for _, c := range ctrs {
 				lbl := func(k string) string {

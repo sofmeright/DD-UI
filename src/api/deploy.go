@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 )
 
@@ -163,7 +164,7 @@ func associateContainersWithStamp(ctx context.Context, stackID int64, stampID in
 
 	f := filters.NewArgs()
 	f.Add("label", "com.docker.compose.project="+composeProjectName(stackID))
-	list, err := cli.ContainerList(ctx, types.ContainerListOptions{All: true, Filters: f})
+	list, err := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: f})
 	if err != nil {
 		log.Printf("deploy: stamp assoc: list containers: %v", err)
 		return

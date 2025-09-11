@@ -1,4 +1,3 @@
-// src/api/deploy.go
 package main
 
 import (
@@ -8,7 +7,6 @@ import (
 	"log"
 	"os"
 	"os/exec"
-	"regexp"
 	"strings"
 	"time"
 
@@ -133,7 +131,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 				}
 			}
 			// last attempt without backoff logging
-			if err := associateByProjectInspect(context.Background(), pj, stamp.ID, stamp.DeploymentHash); err != nil {
+			if err := associateByProjectInspect(context.Background(), pj, stampID, depHash); err != nil {
 				log.Printf("deploy: association (inspect) still failing for project=%s: %v", pj, err)
 			}
 		}(projectName, stamp.ID, stamp.DeploymentHash)
@@ -143,45 +141,6 @@ func deployStack(ctx context.Context, stackID int64) error {
 		stackID, len(stagedComposes), stageDir, root, stamp != nil)
 
 	return nil
-}
-
-// deriveComposeProjectName builds a stable docker compose project name from scope and stack.
-// We use "<scopeName>_<stackName>" normalized to lowercase and limited charset.
-func deriveComposeProjectName(ctx context.Context, stackID int64) (string, error) {
-	var scopeKind, scopeName, stackName string
-	if err := db.QueryRow(ctx, `
-		SELECT scope_kind::text, scope_name, stack_name
-		FROM iac_stacks WHERE id=$1
-	`, stackID).Scan(&scopeKind, &scopeName, &stackName); err != nil {
-		return "", err
-	}
-	base := strings.ToLower(strings.TrimSpace(scopeName) + "_" + strings.TrimSpace(stackName))
-	return sanitizeProject(base), nil
-}
-
-var reAllowed = regexp.MustCompile(`[a-z0-9_-]+`)
-
-// sanitizeProject keeps only [a-z0-9_-], collapses sequences, trims to 64 chars,
-// and ensures it starts with a letter/number.
-func sanitizeProject(s string) string {
-	s = strings.ToLower(s)
-	chunks := reAllowed.FindAllString(s, -1)
-	if len(chunks) == 0 {
-		return ""
-	}
-	out := strings.Join(chunks, "-")
-	// trim length to something Compose is happy with
-	if len(out) > 64 {
-		out = out[:64]
-	}
-	// ensure starts with alnum
-	for len(out) > 0 && !((out[0] >= 'a' && out[0] <= 'z') || (out[0] >= '0' && out[0] <= '9')) {
-		out = out[1:]
-	}
-	if out == "" {
-		out = "ddui"
-	}
-	return out
 }
 
 // associateByProjectInspect finds containers via the Compose project label and stamps them.

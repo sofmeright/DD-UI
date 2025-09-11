@@ -1,4 +1,3 @@
-// src/api/db_iac.go
 package main
 
 import (
@@ -321,13 +320,6 @@ type EnhancedIacStackOut struct {
 	Containers       []ContainerBrief `json:"containers"`
 }
 
-// composeProjectName builds the Compose project name the same way deploy.go does
-// (scopeName + "_" + stackName, normalized).
-func composeProjectName(scopeName, stackName string) string {
-	base := strings.ToLower(strings.TrimSpace(scopeName) + "_" + strings.TrimSpace(stackName))
-	return sanitizeProject(base)
-}
-
 // listEnhancedIacStacksForHost returns stacks with runtime info and drift:
 // • Drift if current bundle hash != latest successful stamp hash (files changed).
 // • Drift if no containers are present while stack has content & is enabled.
@@ -354,8 +346,8 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 	for _, s := range base {
 		e := EnhancedIacStackOut{IacStackOut: s}
 
-		// Gather runtime by Compose project label we enforce on deploy
-		project := composeProjectName(s.ID)
+		// Gather runtime by Compose project label (derived from scope + stack)
+		project := composeProjectNameFromParts(s.ScopeName, s.Name)
 		ff := filters.NewArgs()
 		ff.Add("label", "com.docker.compose.project="+project)
 		ctrs, lerr := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: ff})

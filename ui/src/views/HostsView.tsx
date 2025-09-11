@@ -1,4 +1,4 @@
-// ui/src/views/HostsView.tsx
+// ui/src/views/HostsView.tsx  
 import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
@@ -18,117 +18,83 @@ export default function HostsView({
   scanning: boolean;
   onScanAll: () => Promise<void> | void;
   onFilter: (v: string) => void;
-  onOpenHost: (host: Host) => void;
-  refreshMetricsForHosts: () => void;
+  onOpenHost: (name: string) => void;
+  refreshMetricsForHosts: (names: string[]) => Promise<void>;
 }) {
-  const [filterQuery, setFilterQuery] = useState("");
-
-  const handleFilterChange = (value: string) => {
-    setFilterQuery(value);
-    onFilter(value);
-  };
+  const [query, setQuery] = useState("");
 
   return (
-    <div className="flex-1 flex flex-col overflow-hidden">
-      <div className="flex-1 overflow-auto p-6">
-        <div className="max-w-7xl mx-auto space-y-6">
-          <div>
-            <h1 className="text-3xl font-bold text-slate-200">Hosts</h1>
-            <p className="text-slate-400 mt-1">Manage and monitor your infrastructure hosts</p>
-          </div>
+    <div className="space-y-4">
+      <div className="grid md:grid-cols-5 gap-4">
+        <MetricCard title="Hosts" value={metrics.hosts} icon={Boxes} />
+        <MetricCard title="Stacks" value={metrics.stacks} icon={Boxes} />
+        <MetricCard title="Containers" value={metrics.containers} icon={Layers} />
+        <MetricCard title="Drift" value={<span className="text-amber-400">{metrics.drift}</span>} icon={AlertTriangle} />
+        <MetricCard title="Errors" value={<span className="text-rose-400">{metrics.errors}</span>} icon={XCircle} />
+      </div>
 
-          {/* Metrics Cards */}
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
-            <MetricCard title="Hosts" value={metrics.hosts} icon={Boxes} />
-            <MetricCard title="Stacks" value={metrics.stacks} icon={Layers} />
-            <MetricCard title="Containers" value={metrics.containers} icon={Boxes} />
-            <MetricCard title="Drift" value={<span className="text-amber-400">{metrics.drift}</span>} icon={AlertTriangle} />
-            <MetricCard title="Errors" value={<span className="text-red-400">{metrics.errors}</span>} icon={XCircle} />
-          </div>
-
-          {/* Controls */}
-          <div className="flex flex-col sm:flex-row gap-4 items-start sm:items-center justify-between">
-            <div className="flex-1 max-w-md">
+      <Card className="bg-slate-900/40 border-slate-800">
+        <CardContent className="py-4">
+          <div className="flex items-center gap-2">
+            <Button onClick={onScanAll} disabled={scanning} className="bg-[#310937] hover:bg-[#2a0830] text-white">
+              <RefreshCw className={`h-4 w-4 mr-1 ${scanning ? "animate-spin" : ""}`} />
+              {scanning ? "Scanning…" : "Sync"}
+            </Button>
+            <div className="relative w-full md:w-96">
               <Input
-                placeholder="Filter hosts..."
-                value={filterQuery}
-                onChange={(e) => handleFilterChange(e.target.value)}
-                className="bg-slate-900 border-slate-700 text-slate-200"
+                placeholder="Filter by host, group, address…"
+                className="pl-3 bg-slate-900/50 border-slate-800 text-slate-200 placeholder:text-slate-500"
+                value={query}
+                onChange={(e) => { setQuery(e.target.value); onFilter(e.target.value); }}
               />
             </div>
-            <div className="flex gap-2">
-              <Button
-                onClick={refreshMetricsForHosts}
-                variant="outline"
-                size="sm"
-                className="border-slate-700 text-slate-300 hover:bg-slate-800"
-              >
-                <RefreshCw className="h-4 w-4 mr-2" />
-                Refresh
-              </Button>
-              <Button
-                onClick={onScanAll}
-                disabled={scanning}
-                size="sm"
-                className="bg-brand hover:bg-brand/80"
-              >
-                {scanning ? <RefreshCw className="h-4 w-4 mr-2 animate-spin" /> : <RefreshCw className="h-4 w-4 mr-2" />}
-                {scanning ? "Scanning..." : "Scan All"}
-              </Button>
-            </div>
           </div>
+        </CardContent>
+      </Card>
 
-          {/* Error Display */}
-          {err && (
-            <Card className="border-red-500/50 bg-red-500/10">
-              <CardContent className="p-4">
-                <p className="text-red-400">Error: {err}</p>
-              </CardContent>
-            </Card>
-          )}
-
-          {/* Hosts Grid */}
-          {loading ? (
-            <div className="flex items-center justify-center py-12">
-              <RefreshCw className="h-8 w-8 animate-spin text-slate-400" />
-              <span className="ml-2 text-slate-400">Loading hosts...</span>
-            </div>
-          ) : (
-            <div className="grid gap-4">
-              {filteredHosts.map((host) => (
-                <Card
-                  key={host.name}
-                  className="border-slate-800 bg-slate-900/50 hover:bg-slate-800/50 transition-colors"
-                >
-                  <CardContent className="p-4">
-                    <div className="flex items-center justify-between cursor-pointer" onClick={() => onOpenHost(host)}>
-                      <div className="flex items-center gap-3">
-                        <div className="w-3 h-3 bg-green-500 rounded-full"></div>
-                        <div>
-                          <h3 className="font-semibold text-slate-200">{host.name}</h3>
-                          {host.address && (
-                            <p className="text-sm text-slate-400">{host.address}</p>
-                          )}
-                        </div>
-                      </div>
-                      <div className="text-right text-sm text-slate-400">
-                        Click to view stacks
-                      </div>
-                    </div>
-                  </CardContent>
-                </Card>
-              ))}
-            </div>
-          )}
-
-          {!loading && filteredHosts.length === 0 && (
-            <Card className="border-slate-800 bg-slate-900/50">
-              <CardContent className="p-8 text-center">
-                <p className="text-slate-400">No hosts found</p>
-              </CardContent>
-            </Card>
-          )}
-        </div>
+      <div className="overflow-hidden rounded-xl border border-slate-800">
+        <table className="w-full text-sm">
+          <thead className="bg-slate-900/70 text-slate-300">
+            <tr>
+              <th className="p-3 text-left">Host</th>
+              <th className="p-3 text-left">Address</th>
+              <th className="p-3 text-left">Groups</th>
+              <th className="p-3 text-left">Scan</th>
+              <th className="p-3 text-left">Status</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && (<tr><td className="p-4 text-slate-500" colSpan={5}>Loading hosts…</td></tr>)}
+            {err && !loading && (<tr><td className="p-4 text-rose-300" colSpan={5}>{err}</td></tr>)}
+            {!loading && filteredHosts.map((h) => (
+              <tr key={h.name} className="border-t border-slate-800 hover:bg-slate-900/40">
+                <td className="p-3 font-medium text-slate-200">
+                  <button className="hover:underline" onClick={() => onOpenHost(h.name)}>{h.name}</button>
+                </td>
+                <td className="p-3 text-slate-300">{h.address || "—"}</td>
+                <td className="p-3 text-slate-300">{(h.groups || []).length ? (h.groups || []).join(", ") : "—"}</td>
+                <td className="p-3">
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    className="border-slate-700 text-slate-200 hover:bg-slate-800"
+                    onClick={async () => {
+                      await fetch(`/api/scan/host/${encodeURIComponent(h.name)}`, { method: "POST", credentials: "include" });
+                      await refreshMetricsForHosts([h.name]);
+                    }}
+                  >
+                    <RefreshCw className="h-4 w-4 mr-1" />
+                    Scan
+                  </Button>
+                </td>
+                <td className="p-3"></td>
+              </tr>
+            ))}
+            {!loading && filteredHosts.length === 0 && (
+              <tr><td className="p-6 text-center text-slate-500" colSpan={5}>No hosts.</td></tr>
+            )}
+          </tbody>
+        </table>
       </div>
     </div>
   );

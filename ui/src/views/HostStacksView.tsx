@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import {
-  ArrowLeft,
   ChevronRight,
   FileText,
   Activity,
@@ -31,12 +30,10 @@ import { formatDT, formatPortsLines } from "@/utils/format";
 
 export default function HostStacksView({
   host,
-  onBack,
   onSync,
   onOpenStack,
 }: {
   host: Host;
-  onBack: () => void;
   onSync: () => void;
   onOpenStack: (stackName: string, iacId?: number) => void;
 }) {
@@ -410,14 +407,7 @@ export default function HostStacksView({
       )}
 
       <div className="flex items-center gap-2">
-        <Button
-          variant="outline"
-          className="border-slate-700 text-slate-200 hover:bg-slate-800"
-          onClick={onBack}
-        >
-          <ArrowLeft className="h-4 w-4 mr-1" /> Back to Deployments
-        </Button>
-        <div className="ml-2 text-lg font-semibold text-white">
+        <div className="text-lg font-semibold text-white">
           {host.name} <span className="text-slate-400 text-sm">{host.address || ""}</span>
         </div>
         <div className="ml-auto flex items-center gap-2">

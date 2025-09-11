@@ -150,7 +150,6 @@ export default function App() {
     return (
       <HostStacksView
         host={host}
-        onBack={() => navigate('/hosts')}
         onSync={() => refreshMetricsForHosts([host.name])}
         onOpenStack={(stackName, iacId) => navigate(`/stacks/${stackName}${iacId ? `?host=${hostName}&iacId=${iacId}` : `?host=${hostName}`}`)}
       />
@@ -201,7 +200,7 @@ export default function App() {
               scanning={scanning}
               onScanAll={handleScanAll}
               onFilter={setFilterQuery}
-              onOpenHost={(host) => navigate(`/hosts/${host.name}`)}
+              onOpenHost={(hostName) => navigate(`/hosts/${hostName}`)}
               refreshMetricsForHosts={() => refreshMetricsForHosts(hosts.map(h => h.name))}
             />
           } />
@@ -215,7 +214,7 @@ export default function App() {
               scanning={scanning}
               onScanAll={handleScanAll}
               onFilter={setFilterQuery}
-              onOpenHost={(host) => navigate(`/hosts/${host.name}`)}
+              onOpenHost={(hostName) => navigate(`/hosts/${hostName}`)}
               refreshMetricsForHosts={() => refreshMetricsForHosts(hosts.map(h => h.name))}
             />
           } />

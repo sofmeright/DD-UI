@@ -54,7 +54,25 @@ func deployStack(ctx context.Context, stackID int64) error {
 	if derr != nil {
 		return derr
 	}
-	defer func() { if cleanup != nil { cleanup() } }()
+
+	// IMPORTANT: do NOT clean the stage immediately.
+	// Some post-deploy code (compose ps / association) still needs this directory.
+	// Defer a delayed cleanup so background tasks have time to finish.
+	{
+		cfn := cleanup // capture
+		// When deployStack returns, schedule cleanup after a grace period.
+		defer func() {
+			if cfn == nil {
+				return
+			}
+			go func() {
+				// Give enough time for compose ps retries / association to run.
+				// 45–90s is typically plenty; adjust if your watcher needs more.
+				time.Sleep(60 * time.Second)
+				cfn()
+			}()
+		}()
+	}
 
 	// Nothing to deploy? No-op (kept for clarity)
 	if len(stagedComposes) == 0 {

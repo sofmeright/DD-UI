@@ -1,3 +1,4 @@
+// src/api/compose_helpers.go
 package main
 
 import (
@@ -6,12 +7,10 @@ import (
 	"strings"
 )
 
-// Compose normalizes the project name internally (lowercase, [a-z0-9_-]) for the
-// com.docker.compose.project label. We use this ONLY for lookups, not to change
-// what the user typed. We still pass the raw stack_name to `docker compose -p`.
+// We keep the user's *display* stack name untouched for -p.
+// Only for **lookups** we normalize to Compose's label form.
 var projRe = regexp.MustCompile(`[^a-z0-9_-]+`)
 
-// sanitizeProject mirrors Compose's normalization enough for label matching.
 func sanitizeProject(s string) string {
 	s = strings.ToLower(strings.TrimSpace(s))
 	s = strings.ReplaceAll(s, " ", "_")
@@ -23,13 +22,11 @@ func sanitizeProject(s string) string {
 	return s
 }
 
-// composeProjectLabelFromStack returns the label value Compose will use for the project,
-// derived ONLY from the stack name (no scope prefix).
+// For lookups: com.docker.compose.project=<sanitized(stack_name)>
 func composeProjectLabelFromStack(stackName string) string {
 	return sanitizeProject(stackName)
 }
 
-// fetchStackName returns the raw stack_name exactly as stored (what user typed).
 func fetchStackName(ctx context.Context, stackID int64) (string, error) {
 	var name string
 	err := db.QueryRow(ctx, `
@@ -40,8 +37,7 @@ func fetchStackName(ctx context.Context, stackID int64) (string, error) {
 	return name, err
 }
 
-// Legacy shim for old callers that expected a "compose project name" from stackID.
-// It now returns the **label form** (sanitized) based on stack_name only.
+// Legacy shim (don’t add new callers): returns **label form** of stack name.
 func composeProjectName(stackID int64) string {
 	name, _ := fetchStackName(context.Background(), stackID)
 	return composeProjectLabelFromStack(name)

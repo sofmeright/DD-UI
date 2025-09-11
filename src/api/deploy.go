@@ -18,7 +18,8 @@ import (
 // ctxManualKey marks a deploy as "manual", which bypasses Auto DevOps gating.
 type ctxManualKey struct{}
 
-// deployStack: stage -> docker compose up -d (-p = RAW stack_name) -> stamp -> associate via label (sanitized form).
+// deployStack: stage -> (optional: compute config-hash) -> docker compose up -d
+// (-p = EXACT stack name) -> stamp -> associate via label(sanitized).
 func deployStack(ctx context.Context, stackID int64) error {
 	// Auto-DevOps gate (unless manual)
 	if man, _ := ctx.Value(ctxManualKey{}).(bool); !man {
@@ -32,13 +33,14 @@ func deployStack(ctx context.Context, stackID int64) error {
 		}
 	}
 
-	// Resolve stack name (RAW) and stage dir
+	// Resolve raw project name (as user typed) + label form for lookups
 	rawProjectName, err := fetchStackName(ctx, stackID)
 	if err != nil || strings.TrimSpace(rawProjectName) == "" {
 		return errors.New("deploy: could not resolve stack name")
 	}
-	labelProject := composeProjectLabelFromStack(rawProjectName) // for lookups only
+	labelProject := composeProjectLabelFromStack(rawProjectName)
 
+	// Working dir and rel path
 	root, err := getRepoRootForStack(ctx, stackID)
 	if err != nil {
 		return err
@@ -49,7 +51,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 		return errors.New("deploy: stack has no rel_path")
 	}
 
-	// Stage compose files (and decrypt .env if applicable)
+	// Stage (SOPS decrypts into tmpfs and is cleaned afterwards)
 	stageDir, stagedComposes, cleanup, derr := stageStackForCompose(ctx, stackID)
 	if derr != nil {
 		return derr
@@ -65,7 +67,10 @@ func deployStack(ctx context.Context, stackID int64) error {
 		return nil
 	}
 
-	// Build a deployment stamp (best effort) from staged compose content.
+	// Precompute rendered config-hash (best effort; used for stamping & drift).
+	renderedCfgHash := computeRenderedConfigHash(ctx, stageDir, rawProjectName, stagedComposes)
+
+	// Build a deployment stamp (content bytes = concatenated staged compose files).
 	var allComposeContent []byte
 	for _, f := range stagedComposes {
 		b, rerr := os.ReadFile(f)
@@ -74,12 +79,17 @@ func deployStack(ctx context.Context, stackID int64) error {
 		}
 		allComposeContent = append(allComposeContent, b...)
 	}
-	stamp, serr := CreateDeploymentStamp(ctx, stackID, "compose", "", allComposeContent, nil)
+
+	// Pass metadata with the stamp (if your CreateDeploymentStamp supports it).
+	meta := map[string]any{
+		"rendered_config_hash": renderedCfgHash,
+	}
+	stamp, serr := CreateDeploymentStamp(ctx, stackID, "compose", "", allComposeContent, meta)
 	if serr != nil {
 		log.Printf("deploy: failed to create deployment stamp: %v", serr)
 	}
 
-	// docker compose -p <RAW stack_name> -f ... up -d --remove-orphans
+	// docker compose -p <RAW stack name> -f ... up -d --remove-orphans
 	args := []string{"compose", "-p", rawProjectName}
 	for _, f := range stagedComposes {
 		args = append(args, "-f", f)
@@ -99,7 +109,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 		return fmt.Errorf("docker compose up failed: %v\n%s", err, string(out))
 	}
 
-	// Mark success and associate containers by the **label** project (sanitized).
+	// Mark success and associate by Compose label (sanitized form).
 	if stamp != nil {
 		if uerr := UpdateDeploymentStampStatus(ctx, stamp.ID, "success"); uerr != nil {
 			log.Printf("deploy: failed to update deployment stamp status: %v", uerr)
@@ -114,7 +124,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 					return
 				}
 			}
-			if err := associateByProjectInspect(context.Background(), label, stamp.ID, stamp.DeploymentHash); err != nil {
+			if err := associateByProjectInspect(context.Background(), label, stampID, depHash); err != nil {
 				log.Printf("deploy: association (inspect) still failing for project=%s: %v", label, err)
 			}
 		}(labelProject, stamp.ID, stamp.DeploymentHash)

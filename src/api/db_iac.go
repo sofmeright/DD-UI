@@ -343,7 +343,6 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 
 		ff := filters.NewArgs()
 		ff.Add("label", "com.docker.compose.project="+projectLabel)
-
 		ctrs, lerr := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: ff})
 		if lerr == nil {
 			for _, c := range ctrs {
@@ -368,25 +367,50 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 			}
 		}
 
-		// Drift rule 1: IaC bundle changed since last successful deployment.
-		curHash, _ := ComputeCurrentBundleHash(ctx, s.ID)
+		// Determine drift (authoritative first = rendered config-hash)
+		curBundleHash, _ := ComputeCurrentBundleHash(ctx, s.ID)
+
+		// Try to compute current rendered config-hash using the same staging logic (no up).
+		// Best effort; if it fails we still have bundle hash + runtime rules.
+		var curRendered string
+		{
+			stageDir, stagedComposes, cleanup, derr := stageStackForCompose(ctx, s.ID)
+			if derr == nil {
+				curRendered = computeRenderedConfigHash(ctx, stageDir, s.Name /* RAW name */, stagedComposes)
+				if cleanup != nil {
+					cleanup()
+				}
+			}
+
+		// Compare against last successful stamp
 		if stamp, serr := GetLatestDeploymentStamp(ctx, s.ID); serr == nil {
 			e.LatestDeployment = stamp
-			if curHash != "" && stamp.DeploymentHash != "" && curHash != stamp.DeploymentHash {
+			// Prefer rendered_config_hash if present on stamp metadata
+			var stampRendered string
+			if stamp.Metadata != nil {
+				if v, ok := stamp.Metadata["rendered_config_hash"].(string); ok {
+					stampRendered = v
+				}
+			}
+
+			switch {
+			case curRendered != "" && stampRendered != "" && curRendered != stampRendered:
+				e.DriftDetected = true
+				e.DriftReason = "Rendered config changed since last deploy"
+			case curBundleHash != "" && stamp.DeploymentHash != "" && curBundleHash != stamp.DeploymentHash:
 				e.DriftDetected = true
 				e.DriftReason = "IaC changed since last deploy"
 			}
 		}
 
-		// Drift rule 2: Enabled + has content but no containers labeled with our project.
+		// Rule: enabled + has content but no containers => needs deploy
 		if !e.DriftDetected && s.IacEnabled {
-			if has, _ := stackHasContent(ctx, s.ID); has {
-				if len(e.Containers) == 0 {
-					e.DriftDetected = true
-					e.DriftReason = "No containers for this stack"
-				}
+			if has, _ := stackHasContent(ctx, s.ID); has && len(e.Containers) == 0 {
+				e.DriftDetected = true
+				e.DriftReason = "No containers for this stack"
 			}
 		}
+
 
 		out = append(out, e)
 	}

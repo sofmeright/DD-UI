@@ -1729,44 +1729,6 @@ func setGroupDevopsOverride(ctx context.Context, group string, v *bool) error {
 	return err
 }
 
-// shouldAutoApply resolves effective Auto DevOps policy:
-// global -> (host|group) override -> stack override
-func shouldAutoApply(ctx context.Context, stackID int64) (bool, error) {
-	// Base: global
-	global, _ := getGlobalDevopsApply(ctx)
-
-	// Fetch stack scope + stack override
-	var scopeKind, scopeName string
-	var stackOv *bool
-	err := db.QueryRow(ctx, `
-		SELECT scope_kind::text, scope_name, auto_apply_override
-		FROM iac_stacks WHERE id=$1
-	`, stackID).Scan(&scopeKind, &scopeName, &stackOv)
-	if err != nil {
-		return false, errors.New("stack not found")
-	}
-
-	eff := global
-
-	switch strings.ToLower(scopeKind) {
-	case "host":
-		if hov, _ := getHostDevopsOverride(ctx, scopeName); hov != nil {
-			eff = *hov
-		}
-	case "group":
-		if gov, _ := getGroupDevopsOverride(ctx, scopeName); gov != nil {
-			eff = *gov
-		}
-	}
-
-	// Stack override wins if set
-	if stackOv != nil {
-		eff = *stackOv
-	}
-
-	return eff, nil
-}
-
 /* ---------- SSE + WS helpers ---------- */
 
 type sseLineWriter struct {

@@ -11,6 +11,9 @@ import (
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/docker/docker/api/types"
+	"github.com/docker/docker/api/types/filters"
 )
 
 type IacRepoRow struct {
@@ -212,7 +215,7 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 	return stacks, nil
 }
 
-/* ===== New helpers for editor APIs and bundle hashing ===== */
+/* ===== New: roll-up hash & enhanced IaC (drift & runtime) ===== */
 
 type IacFileMetaRow struct {
 	Role      string    `json:"role"`
@@ -264,165 +267,140 @@ func deleteIacFileRow(ctx context.Context, stackID int64, relPath string) error 
 
 // stackHasContent returns true if the stack has any tracked files or a compose_file set.
 func stackHasContent(ctx context.Context, stackID int64) (bool, error) {
-	var has bool
-	// Use a single query with explicit placeholders for each reference to avoid driver quirks.
-	err := db.QueryRow(ctx, `
-		SELECT
-			EXISTS (SELECT 1 FROM iac_stack_files WHERE stack_id = $1)
-			OR EXISTS (
-				SELECT 1 FROM iac_stacks
-				WHERE id = $2 AND COALESCE(compose_file, '') <> ''
-			)
-	`, stackID, stackID).Scan(&has)
-	if err != nil {
+	var n int64
+	if err := db.QueryRow(ctx, `SELECT COUNT(1) FROM iac_stack_files WHERE stack_id=$1`, stackID).Scan(&n); err != nil {
 		return false, err
 	}
-	return has, nil
+	if n > 0 {
+		return true, nil
+	}
+	var compose string
+	_ = db.QueryRow(ctx, `SELECT COALESCE(compose_file,'') FROM iac_stacks WHERE id=$1`, stackID).Scan(&compose)
+	return strings.TrimSpace(compose) != "", nil
 }
 
-// ComputeCurrentBundleHash calculates a deterministic hash over all tracked files
-// (compose/env/scripts/etc.) for the given stack. Any change to a tracked file
-// will change this hash and thus signal "needs redeploy".
+// ComputeCurrentBundleHash returns a stable roll-up hash of all tracked IaC files
+// (compose/env/scripts/other) for a stack. Hash is independent of image tags and
+// changes whenever any file content changes.
 func ComputeCurrentBundleHash(ctx context.Context, stackID int64) (string, error) {
-	type row struct {
-		role string
-		path string
-		sha  string
-		size int64
-	}
-	rows, err := db.Query(ctx, `
-		SELECT role, rel_path, sha256_hex, size_bytes
-		FROM iac_stack_files
-		WHERE stack_id=$1
-	`, stackID)
+	files, err := listFilesForStack(ctx, stackID)
 	if err != nil {
 		return "", err
 	}
-	defer rows.Close()
-
-	var files []row
-	for rows.Next() {
-		var r row
-		if err := rows.Scan(&r.role, &r.path, &r.sha, &r.size); err != nil {
-			return "", err
-		}
-		files = append(files, r)
-	}
-	if err := rows.Err(); err != nil {
-		return "", err
-	}
-
-	// Deterministic ordering
-	sort.Slice(files, func(i, j int) bool {
-		if files[i].role != files[j].role {
-			return files[i].role < files[j].role
-		}
-		return files[i].path < files[j].path
-	})
-
-	h := sha256.New()
+	lines := make([]string, 0, len(files))
 	for _, f := range files {
-		// stable serialization: role \t path \t sha \t size \n
-		fmt.Fprintf(h, "%s\t%s\t%s\t%d\n", f.role, f.path, f.sha, f.size)
+		// Stable line per file; include role and rel_path so moves rename the bundle.
+		lines = append(lines, fmt.Sprintf("%s|%s|%s|%d", strings.ToLower(f.Role), f.RelPath, strings.ToLower(f.Sha256Hex), f.SizeBytes))
 	}
-	return hex.EncodeToString(h.Sum(nil)), nil
+	sort.Strings(lines)
+	h := sha256.New()
+	for _, ln := range lines {
+		_, _ = h.Write([]byte(ln))
+		_, _ = h.Write([]byte{'\n'})
+	}
+	sum := h.Sum(nil)
+	return hex.EncodeToString(sum), nil
 }
 
-/* ===== Enhanced stacks + stamp-based drift (used by /hosts/{name}/enhanced-iac) ===== */
+/* ---------- Enhanced IaC view: runtime + drift (file-change & compose config-hash) ---------- */
+
+type ContainerBrief struct {
+	ID         string `json:"id"`
+	Name       string `json:"name"`
+	Service    string `json:"service"`
+	Image      string `json:"image"`
+	State      string `json:"state"`
+	ConfigHash string `json:"config_hash,omitempty"` // com.docker.compose.config-hash
+}
 
 type EnhancedIacStackOut struct {
 	IacStackOut
 	LatestDeployment *DeploymentStamp `json:"latest_deployment,omitempty"`
 	DriftDetected    bool             `json:"drift_detected"`
 	DriftReason      string           `json:"drift_reason,omitempty"`
+	Containers       []ContainerBrief `json:"containers"`
 }
 
+// listEnhancedIacStacksForHost returns stacks with runtime info and drift:
+// • Drift if current bundle hash != latest successful stamp hash (files changed).
+// • Drift if no containers are present while stack has content & is enabled.
+// • We DO NOT compare image names; cards can show runtime image and other info.
 func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]EnhancedIacStackOut, error) {
-	// Get base stacks
-	baseStacks, err := listIacStacksForHost(ctx, hostName)
+	// Base stacks for host/groups
+	base, err := listIacStacksForHost(ctx, hostName)
 	if err != nil {
 		return nil, err
 	}
 
-	var enhancedStacks []EnhancedIacStackOut
-	for _, stack := range baseStacks {
-		enhanced := EnhancedIacStackOut{
-			IacStackOut: stack,
-		}
+	// Docker client for host (single call)
+	h, err := GetHostByName(ctx, hostName)
+	if err != nil {
+		return nil, err
+	}
+	cli, err := dockerClientForHost(h)
+	if err != nil {
+		return nil, err
+	}
+	defer cli.Close()
 
-		// Get latest deployment stamp
-		latestStamp, err := GetLatestDeploymentStamp(ctx, stack.ID)
-		if err == nil {
-			enhanced.LatestDeployment = latestStamp
+	out := make([]EnhancedIacStackOut, 0, len(base))
+	for _, s := range base {
+		e := EnhancedIacStackOut{IacStackOut: s}
 
-			// Check for drift by comparing running container stamps with expected
-			driftDetected, reason := checkStackDrift(ctx, stack.ID, latestStamp.DeploymentHash)
-			enhanced.DriftDetected = driftDetected
-			enhanced.DriftReason = reason
-		} else {
-			// If stamps table is missing, mark as unavailable rather than hard-fail
-			if strings.Contains(err.Error(), "migration 015 not applied") ||
-				strings.Contains(strings.ToLower(err.Error()), "not available") {
-				enhanced.DriftDetected = false
-				enhanced.DriftReason = "Enhanced drift detection not available - migration 015 not applied"
-			} else {
-				// No successful deployment yet → do not scream drift; surface as info
-				enhanced.DriftDetected = false
-				enhanced.DriftReason = "No successful deployment recorded yet"
+		// Gather runtime by Compose project label we enforce on deploy
+		project := composeProjectName(s.ID)
+		ff := filters.NewArgs()
+		ff.Add("label", "com.docker.compose.project="+project)
+		ctrs, lerr := cli.ContainerList(ctx, types.ContainerListOptions{All: true, Filters: ff})
+		if lerr == nil {
+			for _, c := range ctrs {
+				lbl := func(k string) string {
+					if c.Labels == nil {
+						return ""
+					}
+					return c.Labels[k]
+				}
+				name := ""
+				if len(c.Names) > 0 {
+					name = strings.TrimPrefix(c.Names[0], "/")
+				}
+				e.Containers = append(e.Containers, ContainerBrief{
+					ID:         c.ID,
+					Name:       name,
+					Service:    lbl("com.docker.compose.service"),
+					Image:      c.Image,
+					State:      c.State, // running/created/exited/paused/restarting
+					ConfigHash: lbl("com.docker.compose.config-hash"),
+				})
 			}
 		}
 
-		enhancedStacks = append(enhancedStacks, enhanced)
-	}
-
-	return enhancedStacks, nil
-}
-
-// checkStackDrift compares expected deployment hash with running containers.
-// It avoids immediate false-positives if stamps aren’t associated yet.
-func checkStackDrift(ctx context.Context, stackID int64, expectedHash string) (bool, string) {
-	rows, err := db.Query(ctx, `
-		SELECT container_id, COALESCE(deployment_hash, ''), state
-		FROM containers 
-		WHERE stack_id = $1 
-		  AND state IN ('running', 'paused', 'restarting')
-	`, stackID)
-	if err != nil {
-		// If column is missing (migration not applied), don’t flag drift.
-		if strings.Contains(err.Error(), "column \"deployment_hash\" does not exist") {
-			return false, "Enhanced drift detection not available - migration 015 not applied"
+		// Determine drift:
+		// 1) File-change vs last successful deployment stamp.
+		curHash, _ := ComputeCurrentBundleHash(ctx, s.ID)
+		if stamp, serr := GetLatestDeploymentStamp(ctx, s.ID); serr == nil {
+			e.LatestDeployment = stamp
+			if curHash != "" && stamp.DeploymentHash != "" && curHash != stamp.DeploymentHash {
+				e.DriftDetected = true
+				e.DriftReason = "IaC changed since last deploy"
+			}
+		} else if strings.Contains(serr.Error(), "deployment stamps feature not available") {
+			// Migration not applied — don't mark drift here; rely on runtime signal below.
+		} else {
+			// No successful stamp yet → initial deploy opportunity if enabled/content.
 		}
-		return true, fmt.Sprintf("Failed to query containers: %v", err)
-	}
-	defer rows.Close()
 
-	var runningContainers int
-	var wrongHash int
-	var missingHash int
-
-	for rows.Next() {
-		var containerID, deploymentHash, state string
-		if err := rows.Scan(&containerID, &deploymentHash, &state); err != nil {
-			continue
+		// 2) If enabled + has content but no containers (by our project) → needs deploy.
+		if !e.DriftDetected && s.IacEnabled {
+			if has, _ := stackHasContent(ctx, s.ID); has {
+				if len(e.Containers) == 0 {
+					e.DriftDetected = true
+					e.DriftReason = "No containers for this stack"
+				}
+			}
 		}
-		runningContainers++
-		if deploymentHash == "" {
-			missingHash++
-		} else if deploymentHash != expectedHash {
-			wrongHash++
-		}
-	}
 
-	if runningContainers == 0 {
-		// No containers — can be “not deployed yet”; don’t flag as drift.
-		return false, "No running containers found for stack"
+		out = append(out, e)
 	}
-	if missingHash > 0 {
-		// Likely just deployed; association happens async. Don’t hard-fail.
-		return false, fmt.Sprintf("%d containers pending deployment stamp association", missingHash)
-	}
-	if wrongHash > 0 {
-		return true, fmt.Sprintf("%d containers have different deployment hash", wrongHash)
-	}
-	return false, "All containers match expected deployment"
+	return out, nil
 }

@@ -6,46 +6,41 @@ import (
 	"fmt"
 )
 
-// shouldAutoDeployNow returns true when it is appropriate to auto-apply a deploy *now*.
-// It composes your existing policy toggle (shouldAutoApply in web.go) with
-// “did the IaC bundle change?” semantics.
-//
-// Rules:
-//   • Global/host/group/stack policy must allow auto (via existing shouldAutoApply).
-//   • Stack must have content.
+// shouldAutoApply returns true when it's appropriate to apply changes automatically.
+// Policy (independent of image tags):
+//   • Stack must be iac_enabled AND have any content (compose/env/scripts/other).
 //   • If no successful deployment stamp exists → allow (initial deploy).
-//   • If latest successful stamp hash != current bundle hash → allow.
+//   • If current bundle hash (tracked IaC files) != latest successful stamp hash → allow.
 //   • Else → false.
-func shouldAutoDeployNow(ctx context.Context, stackID int64) (bool, error) {
-	// First: respect your policy toggle (already implemented in web.go).
-	policyOK, err := shouldAutoApply(ctx, stackID)
-	if err != nil {
-		return false, fmt.Errorf("shouldAutoDeployNow/policy: %w", err)
+func shouldAutoApply(ctx context.Context, stackID int64) (bool, error) {
+	var enabled bool
+	if err := db.QueryRow(ctx, `SELECT iac_enabled FROM iac_stacks WHERE id=$1`, stackID).Scan(&enabled); err != nil {
+		return false, fmt.Errorf("shouldAutoApply: load stack: %w", err)
 	}
-	if !policyOK {
+	if !enabled {
 		return false, nil
 	}
 
-	// Must have something to deploy.
 	has, err := stackHasContent(ctx, stackID)
 	if err != nil {
-		return false, fmt.Errorf("shouldAutoDeployNow/content: %w", err)
+		return false, fmt.Errorf("shouldAutoApply: check content: %w", err)
 	}
 	if !has {
 		return false, nil
 	}
 
-	// Hash the current tracked bundle (compose/env/scripts/etc).
 	curHash, err := ComputeCurrentBundleHash(ctx, stackID)
 	if err != nil {
-		return false, fmt.Errorf("shouldAutoDeployNow/hash: %w", err)
+		return false, fmt.Errorf("shouldAutoApply: compute bundle hash: %w", err)
 	}
 
-	// Compare with latest successful stamp.
 	stamp, err := GetLatestDeploymentStamp(ctx, stackID)
 	if err != nil {
-		// No stamps yet or feature not migrated → treat as initial deploy allowed.
+		// Either table missing or simply no successful stamp yet → initial deploy allowed
 		return true, nil
 	}
-	return stamp.DeploymentHash != curHash, nil
+	if stamp.DeploymentHash != curHash {
+		return true, nil
+	}
+	return false, nil
 }

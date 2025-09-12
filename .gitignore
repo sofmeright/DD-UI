@@ -2,10 +2,12 @@
 
 # Environment and secrets
 .env
+.env.*
 .env.local
 .env.development.local
 .env.test.local
 .env.production.local
+stack.env
 *.key
 *.pem
 *.crt
@@ -56,10 +58,11 @@ yarn-error.log*
 pnpm-debug.log*
 
 # Build outputs
-ui/dist/
+ui/dist/assets/
 ui/build/
 build/
 dist/
+# But keep ui/dist/index.html and ui/dist/*.png
 
 # Runtime data
 pids
@@ -145,6 +148,7 @@ storybook-static
 # But we ignore local docker files
 docker-compose.override.yml
 docker-compose.local.yml
+docker-compose.test.yml
 Dockerfile.local
 
 # === Development tools ===
@@ -252,6 +256,14 @@ local.yaml
 config/local.json
 config/local.yml
 config/local.yaml
+
+# === Documentation (development notes) ===
+CLAUDE.md
+HASH_BASED_DRIFT_DETECTION.md
+DEPLOYMENT_NOTES.md
+*.notes.md
+notes/
+docs/dev/
 
 # === Kubernetes ===
 *.kubeconfig

@@ -534,6 +534,7 @@ To encrypt, SOPS needs one or more **AGE recipients** (public keys). You have tw
 | `DDUI_BUILDS_DIR`     | —       | Directory for build outputs and artifacts (e.g., generated bundles/manifests).                   |
 | `DDUI_INVENTORY_PATH` | —       | Path to the hosts inventory file (YAML/JSON) defining remote Docker targets.                     |
 | `DDUI_LOCAL_HOST`     | `""`    | Optional override for the local host name/label; leave empty to use the tool’s implicit/default. |
+| `DDUI_LOG_LEVEL`      | `info`  | Determines the verbosity of logging with available levels: info(1) → warn(2) → error(3) → fatal(4) |
 | `DDUI_BIND`           | —       | Server bind address, e.g. `:8080` or `0.0.0.0:8080`.                                             |
 | `DDUI_UI_ORIGIN`                             | empty                   | Additional allowed CORS origin for the dev UI (`http://localhost:5173` is allowed by default) |
 | `DDUI_UI_DIR`                           | `/home/ddui/ui/dist`    | Where built SPA is served from                                                              |

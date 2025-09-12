@@ -58,10 +58,7 @@
 ### Planned / Known Issues
 
 - Testing / validating multi host docker features.
-- Urls in the navbar and forward and backwards browser navigation.
-- Bugs regarding drift and detection and processing of IAC when parts are encrypted or have environment variables the envs arent processed so it results in a mismatch where we cant tell the state would be the same.
 - Perhaps a local admin user.
-- Urls in the navbar and browser navigation; forward/back, by url.
 - Bug when a file is open outside DDUI it can create an empty temp file next to the file after saving.
 - Make the GUIs more responsive especially when things are changed by DDUI itself.
 - Cache names (and prior tags) for images in the DB for the case when images become orphaned / stranded and they might show as unnamed untagged.

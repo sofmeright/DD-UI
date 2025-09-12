@@ -9,6 +9,7 @@ require (
 	github.com/go-chi/cors v1.2.1
 	github.com/gorilla/sessions v1.2.2
 	github.com/jackc/pgx/v5 v5.6.0
+	golang.org/x/crypto v0.25.0
 	golang.org/x/oauth2 v0.22.0
 	gopkg.in/yaml.v3 v3.0.1
 

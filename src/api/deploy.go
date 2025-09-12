@@ -163,11 +163,16 @@ func deployStack(ctx context.Context, stackID int64) error {
 		}
 		
 		// Update drift cache after successful deployment
-		if dcli, derr := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation()); derr == nil {
-			if cerr := onSuccessfulDeployment(ctx, stackID, rawProjectName, dcli); cerr != nil {
-				errorLog("deploy: failed to update drift cache: %v", cerr)
+		if host, herr := getHostForStack(ctx, stackID); herr == nil {
+			dockerURL, sshCmd := dockerURLFor(host)
+			if dcli, done, derr := dockerClientForURL(ctx, dockerURL, sshCmd); derr == nil {
+				if cerr := onSuccessfulDeployment(ctx, stackID, rawProjectName, dcli); cerr != nil {
+					errorLog("deploy: failed to update drift cache: %v", cerr)
+				}
+				if done != nil {
+					done()
+				}
 			}
-			dcli.Close()
 		}
 		go func(label string, stampID int64, depHash string) {
           // depHash is the stamp.DeploymentHash (content hash)
@@ -176,11 +181,11 @@ func deployStack(ctx context.Context, stackID int64) error {
 				if i > 0 {
 					time.Sleep(backoff[i])
 				}
-				if err := associateByProjectInspect(context.Background(), label, stampID, depHash); err == nil {
+				if err := associateByProjectInspect(context.Background(), label, stampID, depHash, stackID); err == nil {
 					return
 				}
 			}
-			if err := associateByProjectInspect(context.Background(), label, stampID, depHash); err != nil {
+			if err := associateByProjectInspect(context.Background(), label, stampID, depHash, stackID); err != nil {
 				errorLog("deploy: association (inspect) still failing for project=%s: %v", label, err)
 			}
 		}(labelProject, stamp.ID, stamp.DeploymentHash)
@@ -423,11 +428,16 @@ func deployStackWithStream(ctx context.Context, stackID int64, eventChannel chan
 			errorLog("deploy: failed to update deployment stamp status: %v", uerr)
 		}
 		
-		if dcli, derr := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation()); derr == nil {
-			if cerr := onSuccessfulDeployment(ctx, stackID, rawProjectName, dcli); cerr != nil {
-				errorLog("deploy: failed to update drift cache: %v", cerr)
+		if host, herr := getHostForStack(ctx, stackID); herr == nil {
+			dockerURL, sshCmd := dockerURLFor(host)
+			if dcli, done, derr := dockerClientForURL(ctx, dockerURL, sshCmd); derr == nil {
+				if cerr := onSuccessfulDeployment(ctx, stackID, rawProjectName, dcli); cerr != nil {
+					errorLog("deploy: failed to update drift cache: %v", cerr)
+				}
+				if done != nil {
+					done()
+				}
 			}
-			dcli.Close()
 		}
 		go func(label string, stampID int64, depHash string) {
 			backoff := []time.Duration{1 * time.Second, 2 * time.Second, 3 * time.Second, 5 * time.Second}
@@ -435,11 +445,11 @@ func deployStackWithStream(ctx context.Context, stackID int64, eventChannel chan
 				if i > 0 {
 					time.Sleep(backoff[i])
 				}
-				if err := associateByProjectInspect(context.Background(), label, stampID, depHash); err == nil {
+				if err := associateByProjectInspect(context.Background(), label, stampID, depHash, stackID); err == nil {
 					return
 				}
 			}
-			if err := associateByProjectInspect(context.Background(), label, stampID, depHash); err != nil {
+			if err := associateByProjectInspect(context.Background(), label, stampID, depHash, stackID); err != nil {
 				errorLog("deploy: association (inspect) still failing for project=%s: %v", label, err)
 			}
 		}(labelProject, stamp.ID, stamp.DeploymentHash)
@@ -454,12 +464,25 @@ func deployStackWithStream(ctx context.Context, stackID int64, eventChannel chan
 }
 
 // associateByProjectInspect stamps all containers with the given Compose project label value.
-func associateByProjectInspect(ctx context.Context, projectLabel string, stampID int64, deploymentHash string) error {
-	cli, err := client.NewClientWithOpts(client.FromEnv, client.WithAPIVersionNegotiation())
-	if err != nil {
-		return err
+func associateByProjectInspect(ctx context.Context, projectLabel string, stampID int64, deploymentHash string, stackID int64) error {
+	var cli *client.Client
+	var done func()
+	if host, herr := getHostForStack(ctx, stackID); herr == nil {
+		dockerURL, sshCmd := dockerURLFor(host)
+		if c, d, derr := dockerClientForURL(ctx, dockerURL, sshCmd); derr == nil {
+			cli = c
+			done = d
+		} else {
+			return derr
+		}
+	} else {
+		return herr
 	}
-	defer cli.Close()
+	defer func() {
+		if done != nil {
+			done()
+		}
+	}()
 
 	flt := filters.NewArgs()
 	flt.Add("label", "com.docker.compose.project="+projectLabel)

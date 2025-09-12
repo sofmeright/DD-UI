@@ -69,7 +69,21 @@ func dockerURLFor(h HostRow) (string, string) {
 		if addr == "" {
 			addr = h.Name
 		}
-		return fmt.Sprintf("ssh://%s@%s", user, addr), os.Getenv("DOCKER_SSH_CMD")
+		
+		// Build SSH command for Docker CLI SSH support
+		sshCmd := "ssh"
+		if keyFile := env("SSH_KEY_FILE", ""); keyFile != "" {
+			sshCmd += " -i " + keyFile
+		}
+		if env("SSH_STRICT_HOST_KEY", "true") == "false" {
+			sshCmd += " -o StrictHostKeyChecking=no"
+		}
+		if port := env("SSH_PORT", ""); port != "" && port != "22" {
+			sshCmd += " -p " + port
+		}
+		
+		// Return SSH URL format that Docker CLI expects
+		return fmt.Sprintf("ssh://%s@%s", user, addr), sshCmd
 	}
 }
 
@@ -92,10 +106,60 @@ func withSSHEnv(cmd string, fn func() error) error {
 
 func dockerClientForURL(ctx context.Context, url, sshCmd string) (*client.Client, func(), error) {
 	var cli *client.Client
+	
+	// Handle SSH connections with proper SSH transport
+	if strings.HasPrefix(url, "ssh://") {
+		debugLog("SSH connection detected, using SSH transport")
+		
+		// Parse SSH URL to extract user and host
+		user, host, err := parseSSHURL(url)
+		if err != nil {
+			return nil, nil, fmt.Errorf("invalid SSH URL: %v", err)
+		}
+		
+		// Get SSH key file from environment
+		keyFile := env("SSH_KEY_FILE", "")
+		if keyFile == "" {
+			return nil, nil, fmt.Errorf("SSH_KEY_FILE not configured")
+		}
+		
+		// Create Docker client with SSH transport
+		cli, cleanup, err := createSSHDockerClient(user, host, keyFile)
+		if err != nil {
+			return nil, nil, fmt.Errorf("failed to create SSH Docker client: %v", err)
+		}
+		
+		// Test connection
+		pctx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		_, err = cli.Ping(pctx)
+		if err != nil {
+			cleanup()
+			return nil, nil, fmt.Errorf("SSH Docker connection test failed: %v", err)
+		}
+		
+		debugLog("SSH Docker client created successfully for %s@%s", user, host)
+		return cli, cleanup, nil
+	}
+	
 	err := withSSHEnv(sshCmd, func() error {
 		var err error
+		
+		// Set DOCKER_HOST environment variable
+		prevHost := os.Getenv("DOCKER_HOST")
+		if url != "" {
+			os.Setenv("DOCKER_HOST", url)
+		}
+		defer func() {
+			if prevHost != "" {
+				os.Setenv("DOCKER_HOST", prevHost)
+			} else if url != "" {
+				os.Unsetenv("DOCKER_HOST")
+			}
+		}()
+		
 		cli, err = client.NewClientWithOpts(
-			client.WithHost(url),
+			client.FromEnv,
 			client.WithAPIVersionNegotiation(),
 		)
 		if err != nil {

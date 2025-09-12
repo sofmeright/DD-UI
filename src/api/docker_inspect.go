@@ -39,12 +39,9 @@ type VolumeOut struct {
 }
 
 func dockerClientForHost(h HostRow) (*client.Client, error) {
-	url, _ := dockerURLFor(h)
-	return client.NewClientWithOpts(
-		client.WithHost(url),
-		client.FromEnv,
-		client.WithAPIVersionNegotiation(),
-	)
+	url, sshCmd := dockerURLFor(h)
+	cli, _, err := dockerClientForURL(context.Background(), url, sshCmd)
+	return cli, err
 }
 
 func inspectContainerByHost(ctx context.Context, hostName, container string) (*InspectOut, error) {

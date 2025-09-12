@@ -415,23 +415,29 @@ func makeRouter() http.Handler {
 				host := chi.URLParam(r, "name")
 				ctr := chi.URLParam(r, "ctr")
 
+				debugLog("Console: WebSocket connection requested for host=%s container=%s", host, ctr)
+
 				conn, err := wsUpgrader.Upgrade(w, r, nil)
 				if err != nil {
+					debugLog("Console: WebSocket upgrade failed for host=%s: %v", host, err)
 					return
 				}
 				defer conn.Close()
 
 				h, err := GetHostByName(r.Context(), host)
 				if err != nil {
+					debugLog("Console: Failed to get host %s: %v", host, err)
 					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: "+err.Error()))
 					return
 				}
 				cli, err := dockerClientForHost(h)
 				if err != nil {
+					debugLog("Console: Failed to create Docker client for host %s: %v", host, err)
 					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: "+err.Error()))
 					return
 				}
 				defer cli.Close()
+				debugLog("Console: Docker client created successfully for host %s", host)
 
 				// Choose command: prefer explicit ?cmd, else ?shell, else auto
 				rawCmd := strings.TrimSpace(r.URL.Query().Get("cmd"))
@@ -470,6 +476,7 @@ func makeRouter() http.Handler {
 				defer cancelTry()
 
 				for _, cmd := range candidates {
+					debugLog("Console: Trying shell command %v on host=%s container=%s", cmd, host, ctr)
 					created, cerr := cli.ContainerExecCreate(tryCtx, ctr, types.ExecConfig{
 						AttachStdin:  true,
 						AttachStdout: true,
@@ -480,6 +487,7 @@ func makeRouter() http.Handler {
 						WorkingDir:   "",
 					})
 					if cerr != nil || created.ID == "" {
+						debugLog("Console: Shell command %v failed on host=%s: %v", cmd, host, cerr)
 						continue
 					}
 
@@ -492,17 +500,21 @@ func makeRouter() http.Handler {
 					time.Sleep(150 * time.Millisecond) // tiny grace for startup
 					ins, ierr := cli.ContainerExecInspect(tryCtx, created.ID)
 					if ierr == nil && ins.Running {
+						debugLog("Console: Successfully started shell %v on host=%s container=%s", cmd, host, ctr)
 						chosen = &runner{id: created.ID, att: att}
 						break
 					}
 					// Not running (probably ENOENT / 127) — close & try next
+					debugLog("Console: Shell %v not running on host=%s container=%s (exit_code=%d)", cmd, host, ctr, ins.ExitCode)
 					att.Close()
 				}
 
 				if chosen == nil {
+					debugLog("Console: No supported shell found on host=%s container=%s", host, ctr)
 					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: no supported shell found (tried bash, ash, dash, sh)"))
 					return
 				}
+				debugLog("Console: Console session established for host=%s container=%s", host, ctr)
 				defer chosen.att.Close()
 
 				// WS -> container stdin (handles resize control messages)

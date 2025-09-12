@@ -426,11 +426,13 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 			}
 		}
 
-		// Rule: enabled + has content but no containers => needs deploy
-		if !e.DriftDetected && s.IacEnabled {
-			if has, _ := stackHasContent(ctx, s.ID); has && len(e.Containers) == 0 {
-				e.DriftDetected = true
-				e.DriftReason = "No containers for this stack"
+		// Rule: enabled + has content but no containers => needs deploy (DevOps Gated)
+		if !e.DriftDetected {
+			if eff, _ := effectiveAutoDevops(ctx, s.ID); eff {
+				if has, _ := stackHasContent(ctx, s.ID); has && len(e.Containers) == 0 {
+					e.DriftDetected = true
+					e.DriftReason = "No containers for this stack"
+				}
 			}
 		}
 

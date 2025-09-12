@@ -193,8 +193,8 @@ func effectiveAutoDevops(ctx context.Context, stackID int64) (bool, string) {
 	if scopeKind == "host" {
 		h, err := GetHostByName(ctx, scopeName)
 		if err == nil && len(h.Groups) > 0 {
-			groups = make([]string, len(h.Groups))
-			copy(groups, h.Groups)
+			groups = append(groups, h.Groups...)
+			sort.Strings(groups)
 		}
 	}
 

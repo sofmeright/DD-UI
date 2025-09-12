@@ -25,8 +25,16 @@ import DriftBadge from "@/components/DriftBadge";
 import ActionBtn from "@/components/ActionBtn";
 import LiveLogsModal from "@/components/LiveLogsModal";
 import ConsoleModal from "@/components/ConsoleModal";
-import { ApiContainer, Host, IacService, IacStack, MergedRow, MergedStack } from "@/types";
+import { ApiContainer, Host, IacStack, MergedRow, MergedStack } from "@/types";
 import { formatDT, formatPortsLines } from "@/utils/format";
+
+type EnhancedStackWire = {
+  name: string;
+  drift_detected: boolean;
+  drift_reason?: string;
+  containers?: Array<{ name: string; service?: string; config_hash?: string }>;
+  rendered_services?: Array<{ service_name: string; container_name?: string; image?: string; hash?: string }>;
+};
 
 export default function HostStacksView({
   host,
@@ -56,36 +64,6 @@ export default function HostStacksView({
       .join(" ")
       .toLowerCase();
     return hay.includes(q.toLowerCase());
-  }
-
-  // ---- Helpers: Compose label sanitization & service inference ----------------
-  // Must mirror backend sanitizeProject: lowercase, spaces->'_', strip invalids to '_', trim _-.
-  function sanitizeProjectLabel(s: string): string {
-    s = s.trim().toLowerCase().replaceAll(" ", "_");
-    s = s.replace(/[^a-z0-9_-]+/g, "_").replace(/^[_-]+|[_-]+$/g, "");
-    return s || "default";
-  }
-  const SOPS_RE = /^\s*ENC\[/i;
-  const isSops = (v?: string | null) => !!v && SOPS_RE.test(v);
-  const safeSvcDisplayName = (svc: IacService) =>
-    !isSops(svc.container_name) && svc.container_name ? svc.container_name : svc.service_name;
-
-  // Derive service from container name if label isn't present.
-  // Accept both hyphen and underscore separators: <proj>[-|_]<service>[-|_]<n>
-  function guessServiceFromCtrName(projectExact: string, ctrName: string): string | undefined {
-    if (!ctrName) return undefined;
-    const projSan = sanitizeProjectLabel(projectExact);
-    const leadHy = projSan + "-";
-    const leadUnd = projSan + "_";
-    const withHy = ctrName.startsWith(leadHy);
-    const withUnd = ctrName.startsWith(leadUnd);
-    if (!withHy && !withUnd) return undefined;
-
-    const rest = ctrName.slice(withHy ? leadHy.length : leadUnd.length);
-    // strip trailing -N or _N if present
-    const m = rest.match(/^(.*?)[-_]\d+$/);
-    const core = (m ? m[1] : rest).trim();
-    return core || undefined;
   }
 
   async function doCtrAction(ctr: string, action: string) {
@@ -128,13 +106,19 @@ export default function HostStacksView({
           ),
         }))
       );
-    } catch (e) {
+    } catch {
       alert("Action failed");
     }
   }
 
   function openLiveLogs(ctr: string) {
     setStreamLogs({ ctr });
+  }
+
+  // Local sanitizer to *map* runtime compose_project back to user stack names for grouping
+  function sanitizeProject(s: string): string {
+    const lowered = s.trim().toLowerCase().replaceAll(" ", "_");
+    return lowered.replace(/[^a-z0-9_-]/g, "_").replace(/^[_-]+|[_-]+$/g, "") || "default";
   }
 
   useEffect(() => {
@@ -156,13 +140,14 @@ export default function HostStacksView({
         const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
         const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
 
-        // Enhanced drift/runtime (source drift & config-hash from backend)
+        // Enhanced drift/runtime (drift + config-hash + *rendered services*)
         const enhancedByName = new Map<
           string,
           {
             drift_detected: boolean;
             drift_reason?: string;
-            containers?: Array<{ name: string; config_hash?: string; service?: string }>;
+            containers: Array<{ name: string; service?: string; config_hash?: string }>;
+            rendered: Array<{ service_name: string; container_name?: string; image?: string; hash?: string }>;
           }
         >();
         try {
@@ -171,27 +156,23 @@ export default function HostStacksView({
           });
           if (re.ok) {
             const ej = await re.json();
-            const items = Array.isArray(ej?.stacks) ? ej.stacks : [];
+            const items = Array.isArray(ej?.stacks) ? (ej.stacks as EnhancedStackWire[]) : [];
             for (const s of items) {
-              const nm = (s?.name || s?.stack_name || "").toString();
+              const nm = (s?.name || "").toString();
               if (!nm) continue;
-              const ctrs = Array.isArray(s?.containers) ? s.containers : [];
               enhancedByName.set(nm, {
-                drift_detected: !!s?.drift_detected,
-                drift_reason: s?.drift_reason || "",
-                containers: ctrs.map((c: any) => ({
-                  name: (c?.name || "").toString(),
-                  config_hash: (c?.config_hash || "").toString(),
-                  service: (c?.service || "").toString(),
-                })),
+                drift_detected: !!s.drift_detected,
+                drift_reason: s.drift_reason || "",
+                containers: Array.isArray(s.containers) ? s.containers : [],
+                rendered: Array.isArray(s.rendered_services) ? s.rendered_services : [],
               });
             }
           }
         } catch {
-          /* ignore */
+          /* ignore; UI still renders with base info */
         }
 
-        // Per-stack effective Auto DevOps
+        // Effective Auto DevOps per stack (for the toggle only)
         const effMap: Record<number, boolean> = {};
         await Promise.all(
           (iacStacks || [])
@@ -210,19 +191,16 @@ export default function HostStacksView({
             })
         );
 
-        // Map sanitized label -> exact IaC stack name so runtime groups align.
-        const labelToExact = new Map<string, string>();
-        for (const s of iacStacks) {
-          labelToExact.set(sanitizeProjectLabel(s.name), s.name);
-        }
+        // Build a map of sanitized->raw IaC stack names so we can regroup runtime under **user** names
+        const rawBySanitized = new Map<string, string>();
+        for (const s of iacStacks) rawBySanitized.set(sanitizeProject(s.name), s.name);
 
-        // Group runtime by (possibly sanitized) compose project, but remap to exact IaC name when possible.
+        // Group runtime by the *user* stack name when possible
         const rtByStack = new Map<string, ApiContainer[]>();
         for (const c of runtime) {
-          let key = (c as any).compose_project || (c as any).stack || "(none)";
-          key = (key || "").trim() || "(none)";
-          const remap = labelToExact.get(key);
-          if (remap) key = remap;
+          const label = (c.compose_project || "").trim();
+          const mapped = label ? rawBySanitized.get(sanitizeProject(label)) : undefined;
+          const key = mapped || (c.stack || "(none)").trim() || "(none)";
           if (!rtByStack.has(key)) rtByStack.set(key, []);
           rtByStack.get(key)!.push(c);
         }
@@ -230,12 +208,17 @@ export default function HostStacksView({
         const iacByStack = new Map<string, IacStack>();
         for (const s of iacStacks) iacByStack.set(s.name, s);
 
-        // config-hash by container name (from enhanced backend)
-        const cfgHashByName = new Map<string, string>();
-        for (const [, e] of enhancedByName.entries()) {
+        // Fast-lookup maps for enhanced data
+        const cfgHashByCtr = new Map<string, string>();
+        const renderedByStack = new Map<
+          string,
+          Array<{ service_name: string; container_name?: string; image?: string; hash?: string }>
+        >();
+        for (const [sname, e] of enhancedByName.entries()) {
           for (const c of e.containers || []) {
-            if (c?.name && c?.config_hash) cfgHashByName.set(c.name, c.config_hash);
+            if (c?.name && c?.config_hash) cfgHashByCtr.set(c.name, c.config_hash);
           }
+          if (e.rendered?.length) renderedByStack.set(sname, e.rendered);
         }
 
         const names = new Set<string>([...rtByStack.keys(), ...iacByStack.keys()]);
@@ -244,63 +227,46 @@ export default function HostStacksView({
         for (const sname of Array.from(names).sort()) {
           const rcs = rtByStack.get(sname) || [];
           const is = iacByStack.get(sname);
-          const services: IacService[] = Array.isArray(is?.services) ? (is!.services as IacService[]) : [];
-          const hasIac = !!is && (services.length > 0 || !!is.compose);
-          const hasContent = !!is && (!!is.compose || services.length > 0);
+          const hasIac = !!is && (!!is.compose || (Array.isArray((is as any).services) && (is as any).services.length > 0));
+          const hasContent = !!is && (!!is.compose || (Array.isArray((is as any).services) && (is as any).services.length > 0));
 
           const rows: MergedRow[] = [];
-
-          // Build a set of runtime service names for reliable existence checks.
-          const runtimeSvc = new Set<string>();
-          for (const c of rcs) {
-            const svcLabel = (c as any).compose_service as string | undefined;
-            let svc = svcLabel?.toString().trim();
-            if (!svc) {
-              // Try to infer from container name if label is missing.
-              const guessed = guessServiceFromCtrName(sname, (c as any).name || "");
-              if (guessed) svc = guessed;
-            }
-            if (svc) runtimeSvc.add(svc);
-          }
 
           for (const c of rcs) {
             const portsLines = formatPortsLines((c as any).ports);
             const portsText = portsLines.join("\n");
             rows.push({
-              name: (c as any).name,
-              state: (c as any).state,
+              name: c.name,
+              state: c.state,
               stack: sname,
-              imageRun: (c as any).image,
-              imageIac: undefined, // never compare images for drift on existing runtime rows
-              created: formatDT((c as any).created_ts),
-              ip: (c as any).ip_addr,
+              imageRun: c.image,
+              imageIac: undefined, // no image-compare drift
+              created: formatDT(c.created_ts),
+              ip: c.ip_addr,
               portsText,
-              owner: (c as any).owner || "—",
+              owner: c.owner || "—",
               drift: false,
-              // @ts-ignore: optional config-hash badge
-              configHash: cfgHashByName.get((c as any).name) || undefined,
+              // @ts-ignore: carry config-hash tag
+              configHash: cfgHashByCtr.get(c.name) || undefined,
             } as any);
           }
 
-          if (is) {
-            for (const svc of services) {
-              // Ignore SOPS placeholder names when checking explicit container_name.
-              const explicitName = !isSops(svc.container_name) ? (svc.container_name || "") : "";
-              const existsByExplicit = explicitName && rcs.some((c) => (c as any).name === explicitName);
-              const existsByService = runtimeSvc.has(svc.service_name || "");
-              const exists = existsByExplicit || existsByService;
-
+          // Prefer **rendered** services to compute "missing" rows (post-SOPS, post-interpolation)
+          const rendered = renderedByStack.get(sname) || [];
+          if (rendered.length) {
+            for (const svc of rendered) {
+              const exists = (rcs || []).some(
+                (c) =>
+                  (c.compose_service && c.compose_service === svc.service_name) ||
+                  (!!svc.container_name && c.name === svc.container_name)
+              );
               if (!exists) {
-                // Show a clean display name; hide SOPS image placeholders.
-                const displayName = safeSvcDisplayName(svc);
-                const imgIac = !isSops(svc.image || "") ? svc.image : undefined;
-
                 rows.push({
-                  name: displayName,
+                  name: svc.container_name || svc.service_name,
                   state: "missing",
                   stack: sname,
                   imageRun: undefined,
-                  imageIac: imgIac, // only if not SOPS/placeholder
+                  imageIac: svc.image || "—",
                   created: "—",
                   ip: "—",
                   portsText: "—",
@@ -335,7 +301,7 @@ export default function HostStacksView({
             hasContent,
           };
 
-          // @ts-ignore: drift reason tooltip
+          // @ts-ignore drift reason tooltip
           if (enh?.drift_reason) (mergedRow as any).driftReason = enh.drift_reason;
 
           merged.push(mergedRow);
@@ -353,13 +319,12 @@ export default function HostStacksView({
     };
   }, [host.name, onSync]);
 
-  // --- Name validation helpers (warn-only; Compose will normalize for labels) ---
+  // --- Name validation helpers (warn-only; Compose will normalize), storage keeps exact name ---
   function dockerSanitizePreview(s: string): string {
     const lowered = s.trim().toLowerCase().replaceAll(" ", "_");
     return lowered.replace(/[^a-z0-9_-]/g, "_") || "default";
   }
   function hasUnsupportedChars(s: string): boolean {
-    // Allow letters (any case), digits, space, hyphen, underscore. Anything else -> warn.
     return /[^A-Za-z0-9 _-]/.test(s);
   }
 
@@ -393,7 +358,7 @@ export default function HostStacksView({
         body: JSON.stringify({
           scope_kind: "host",
           scope_name: host.name,
-          stack_name: name, // store EXACT name as entered; Compose sanitizes at deploy for the label
+          stack_name: name, // store EXACT name as entered; Compose sanitizes at deploy
           iac_enabled: false,
         }),
       });
@@ -470,24 +435,16 @@ export default function HostStacksView({
     return () => window.removeEventListener("keydown", onEsc);
   }, [infoModal]);
 
-  // Filter stacks by search: hide stacks with zero matching rows.
-  const visibleStacks = stacks
-    .map((s) => ({ ...s, _rowsFiltered: s.rows.filter((r) => matchRow(r, hostQuery)) }))
-    .filter((s: any) => s._rowsFiltered.length > 0);
-
   return (
     <div className="space-y-4">
-      {/* Streaming Logs Modal */}
       {streamLogs && (
         <LiveLogsModal host={host.name} container={streamLogs.ctr} onClose={() => setStreamLogs(null)} />
       )}
 
-      {/* Console Modal */}
       {consoleTarget && (
         <ConsoleModal host={host.name} container={consoleTarget.ctr} onClose={() => setConsoleTarget(null)} />
       )}
 
-      {/* Info Modal */}
       {infoModal && (
         <div
           className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"
@@ -549,7 +506,7 @@ export default function HostStacksView({
         </div>
       )}
 
-      {visibleStacks.map((s: any, idx: number) => (
+      {stacks.map((s, idx) => (
         <Card key={`${host.name}:${s.name}`} className="bg-slate-900/50 border-slate-800 rounded-xl">
           <CardHeader className="pb-2 flex flex-row items-center justify-between">
             <div className="space-y-1">
@@ -610,102 +567,119 @@ export default function HostStacksView({
                   </tr>
                 </thead>
                 <tbody>
-                  {s._rowsFiltered.map((r: MergedRow) => {
-                    const st = (r.state || "").toLowerCase();
-                    const isRunning =
-                      st.includes("running") || st.includes("up") || st.includes("healthy") || st.includes("restarting");
-                    const isPaused = st.includes("paused");
-                    const cfgShort = (r as any).configHash ? String((r as any).configHash).slice(0, 12) : "";
+                  {s.rows
+                    .filter((r) => matchRow(r, hostQuery))
+                    .map((r) => {
+                      const st = (r.state || "").toLowerCase();
+                      const isRunning =
+                        st.includes("running") || st.includes("up") || st.includes("healthy") || st.includes("restarting");
+                      const isPaused = st.includes("paused");
+                      const cfgShort = (r as any).configHash ? String((r as any).configHash).slice(0, 12) : "";
 
-                    return (
-                      <tr key={r.name} className="border-t border-slate-800 hover:bg-slate-900/40 align-top">
-                        <td className="px-2 py-1.5 font-medium text-slate-200 truncate">{r.name}</td>
-                        <td className="px-2 py-1.5 text-slate-300">
-                          <StatePill state={r.state} />
-                        </td>
-                        <td className="px-2 py-1.5 text-slate-300">
-                          <div className="flex items-center gap-2">
-                            <div className="max-w-[24rem] truncate" title={r.imageRun || ""}>
-                              {r.imageRun || "—"}
+                      return (
+                        <tr key={r.name} className="border-t border-slate-800 hover:bg-slate-900/40 align-top">
+                          <td className="px-2 py-1.5 font-medium text-slate-200 truncate">{r.name}</td>
+                          <td className="px-2 py-1.5 text-slate-300">
+                            <StatePill state={r.state} />
+                          </td>
+                          <td className="px-2 py-1.5 text-slate-300">
+                            <div className="flex items-center gap-2">
+                              <div className="max-w-[24rem] truncate" title={r.imageRun || ""}>
+                                {r.imageRun || "—"}
+                              </div>
+                              {cfgShort && (
+                                <span
+                                  className="text-[10px] px-1.5 py-0.5 rounded border border-slate-700 text-slate-400"
+                                  title={(r as any).configHash}
+                                >
+                                  cfg {cfgShort}
+                                </span>
+                              )}
+                              {r.imageIac && r.state === "missing" && (
+                                <>
+                                  <ChevronRight className="h-4 w-4 text-slate-500" />
+                                  <div className="max-w-[24rem] truncate text-slate-300" title={r.imageIac}>
+                                    {r.imageIac}
+                                  </div>
+                                </>
+                              )}
                             </div>
-                            {cfgShort && (
-                              <span
-                                className="text-[10px] px-1.5 py-0.5 rounded border border-slate-700 text-slate-400"
-                                title={(r as any).configHash}
-                              >
-                                cfg {cfgShort}
-                              </span>
-                            )}
-                            {r.imageIac && r.state === "missing" && (
-                              <>
-                                <ChevronRight className="h-4 w-4 text-slate-500" />
-                                <div className="max-w-[24rem] truncate text-slate-300" title={r.imageIac}>
-                                  {r.imageIac}
-                                </div>
-                              </>
-                            )}
-                          </div>
-                        </td>
-                        <td className="px-2 py-1.5 text-slate-300">{r.created || "—"}</td>
-                        <td className="px-2 py-1.5 text-slate-300">{r.ip || "—"}</td>
-                        <td className="px-2 py-1.5 text-slate-300 align-top">
-                          <div className="max-w-56 whitespace-pre-line leading-tight">{r.portsText || "—"}</div>
-                        </td>
-                        <td className="px-2 py-1.5 text-slate-300">{r.owner || "—"}</td>
-                        <td className="px-2 py-1">
-                          <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap py-0.5">
-                            {!isRunning && !isPaused && (
-                              <ActionBtn title="Start" icon={Play} onClick={() => doCtrAction(r.name, "start")} />
-                            )}
-                            {isRunning && (
-                              <ActionBtn title="Stop" icon={Pause} onClick={() => doCtrAction(r.name, "stop")} />
-                            )}
-                            {(isRunning || isPaused) && (
-                              <ActionBtn title="Restart" icon={RotateCw} onClick={() => doCtrAction(r.name, "restart")} />
-                            )}
-                            {isRunning && !isPaused && (
-                              <ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />
-                            )}
-                            {isPaused && (
-                              <ActionBtn title="Resume" icon={PlayCircle} onClick={() => doCtrAction(r.name, "unpause")} />
-                            )}
+                          </td>
+                          <td className="px-2 py-1.5 text-slate-300">{r.created || "—"}</td>
+                          <td className="px-2 py-1.5 text-slate-300">{r.ip || "—"}</td>
+                          <td className="px-2 py-1.5 text-slate-300 align-top">
+                            <div className="max-w-56 whitespace-pre-line leading-tight">{r.portsText || "—"}</div>
+                          </td>
+                          <td className="px-2 py-1.5 text-slate-300">{r.owner || "—"}</td>
+                          <td className="px-2 py-1">
+                            <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap py-0.5">
+                              {!isRunning && !isPaused && (
+                                <ActionBtn title="Start" icon={Play} onClick={() => doCtrAction(r.name, "start")} />
+                              )}
+                              {isRunning && (
+                                <ActionBtn title="Stop" icon={Pause} onClick={() => doCtrAction(r.name, "stop")} />
+                              )}
+                              {(isRunning || isPaused) && (
+                                <ActionBtn
+                                  title="Restart"
+                                  icon={RotateCw}
+                                  onClick={() => doCtrAction(r.name, "restart")}
+                                />
+                              )}
+                              {isRunning && !isPaused && (
+                                <ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />
+                              )}
+                              {isPaused && (
+                                <ActionBtn
+                                  title="Resume"
+                                  icon={PlayCircle}
+                                  onClick={() => doCtrAction(r.name, "unpause")}
+                                />
+                              )}
 
-                            <span className="mx-1 h-4 w-px bg-slate-700/60" />
+                              <span className="mx-1 h-4 w-px bg-slate-700/60" />
 
-                            <ActionBtn title="Live logs" icon={FileText} onClick={() => openLiveLogs(r.name)} />
-                            <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
-                            <ActionBtn
-                              title="Stats"
-                              icon={Activity}
-                              onClick={async () => {
-                                try {
-                                  const r2 = await fetch(
-                                    `/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(r.name)}/stats`,
-                                    { credentials: "include" }
-                                  );
-                                  const txt = await r2.text();
-                                  setInfoModal({ title: `${r.name} (stats)`, text: txt || "(no data)" });
-                                } catch {
-                                  setInfoModal({ title: `${r.name} (stats)`, text: "(failed to load stats)" });
-                                }
-                              }}
-                            />
+                              <ActionBtn title="Live logs" icon={FileText} onClick={() => openLiveLogs(r.name)} />
+                              <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
+                              <ActionBtn
+                                title="Stats"
+                                icon={Activity}
+                                onClick={async () => {
+                                  try {
+                                    const r2 = await fetch(
+                                      `/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(r.name)}/stats`,
+                                      { credentials: "include" }
+                                    );
+                                    const txt = await r2.text();
+                                    setInfoModal({ title: `${r.name} (stats)`, text: txt || "(no data)" });
+                                  } catch {
+                                    setInfoModal({ title: `${r.name} (stats)`, text: "(failed to load stats)" });
+                                  }
+                                }}
+                              />
 
-                            <span className="mx-1 h-4 w-px bg-slate-700/60" />
+                              <span className="mx-1 h-4 w-px bg-slate-700/60" />
 
-                            <ActionBtn title="Kill" icon={ZapOff} onClick={() => doCtrAction(r.name, "kill")} />
-                            <ActionBtn title="Remove" icon={Trash2} onClick={() => doCtrAction(r.name, "remove")} />
-                            <ActionBtn
-                              title="Console"
-                              icon={Terminal}
-                              onClick={() => setConsoleTarget({ ctr: r.name })}
-                              disabled={!isRunning}
-                            />
-                          </div>
-                        </td>
-                      </tr>
-                    );
-                  })}
+                              <ActionBtn title="Kill" icon={ZapOff} onClick={() => doCtrAction(r.name, "kill")} />
+                              <ActionBtn title="Remove" icon={Trash2} onClick={() => doCtrAction(r.name, "remove")} />
+                              <ActionBtn
+                                title="Console"
+                                icon={Terminal}
+                                onClick={() => setConsoleTarget({ ctr: r.name })}
+                                disabled={!isRunning}
+                              />
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  {(!s.rows || s.rows.filter((r) => matchRow(r, hostQuery)).length === 0) && (
+                    <tr>
+                      <td className="p-3 text-slate-500" colSpan={8}>
+                        No containers or services.
+                      </td>
+                    </tr>
+                  )}
                 </tbody>
               </table>
             </div>

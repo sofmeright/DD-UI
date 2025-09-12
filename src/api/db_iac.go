@@ -182,7 +182,7 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 		return nil, err
 	}
 
-	// load services per stack
+	// load services per stack (raw; may be pre-decrypt — UI now prefers "rendered" from enhanced endpoint)
 	for i := range stacks {
 		rs, err := db.Query(ctx, `
 		 SELECT id, stack_id, service_name, container_name, image, labels, env_keys, env_files, ports, volumes, deploy
@@ -214,7 +214,7 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 	return stacks, nil
 }
 
-/* ===== New: roll-up hash & enhanced IaC (drift & runtime) ===== */
+/* ===== Roll-up hash of tracked files (still available if you want it elsewhere) ===== */
 
 type IacFileMetaRow struct {
 	Role      string    `json:"role"`
@@ -278,7 +278,7 @@ func stackHasContent(ctx context.Context, stackID int64) (bool, error) {
 	return strings.TrimSpace(compose) != "", nil
 }
 
-// ComputeCurrentBundleHash returns a stable roll-up hash of all tracked IaC files.
+// ComputeCurrentBundleHash (file-level; not used in drift anymore here)
 func ComputeCurrentBundleHash(ctx context.Context, stackID int64) (string, error) {
 	files, err := listFilesForStack(ctx, stackID)
 	if err != nil {
@@ -299,7 +299,7 @@ func ComputeCurrentBundleHash(ctx context.Context, stackID int64) (string, error
 	return hex.EncodeToString(sum), nil
 }
 
-/* ---------- Enhanced IaC (runtime + drift) ---------- */
+/* ---------- Enhanced IaC (runtime + drift based on rendered services & hashes) ---------- */
 
 type ContainerBrief struct {
 	ID         string `json:"id"`
@@ -312,44 +312,20 @@ type ContainerBrief struct {
 
 type EnhancedIacStackOut struct {
 	IacStackOut
-	LatestDeployment *DeploymentStamp `json:"latest_deployment,omitempty"`
-	DriftDetected    bool             `json:"drift_detected"`
-	DriftReason      string           `json:"drift_reason,omitempty"`
-	Containers       []ContainerBrief `json:"containers"`
-}
-
-// aggregateRuntimeConfigHash collapses per-container service+config-hash into a single hash.
-func aggregateRuntimeConfigHash(conts []ContainerBrief) string {
-	if len(conts) == 0 {
-		return ""
-	}
-	lines := make([]string, 0, len(conts))
-	for _, c := range conts {
-		svc := strings.TrimSpace(strings.ToLower(c.Service))
-		h := strings.TrimSpace(strings.ToLower(c.ConfigHash))
-		if svc == "" || h == "" {
-			continue
-		}
-		lines = append(lines, fmt.Sprintf("%s=%s", svc, h))
-	}
-	if len(lines) == 0 {
-		return ""
-	}
-	sort.Strings(lines)
-	dh := sha256.New()
-	for _, ln := range lines {
-		dh.Write([]byte(ln))
-		dh.Write([]byte{'\n'})
-	}
-	return hex.EncodeToString(dh.Sum(nil))
+	DriftDetected    bool                   `json:"drift_detected"`
+	DriftReason      string                 `json:"drift_reason,omitempty"`
+	Containers       []ContainerBrief       `json:"containers"`
+	RenderedServices []RenderedServiceBrief `json:"rendered_services,omitempty"`
 }
 
 func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]EnhancedIacStackOut, error) {
+	// Base stacks for host/groups
 	base, err := listIacStacksForHost(ctx, hostName)
 	if err != nil {
 		return nil, err
 	}
 
+	// Docker client for host (single call)
 	h, err := GetHostByName(ctx, hostName)
 	if err != nil {
 		return nil, err
@@ -393,40 +369,62 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 			}
 		}
 
-		// Current hashes
-		curBundleHash, _ := ComputeCurrentBundleHash(ctx, s.ID)
-
-		// Best-effort rendered config hash from staged render (no `up`)
-		var curRendered string
+		// Render services (SOPS/ENV aware) and their hashes
 		stageDir, stagedComposes, cleanup, derr := stageStackForCompose(ctx, s.ID)
 		if derr == nil {
-			curRendered = computeRenderedConfigHash(ctx, stageDir, s.Name /* RAW name */, stagedComposes)
-			if cleanup != nil {
-				cleanup()
+			defer func() {
+				if cleanup != nil {
+					cleanup()
+				}
+			}()
+			services, okS := renderComposeServices(ctx, stageDir, s.Name /* RAW -p */, stagedComposes)
+			hashes, okH := computeRenderedServiceHashes(ctx, stageDir, s.Name, stagedComposes)
+			if okS {
+				// attach per-service hash if available
+				if okH {
+					for i := range services {
+						services[i].Hash = hashes[services[i].ServiceName]
+					}
+				}
+				e.RenderedServices = services
 			}
 		}
 
-		// Aggregate runtime config hashes for comparison to current render
-		runtimeAgg := aggregateRuntimeConfigHash(e.Containers)
+		// DRIFT: Compare rendered hashes to running containers' config-hash label.
+		if len(e.RenderedServices) > 0 {
+			// Build a map runtime service -> config hash; allow fallback by container name when service is empty.
+			runtimeBySvc := map[string]string{}
+			runtimeByCtr := map[string]string{}
+			for _, c := range e.Containers {
+				if c.Service != "" && c.ConfigHash != "" {
+					runtimeBySvc[c.Service] = c.ConfigHash
+				}
+				if c.Name != "" && c.ConfigHash != "" {
+					runtimeByCtr[c.Name] = c.ConfigHash
+				}
+			}
 
-		// Prefer authoritative config drift (rendered vs runtime), else bundle-vs-stamp, else presence rule
-		if !e.DriftDetected && curRendered != "" && runtimeAgg != "" && curRendered != runtimeAgg {
-			e.DriftDetected = true
-			e.DriftReason = "Rendered config differs from runtime"
-		}
-
-		// Compare bundle hash to last successful stamp (file-level drift)
-		if !e.DriftDetected {
-			if stamp, serr := GetLatestDeploymentStamp(ctx, s.ID); serr == nil && stamp != nil {
-				e.LatestDeployment = stamp
-				if curBundleHash != "" && stamp.DeploymentHash != "" && curBundleHash != stamp.DeploymentHash {
+			for _, rs := range e.RenderedServices {
+				// Is there a matching container?
+				cfg := runtimeBySvc[rs.ServiceName]
+				if cfg == "" && rs.ContainerName != "" {
+					cfg = runtimeByCtr[rs.ContainerName]
+				}
+				if cfg == "" {
 					e.DriftDetected = true
-					e.DriftReason = "IaC changed since last deploy"
+					e.DriftReason = "Service missing"
+					break
+				}
+				// If both sides have hashes, compare them (this is authoritative).
+				if rs.Hash != "" && cfg != "" && rs.Hash != cfg {
+					e.DriftDetected = true
+					e.DriftReason = "Rendered config changed"
+					break
 				}
 			}
 		}
 
-		// Rule: enabled + has content but no containers => needs deploy (DevOps Gated)
+		// Presence rule: effective Auto DevOps + has content + no containers
 		if !e.DriftDetected {
 			if eff, _ := effectiveAutoDevops(ctx, s.ID); eff {
 				if has, _ := stackHasContent(ctx, s.ID); has && len(e.Containers) == 0 {

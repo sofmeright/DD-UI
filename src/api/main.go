@@ -26,17 +26,17 @@ func main() {
 	addr := env("DDUI_BIND", ":443")
 
 	if err := InitAuthFromEnv(); err != nil {
-		log.Fatalf("OIDC setup failed: %v", err)
+		fatalLog("OIDC setup failed: %v", err)
 	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
 	if err := InitDBFromEnv(ctx); err != nil {
-		log.Fatalf("DB init failed: %v", err)
+		fatalLog("DB init failed: %v", err)
 	}
 	if err := InitInventory(); err != nil {
-		log.Fatalf("inventory init failed: %v", err)
+		fatalLog("inventory init failed: %v", err)
 	}
 
 	// kick off background auto-scanner (Portainer-ish cadence)
@@ -53,8 +53,8 @@ func main() {
 
 	enableTLS := isTrueish(env("DDUI_TLS_ENABLE", "true"))
 	if !enableTLS {
-		log.Printf("http: listening on %s (TLS disabled)", addr)
-		log.Fatal(srv.ListenAndServe())
+		infoLog("http: listening on %s (TLS disabled)", addr)
+		fatalLog("HTTP server error: %v", srv.ListenAndServe())
 		return
 	}
 
@@ -62,30 +62,30 @@ func main() {
 	keyFile := strings.TrimSpace(env("DDUI_TLS_KEY_FILE", ""))
 
 	if certFile != "" && keyFile != "" {
-		log.Printf("https: listening on %s (cert=%s)", addr, certFile)
-		log.Fatal(srv.ListenAndServeTLS(certFile, keyFile))
+		infoLog("https: listening on %s (cert=%s)", addr, certFile)
+		fatalLog("HTTPS server error: %v", srv.ListenAndServeTLS(certFile, keyFile))
 		return
 	}
 
 	if !isTrueish(env("DDUI_TLS_SELF_SIGNED", "true")) {
-		log.Fatalf("https: TLS enabled but no cert files and self-signed disabled")
+		fatalLog("https: TLS enabled but no cert files and self-signed disabled")
 	}
 
 	// Ephemeral self-signed (in-memory)
 	certPEM, keyPEM, err := generateSelfSigned("ddui.local")
 	if err != nil {
-		log.Fatal(err)
+		fatalLog("Failed to generate self-signed certificate: %v", err)
 	}
 	tlsCert, err := tls.X509KeyPair(certPEM, keyPEM)
 	if err != nil {
-		log.Fatal(err)
+		fatalLog("Failed to load certificate key pair: %v", err)
 	}
 	srv.TLSConfig = &tls.Config{
 		Certificates: []tls.Certificate{tlsCert},
 		MinVersion:   tls.VersionTLS12,
 	}
-	log.Printf("https: listening on %s (self-signed)", addr)
-	log.Fatal(srv.ListenAndServeTLS("", ""))
+	infoLog("https: listening on %s (self-signed)", addr)
+	fatalLog("HTTPS server error: %v", srv.ListenAndServeTLS("", ""))
 }
 
 /* -------- auto-scan loop (all hosts) -------- */
@@ -108,6 +108,68 @@ func envInt(key string, def int) int {
 		}
 	}
 	return def
+}
+
+// logLevel returns the current log level, defaulting to "info"
+func getLogLevel() string {
+	return strings.ToLower(env("DDUI_LOG_LEVEL", "info"))
+}
+
+// shouldLog checks if the given level should be logged based on current log level
+func shouldLog(level string) bool {
+	currentLevel := getLogLevel()
+	levelOrder := map[string]int{
+		"debug": 0,
+		"info":  1,
+		"warn":  2,
+		"error": 3,
+		"fatal": 4,
+	}
+	
+	currentLevelNum, exists := levelOrder[currentLevel]
+	if !exists {
+		currentLevelNum = 1 // default to info
+	}
+	
+	targetLevelNum, exists := levelOrder[strings.ToLower(level)]
+	if !exists {
+		return false
+	}
+	
+	return targetLevelNum >= currentLevelNum
+}
+
+// debugLog logs debug messages only if log level allows it
+func debugLog(format string, args ...interface{}) {
+	if shouldLog("debug") {
+		log.Printf("DEBUG: "+format, args...)
+	}
+}
+
+// infoLog logs info messages only if log level allows it
+func infoLog(format string, args ...interface{}) {
+	if shouldLog("info") {
+		log.Printf("INFO: "+format, args...)
+	}
+}
+
+// warnLog logs warning messages only if log level allows it
+func warnLog(format string, args ...interface{}) {
+	if shouldLog("warn") {
+		log.Printf("WARN: "+format, args...)
+	}
+}
+
+// errorLog logs error messages only if log level allows it
+func errorLog(format string, args ...interface{}) {
+	if shouldLog("error") {
+		log.Printf("ERROR: "+format, args...)
+	}
+}
+
+// fatalLog logs fatal messages and exits (always shown)
+func fatalLog(format string, args ...interface{}) {
+	log.Fatalf("FATAL: "+format, args...)
 }
 
 // run one full pass across hosts with limited concurrency
@@ -153,7 +215,7 @@ func scanAllOnce(ctx context.Context, perHostTO time.Duration, conc int) {
 		}()
 	}
 	wg.Wait()
-	log.Printf("scan: complete hosts=%d scanned=%d skipped=%d total_saved=%d errors=%d",
+	infoLog("scan: complete hosts=%d scanned=%d skipped=%d total_saved=%d errors=%d",
 		len(hostRows), scanned, skipped, total, failed)
 }
 

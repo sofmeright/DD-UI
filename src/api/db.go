@@ -6,7 +6,6 @@ import (
 	"embed"
 	"fmt"
 	"io/fs"
-	"log"
     "net/url"
 	"os" 
 	"sort"
@@ -115,7 +114,7 @@ func InitDBFromEnv(ctx context.Context) error {
 	}
 
 	db = pool
-	log.Printf("db: connected (max=%d min=%d idle=%s lifetime=%s)",
+	infoLog("db: connected (max=%d min=%d idle=%s lifetime=%s)",
 		cfg.MaxConns, cfg.MinConns, cfg.MaxConnIdleTime, cfg.MaxConnLifetime)
 
 	// Migrate (opt-out with DDUI_DB_MIGRATE=false)
@@ -175,7 +174,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 	if err != nil {
 		// If no embedded dir exists, just skip (useful in early dev)
 		if errorsIs(err, fs.ErrNotExist) {
-			log.Printf("db: no embedded migrations found (skipping)")
+			infoLog("db: no embedded migrations found (skipping)")
 			return tx.Commit(ctx)
 		}
 		return err
@@ -205,7 +204,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		}
 	}
 	if len(list) == 0 {
-		log.Printf("db: migrations up-to-date (version=%d)", current)
+		infoLog("db: migrations up-to-date (version=%d)", current)
 		return tx.Commit(ctx)
 	}
 	sort.Slice(list, func(i, j int) bool { return list[i].v < list[j].v })
@@ -221,7 +220,7 @@ func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
 		if _, err := tx.Exec(ctx, `insert into schema_migrations(version) values($1)`, m.v); err != nil {
 			return err
 		}
-		log.Printf("db: applied migration %s", m.name)
+		infoLog("db: applied migration %s", m.name)
 	}
 
 	return tx.Commit(ctx)

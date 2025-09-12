@@ -90,7 +90,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 	}
 	stamp, serr := CreateDeploymentStamp(ctx, stackID, "compose", "", allComposeContent, meta)
 	if serr != nil {
-		log.Printf("deploy: failed to create deployment stamp: %v", serr)
+		errorLog("deploy: failed to create deployment stamp: %v", serr)
 	}
 
 	// docker compose -p <RAW stack name> -f ... up -d --remove-orphans
@@ -109,14 +109,14 @@ func deployStack(ctx context.Context, stackID int64) error {
 		if stamp != nil {
 			_ = UpdateDeploymentStampStatus(ctx, stamp.ID, "failed")
 		}
-		log.Printf("deploy: docker compose failed: %v\n----\n%s\n----", err, string(out))
+		errorLog("deploy: docker compose failed: %v\n----\n%s\n----", err, string(out))
 		return fmt.Errorf("docker compose up failed: %v\n%s", err, string(out))
 	}
 
 	// Mark success and associate by Compose label (sanitized form).
 	if stamp != nil {
 		if uerr := UpdateDeploymentStampStatus(ctx, stamp.ID, "success"); uerr != nil {
-			log.Printf("deploy: failed to update deployment stamp status: %v", uerr)
+			errorLog("deploy: failed to update deployment stamp status: %v", uerr)
 		}
 		go func(label string, stampID int64, depHash string) {
           // depHash is the stamp.DeploymentHash (content hash)
@@ -135,7 +135,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 		}(labelProject, stamp.ID, stamp.DeploymentHash)
 	}
 
-	log.Printf("deploy: stack %d deployed (compose=%d, stage=%s, repoRoot=%s, stamp=%v)",
+	infoLog("deploy: stack %d deployed (compose=%d, stage=%s, repoRoot=%s, stamp=%v)",
 		stackID, len(stagedComposes), stageDir, root, stamp != nil)
 
 	return nil
@@ -164,7 +164,7 @@ func associateByProjectInspect(ctx context.Context, projectLabel string, stampID
 	for _, c := range list {
 		if e := AssociateContainerWithStamp(ctx, c.ID, stampID, deploymentHash); e != nil {
 			assocErrs++
-			log.Printf("deploy: failed to associate container %s with stamp %d: %v", c.ID, stampID, e)
+			errorLog("deploy: failed to associate container %s with stamp %d: %v", c.ID, stampID, e)
 		}
 	}
 	if assocErrs > 0 {

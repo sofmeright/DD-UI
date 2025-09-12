@@ -541,8 +541,9 @@ export default function StackDetailView({
     try {
       // Manual deploy (server treats manual as default when auto param is absent)
       const r = await fetch(`/api/iac/stacks/${stackIacId}/deploy`, { method: "POST", credentials: "include" });
-      const txt = await r.text();
-      if (!r.ok) { alert(`Deploy failed: ${r.status} ${txt}`); return; }
+      const result = await r.json();
+      if (!r.ok) { alert(`Deploy failed: ${r.status} ${result.error || 'Unknown error'}`); return; }
+      if (result.status === 'skipped') { alert(`Deploy skipped: ${result.reason}`); return; }
 
       // Kick off a watch so the Active Containers panel keeps refreshing for a bit.
       beginWatch(120_000, 3_000);

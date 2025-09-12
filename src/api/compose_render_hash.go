@@ -48,6 +48,39 @@ func computeRenderedConfigHash(ctx context.Context, stageDir string, projectName
 	return hex.EncodeToString(h.Sum(nil))
 }
 
+// parseServiceConfigHashes extracts service-specific config hashes from `docker compose config --hash` output
+func parseServiceConfigHashes(ctx context.Context, stageDir string, projectName string, files []string) (map[string]string, error) {
+	args := []string{"compose", "-p", projectName}
+	for _, f := range files {
+		args = append(args, "-f", f)
+	}
+	args = append(args, "config", "--hash")
+
+	cmd := exec.CommandContext(ctx, "docker", args...)
+	cmd.Dir = stageDir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("compose config --hash failed: %v", err)
+	}
+
+	serviceHashes := make(map[string]string)
+	lines := strings.Split(strings.TrimSpace(string(out)), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" {
+			continue
+		}
+		// Format is typically "service_name sha256:hash"
+		parts := strings.Fields(line)
+		if len(parts) >= 2 {
+			serviceName := parts[0]
+			hash := strings.TrimPrefix(parts[1], "sha256:")
+			serviceHashes[serviceName] = hash
+		}
+	}
+	return serviceHashes, nil
+}
+
 // computeComposeFilesHash returns sha256 over the concatenated bytes
 // of all staged compose files (in the given order).
 func computeComposeFilesHash(stageDir string, files []string) (string, error) {

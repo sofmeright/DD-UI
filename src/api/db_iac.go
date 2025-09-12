@@ -321,10 +321,13 @@ type EnhancedIacStackOut struct {
 }
 
 func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]EnhancedIacStackOut, error) {
+	debugLog("listEnhancedIacStacksForHost called for host: %s", hostName)
 	base, err := listIacStacksForHost(ctx, hostName)
 	if err != nil {
+		debugLog("listIacStacksForHost failed for %s: %v", hostName, err)
 		return nil, err
 	}
+	debugLog("Found %d base stacks for host %s", len(base), hostName)
 
 	h, err := GetHostByName(ctx, hostName)
 	if err != nil {
@@ -332,9 +335,11 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 	}
 	cli, err := dockerClientForHost(h)
 	if err != nil {
+		debugLog("Failed to create docker client for host %s: %v", hostName, err)
 		return nil, err
 	}
 	defer cli.Close()
+	debugLog("Docker client created successfully for host %s", hostName)
 
 	out := make([]EnhancedIacStackOut, 0, len(base))
 	for _, s := range base {
@@ -345,8 +350,10 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 
 		ff := filters.NewArgs()
 		ff.Add("label", "com.docker.compose.project="+projectLabel)
+		debugLog("Stack %s looking for containers with project label: %s", s.Name, projectLabel)
 		ctrs, lerr := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: ff})
 		if lerr == nil {
+			debugLog("Stack %s found %d containers", s.Name, len(ctrs))
 			for _, c := range ctrs {
 				lbl := func(k string) string {
 					if c.Labels == nil {
@@ -378,29 +385,81 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 			// Rendered config hash (best effort)
 			e.RenderedConfigSha = computeRenderedConfigHash(ctx, stageDir, s.Name, stagedComposes)
 
-			// Compose-files content hash (exactly what we stamp in DeploymentHash)
-			if hsh, herr := computeComposeFilesHash(stageDir, stagedComposes); herr == nil {
+			// Fully rendered services (post-decrypt, post-interpolation)
+			if rs, rerr := renderComposeServices(ctx, stageDir, s.Name, stagedComposes); rerr == nil {
+				e.RenderedServices = rs
+				debugLog("Stack %s rendered %d services", s.Name, len(rs))
+				for _, r := range rs {
+					debugLog("Service %s -> image %s, container %s", r.ServiceName, r.Image, r.ContainerName)
+				}
+			} else {
+				debugLog("Stack %s render services failed: %v", s.Name, rerr)
+			}
+
+			// Bundle content hash (file-level changes)
+			bundleHash, bherr := ComputeCurrentBundleHash(ctx, s.ID)
+			if bherr == nil {
 				// Compare with last stamp (only if exists)
 				if stamp, serr := GetLatestDeploymentStamp(ctx, s.ID); serr == nil && stamp != nil {
 					e.LatestDeployment = stamp
-					if stamp.DeploymentHash != "" && hsh != "" && stamp.DeploymentHash != hsh {
+					// Only flag drift if deployment hash differs AND we have a valid bundle hash
+					if stamp.DeploymentHash != "" && bundleHash != "" && stamp.DeploymentHash != bundleHash {
 						e.DriftDetected = true
-						e.DriftReason = "Compose files changed since last deploy"
+						e.DriftReason = "IaC changed since last deploy"
+					}
+				} else if len(e.Containers) == 0 && s.IacEnabled {
+					// No deployment stamp but IaC enabled and has content -> needs initial deploy
+					if has, _ := stackHasContent(ctx, s.ID); has {
+						e.DriftDetected = true
+						e.DriftReason = "No containers for this stack"
 					}
 				}
 			}
 
-			// Fully rendered services (post-decrypt, post-interpolation)
-			if rs, rerr := renderComposeServices(ctx, stageDir, s.Name, stagedComposes); rerr == nil {
-				e.RenderedServices = rs
+			// Config hash drift detection (runtime vs rendered per-service)
+			if !e.DriftDetected {
+				serviceHashes, sherr := parseServiceConfigHashes(ctx, stageDir, s.Name, stagedComposes)
+				if sherr == nil && len(serviceHashes) > 0 {
+					for _, container := range e.Containers {
+						if container.Service != "" && container.ConfigHash != "" {
+							if expectedHash, exists := serviceHashes[container.Service]; exists {
+								if container.ConfigHash != expectedHash {
+									e.DriftDetected = true
+									e.DriftReason = fmt.Sprintf("Service %s config differs from IaC", container.Service)
+									break
+								}
+							}
+						}
+					}
+				}
 			}
+		} else {
+			debugLog("Stack %s staging failed: %v", s.Name, derr)
 		}
 
-		// Runtime presence rule: if policy enabled + has content + no containers -> drift
-		if !e.DriftDetected && s.IacEnabled {
-			if has, _ := stackHasContent(ctx, s.ID); has && len(e.Containers) == 0 {
+		// Check for missing services (declared in IaC but not running)
+		if !e.DriftDetected && len(e.RenderedServices) > 0 {
+			runningServices := make(map[string]bool)
+			for _, container := range e.Containers {
+				if container.Service != "" {
+					runningServices[container.Service] = true
+				}
+			}
+			
+			missingServices := 0
+			for _, service := range e.RenderedServices {
+				if !runningServices[service.ServiceName] {
+					missingServices++
+				}
+			}
+			
+			if missingServices > 0 {
 				e.DriftDetected = true
-				e.DriftReason = "No containers for this stack"
+				if missingServices == len(e.RenderedServices) {
+					e.DriftReason = "No containers for this stack"
+				} else {
+					e.DriftReason = fmt.Sprintf("%d service(s) not running", missingServices)
+				}
 			}
 		}
 

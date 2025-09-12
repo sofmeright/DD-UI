@@ -994,11 +994,14 @@ func makeRouter() http.Handler {
 			// Enhanced stacks/services with deployment stamp-based drift detection
 			priv.Get("/hosts/{name}/enhanced-iac", func(w http.ResponseWriter, r *http.Request) {
 				name := chi.URLParam(r, "name")
+				debugLog("Enhanced-IAC request for host: %s", name)
 				items, err := listEnhancedIacStacksForHost(r.Context(), name)
 				if err != nil {
+					debugLog("Enhanced-IAC failed for host %s: %v", name, err)
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
+				debugLog("Enhanced-IAC returning %d stacks for host %s", len(items), name)
 				writeJSON(w, http.StatusOK, map[string]any{"stacks": items})
 			})
 

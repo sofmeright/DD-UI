@@ -318,6 +318,32 @@ type EnhancedIacStackOut struct {
 	Containers       []ContainerBrief `json:"containers"`
 }
 
+// aggregateRuntimeConfigHash collapses per-container service+config-hash into a single hash.
+func aggregateRuntimeConfigHash(conts []ContainerBrief) string {
+	if len(conts) == 0 {
+		return ""
+	}
+	lines := make([]string, 0, len(conts))
+	for _, c := range conts {
+		svc := strings.TrimSpace(strings.ToLower(c.Service))
+		h := strings.TrimSpace(strings.ToLower(c.ConfigHash))
+		if svc == "" || h == "" {
+			continue
+		}
+		lines = append(lines, fmt.Sprintf("%s=%s", svc, h))
+	}
+	if len(lines) == 0 {
+		return ""
+	}
+	sort.Strings(lines)
+	dh := sha256.New()
+	for _, ln := range lines {
+		dh.Write([]byte(ln))
+		dh.Write([]byte{'\n'})
+	}
+	return hex.EncodeToString(dh.Sum(nil))
+}
+
 func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]EnhancedIacStackOut, error) {
 	base, err := listIacStacksForHost(ctx, hostName)
 	if err != nil {
@@ -367,10 +393,10 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 			}
 		}
 
-		// Determine drift (authoritative first = rendered config-hash)
+		// Current hashes
 		curBundleHash, _ := ComputeCurrentBundleHash(ctx, s.ID)
 
-		// Best effort rendered config-hash from a staged render (no `up`)
+		// Best-effort rendered config hash from staged render (no `up`)
 		var curRendered string
 		stageDir, stagedComposes, cleanup, derr := stageStackForCompose(ctx, s.ID)
 		if derr == nil {
@@ -380,25 +406,23 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 			}
 		}
 
-		// Compare against last successful stamp
-		if stamp, serr := GetLatestDeploymentStamp(ctx, s.ID); serr == nil {
-			e.LatestDeployment = stamp
+		// Aggregate runtime config hashes for comparison to current render
+		runtimeAgg := aggregateRuntimeConfigHash(e.Containers)
 
-			// Prefer rendered_config_hash if present in stamp metadata (optional)
-			var stampRendered string
-			if stamp.Metadata != nil {
-				if v, ok := stamp.Metadata["rendered_config_hash"].(string); ok {
-					stampRendered = v
+		// Prefer authoritative config drift (rendered vs runtime), else bundle-vs-stamp, else presence rule
+		if !e.DriftDetected && curRendered != "" && runtimeAgg != "" && curRendered != runtimeAgg {
+			e.DriftDetected = true
+			e.DriftReason = "Rendered config differs from runtime"
+		}
+
+		// Compare bundle hash to last successful stamp (file-level drift)
+		if !e.DriftDetected {
+			if stamp, serr := GetLatestDeploymentStamp(ctx, s.ID); serr == nil && stamp != nil {
+				e.LatestDeployment = stamp
+				if curBundleHash != "" && stamp.DeploymentHash != "" && curBundleHash != stamp.DeploymentHash {
+					e.DriftDetected = true
+					e.DriftReason = "IaC changed since last deploy"
 				}
-			}
-
-			switch {
-			case curRendered != "" && stampRendered != "" && curRendered != stampRendered:
-				e.DriftDetected = true
-				e.DriftReason = "Rendered config changed since last deploy"
-			case curBundleHash != "" && stamp.DeploymentHash != "" && curBundleHash != stamp.DeploymentHash:
-				e.DriftDetected = true
-				e.DriftReason = "IaC changed since last deploy"
 			}
 		}
 

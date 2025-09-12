@@ -68,8 +68,8 @@ func deployStack(ctx context.Context, stackID int64) error {
 		return nil
 	}
 
-	// Precompute rendered config-hash (best effort; used for stamping & drift).
-	renderedCfgHash := computeRenderedConfigHash(ctx, stageDir, rawProjectName, stagedComposes)
+	// Precompute rendered config-hash (best effort; useful for drift when containers are present).
+	_ = computeRenderedConfigHash(ctx, stageDir, rawProjectName, stagedComposes)
 
 	// Build a deployment stamp (content bytes = concatenated staged compose files).
 	var allComposeContent []byte
@@ -81,11 +81,8 @@ func deployStack(ctx context.Context, stackID int64) error {
 		allComposeContent = append(allComposeContent, b...)
 	}
 
-	// Pass metadata with the stamp (if your CreateDeploymentStamp supports it).
-	meta := map[string]any{
-		"rendered_config_hash": renderedCfgHash,
-	}
-	stamp, serr := CreateDeploymentStamp(ctx, stackID, "compose", "", allComposeContent, meta)
+	// NOTE: CreateDeploymentStamp expects map[string]string for metadata; if unsupported, pass nil.
+	stamp, serr := CreateDeploymentStamp(ctx, stackID, "compose", "", allComposeContent, nil)
 	if serr != nil {
 		log.Printf("deploy: failed to create deployment stamp: %v", serr)
 	}

@@ -150,201 +150,223 @@ export default function HostStacksView({
         const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
         const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
 
-        // Enhanced drift/runtime (source drift & config-hash from backend)
+        // Enhanced drift/runtime (source drift, rendered services, & config-hash from backend)
         const enhancedByName = new Map<
-          string,
-          { drift_detected: boolean; drift_reason?: string; containers?: Array<{ name: string; config_hash?: string }> }
+        string,
+        {
+          drift_detected: boolean;
+          drift_reason?: string;
+          containers?: Array<{ name: string; config_hash?: string }>;
+          rendered_services?: Array<{ service_name: string; container_name?: string; image?: string }>;
+        }
         >();
         try {
-          const re = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/enhanced-iac`, {
-            credentials: "include",
-          });
-          if (re.ok) {
-            const ej = await re.json();
-            const items = Array.isArray(ej?.stacks) ? ej.stacks : [];
-            for (const s of items) {
-              const nm = (s?.name || s?.stack_name || "").toString();
-              if (!nm) continue;
-              const ctrs = Array.isArray(s?.containers) ? s.containers : [];
-              enhancedByName.set(nm, {
-                drift_detected: !!s?.drift_detected,
-                drift_reason: s?.drift_reason || "",
-                containers: ctrs.map((c: any) => ({
-                  name: (c?.name || "").toString(),
-                  config_hash: (c?.config_hash || "").toString(),
-                })),
-              });
-            }
+        const re = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/enhanced-iac`, {
+          credentials: "include",
+        });
+        if (re.ok) {
+          const ej = await re.json();
+          const items = Array.isArray(ej?.stacks) ? ej.stacks : [];
+          for (const s of items) {
+            const nm = (s?.name || s?.stack_name || "").toString();
+            if (!nm) continue;
+            const ctrs = Array.isArray(s?.containers) ? s.containers : [];
+            const rsv = Array.isArray(s?.rendered_services) ? s.rendered_services : [];
+            enhancedByName.set(nm, {
+              drift_detected: !!s?.drift_detected,
+              drift_reason: s?.drift_reason || "",
+              containers: ctrs.map((c: any) => ({
+                name: (c?.name || "").toString(),
+                config_hash: (c?.config_hash || "").toString(),
+              })),
+              rendered_services: rsv.map((rv: any) => ({
+                service_name: (rv?.service_name || "").toString(),
+                container_name: (rv?.container_name || "").toString() || undefined,
+                image: (rv?.image || "").toString() || undefined,
+              })),
+            });
           }
+        }
         } catch {
-          /* ignore */
+        /* ignore */
         }
 
-        // Per-stack effective Auto DevOps
+        // Per-stack effective Auto DevOps (unchanged)
         const effMap: Record<number, boolean> = {};
         await Promise.all(
-          (iacStacks || [])
-            .filter((s) => typeof (s as any)?.id === "number")
-            .map(async (s) => {
-              try {
-                const r = await fetch(`/api/iac/stacks/${(s as any).id}`, { credentials: "include" });
-                if (!r.ok) return;
-                const j = await r.json();
-                if (j?.stack?.id) {
-                  effMap[j.stack.id] = !!j.stack.effective_auto_devops;
-                }
-              } catch {
-                /* ignore */
+        (iacStacks || [])
+          .filter((s) => typeof (s as any)?.id === "number")
+          .map(async (s) => {
+            try {
+              const r = await fetch(`/api/iac/stacks/${(s as any).id}`, { credentials: "include" });
+              if (!r.ok) return;
+              const j = await r.json();
+              if (j?.stack?.id) {
+                effMap[j.stack.id] = !!j.stack.effective_auto_devops;
               }
-            })
+            } catch {
+              /* ignore */
+            }
+          })
         );
 
-        // Build IaC maps first (RAW stack names from IaC)
+        // Build IaC maps (RAW names)
         const iacByStack = new Map<string, IacStack>();
         for (const s of iacStacks) iacByStack.set(s.name, s);
 
-        // Map <sanitized compose label> -> <raw stack name>
-        // so runtime buckets merge with IaC buckets (no ghost “missing” rows).
+        // Map label->raw so runtime buckets land under the IaC stack
         const labelToRaw = new Map<string, string>();
         for (const s of iacStacks) {
-          labelToRaw.set(sanitizeLabel(s.name), s.name);
+        labelToRaw.set(sanitizeLabel(s.name), s.name);
         }
 
-        // Bucket runtime by RAW stack name when we can map, else by the label itself.
-        // Note: runtime compose_project is already the sanitized label in practice.
-        // We sanitize again defensively before looking it up.
+        // Bucket runtime by RAW stack name when we can map; else by label
         const rtByStack = new Map<string, ApiContainer[]>();
         for (const c of runtime) {
-          const label = (c.compose_project || c.stack || "(none)").trim() || "(none)";
-          const key =
-            label !== "(none)"
-              ? labelToRaw.get(sanitizeLabel(label)) || label
-              : label;
-          if (!rtByStack.has(key)) rtByStack.set(key, []);
-          rtByStack.get(key)!.push(c);
+        const label = (c.compose_project || c.stack || "(none)").trim() || "(none)";
+        const key = label !== "(none)" ? labelToRaw.get(sanitizeLabel(label)) || label : label;
+        if (!rtByStack.has(key)) rtByStack.set(key, []);
+        rtByStack.get(key)!.push(c);
         }
 
         // config-hash by container name (from enhanced) — keep using this map
         const cfgHashByName = new Map<string, string>();
-        for (const [sname, e] of enhancedByName.entries()) {
-          for (const c of e.containers || []) {
-            if (c?.name && c?.config_hash) cfgHashByName.set(c.name, c.config_hash);
-          }
+        for (const [, e] of enhancedByName.entries()) {
+        for (const c of e.containers || []) {
+          if (c?.name && c?.config_hash) cfgHashByName.set(c.name, c.config_hash);
+        }
         }
 
-        // Union of names (now normalized to RAW where possible)
+        // Union of names (normalized)
         const names = new Set<string>([...rtByStack.keys(), ...iacByStack.keys()]);
         const merged: MergedStack[] = [];
 
         for (const sname of Array.from(names).sort()) {
-          const rcs = rtByStack.get(sname) || [];
-          const is = iacByStack.get(sname);
-          const services: IacService[] = Array.isArray(is?.services) ? (is!.services as IacService[]) : [];
-          const hasIac = !!is && (services.length > 0 || !!is.compose);
-          const hasContent = !!is && (!!is.compose || services.length > 0);
+        const rcs = rtByStack.get(sname) || [];
+        const is = iacByStack.get(sname);
 
-          const rows: MergedRow[] = [];
+        // Prefer fully-rendered (post-SOPS, post-interpolation) services from enhanced API.
+        const enh = enhancedByName.get(sname);
+        const rendered = (enh?.rendered_services || []).map((rv) => ({
+          service_name: rv.service_name,
+          container_name: rv.container_name,
+          image: rv.image,
+        }));
 
-          const projectLabel = sanitizeLabel(sname);
+        // Fallback to DB services only if nothing rendered
+        const rawSvcs: IacService[] = Array.isArray(is?.services) ? (is!.services as IacService[]) : [];
+        const servicesResolved: Array<{ service_name: string; container_name?: string; image?: string }> =
+          rendered.length > 0
+            ? rendered
+            : rawSvcs.map((x) => ({
+                service_name: x.service_name,
+                container_name: x.container_name || undefined,
+                image: x.image || undefined,
+              }));
 
-          function desiredImageFor(c: ApiContainer): string | undefined {
-            if (!is || services.length === 0) return undefined;
-            // pick service by label if present, else try inference from name
+        const hasIac = !!is && (servicesResolved.length > 0 || !!is.compose);
+        const hasContent = !!is && (!!is.compose || servicesResolved.length > 0);
+
+        const rows: MergedRow[] = [];
+        const projectLabel = sanitizeLabel(sname);
+
+        function guessServiceFromContainerName(containerName: string, projectLabel: string): string | undefined {
+          let base = containerName.replace(/[-_]\d+$/, "");
+          if (base.startsWith(projectLabel + "-")) return base.slice(projectLabel.length + 1);
+          if (base.startsWith(projectLabel + "_")) return base.slice(projectLabel.length + 1);
+          return undefined;
+        }
+
+        function desiredImageFor(c: ApiContainer): string | undefined {
+          if (servicesResolved.length === 0) return undefined;
+          const reported = (c as any).compose_service as string | undefined;
+          const guessed = reported || guessServiceFromContainerName(c.name, c.compose_project || projectLabel);
+          const svc = servicesResolved.find(
+            (x) =>
+              (guessed && x.service_name === guessed) ||
+              (!!x.container_name && x.container_name === c.name)
+          );
+          return svc?.image || undefined;
+        }
+
+        // Runtime rows
+        for (const c of rcs) {
+          const portsLines = formatPortsLines((c as any).ports);
+          const portsText = portsLines.join("\n");
+          const _desired = desiredImageFor(c);
+
+          rows.push({
+            name: c.name,
+            state: c.state,
+            stack: sname,
+            imageRun: c.image,
+            imageIac: undefined, // we do NOT compare images for drift on existing rows
+            created: formatDT(c.created_ts),
+            ip: c.ip_addr,
+            portsText,
+            owner: c.owner || "—",
+            drift: false,
+            // @ts-ignore
+            configHash: cfgHashByName.get(c.name) || undefined,
+            // @ts-ignore
+            _desiredImage: _desired,
+          } as any);
+        }
+
+        // Missing service rows (only when not found in runtime)
+        for (const svc of servicesResolved) {
+          const exists = (rcs || []).some((c) => {
+            if (svc.container_name) {
+              return c.name === svc.container_name;
+            }
             const reported = (c as any).compose_service as string | undefined;
             const guessed = reported || guessServiceFromContainerName(c.name, c.compose_project || projectLabel);
-            const svc = services.find(
-              (x) =>
-                (guessed && x.service_name === guessed) ||
-                (!!x.container_name && x.container_name === c.name)
-            );
-            return svc?.image || undefined;
-          }
+            return guessed === svc.service_name;
+          });
 
-          for (const c of rcs) {
-            const portsLines = formatPortsLines((c as any).ports);
-            const portsText = portsLines.join("\n");
-            const _desired = desiredImageFor(c);
-
+          if (!exists) {
             rows.push({
-              name: c.name,
-              state: c.state,
+              name: svc.container_name || svc.service_name,
+              state: "missing",
               stack: sname,
-              imageRun: c.image,
-              imageIac: undefined, // do not compare images for drift
-              created: formatDT(c.created_ts),
-              ip: c.ip_addr,
-              portsText,
-              owner: c.owner || "—",
-              drift: false,
-              // @ts-ignore
-              configHash: cfgHashByName.get(c.name) || undefined,
-              // @ts-ignore
-              _desiredImage: _desired,
-            } as any);
+              imageRun: undefined,
+              imageIac: svc.image, // <- resolved (post-SOPS, post-interpolation)
+              created: "—",
+              ip: "—",
+              portsText: "—",
+              owner: "—",
+              drift: true,
+            });
           }
+        }
 
-          if (is) {
-            for (const svc of services) {
-              // Prefer explicit container_name when it's usable; otherwise match by service
-              const nameForRow =
-                svc.container_name && !isEncryptedOrTemplated(svc.container_name)
-                  ? svc.container_name
-                  : svc.service_name;
+        let stackDrift: "in_sync" | "drift" | "unknown" = "unknown";
+        if (enh) {
+          stackDrift = enh.drift_detected ? "drift" : "in_sync";
+        } else if (hasIac) {
+          stackDrift = "unknown";
+        }
 
-              const exists = (rcs || []).some((c) => {
-                if (svc.container_name && !isEncryptedOrTemplated(svc.container_name)) {
-                  return c.name === svc.container_name;
-                }
-                const reported = (c as any).compose_service as string | undefined;
-                const guessed = reported || guessServiceFromContainerName(c.name, c.compose_project || projectLabel);
-                return guessed === svc.service_name;
-              });
+        const effectiveAuto =
+          is && typeof (is as any).id === "number" && effMap[(is as any).id] ? true : false;
 
-              if (!exists) {
-                rows.push({
-                  name: nameForRow,
-                  state: "missing",
-                  stack: sname,
-                  imageRun: undefined,
-                  imageIac: svc.image, // only show IaC image on missing rows
-                  created: "—",
-                  ip: "—",
-                  portsText: "—",
-                  owner: "—",
-                  drift: true,
-                });
-              }
-            }
-          }
+        const mergedRow: MergedStack = {
+          name: sname,
+          drift: stackDrift,
+          iacEnabled: effectiveAuto,
+          pullPolicy: hasIac ? is?.pull_policy : undefined,
+          sops: hasIac ? is?.sops_status === "all" : false,
+          deployKind: hasIac ? is?.deploy_kind || "compose" : sname === "(none)" ? "unmanaged" : "unmanaged",
+          rows,
+          iacId: (is as any)?.id,
+          hasIac,
+          hasContent,
+        };
 
-          const enh = enhancedByName.get(sname);
-          let stackDrift: "in_sync" | "drift" | "unknown" = "unknown";
-          if (enh) {
-            stackDrift = enh.drift_detected ? "drift" : "in_sync";
-          } else if (hasIac) {
-            stackDrift = "unknown";
-          }
+        // @ts-ignore tooltip reason
+        if (enh?.drift_reason) (mergedRow as any).driftReason = enh.drift_reason;
 
-          const effectiveAuto =
-            is && typeof (is as any).id === "number" && effMap[(is as any).id] ? true : false;
-
-          const mergedRow: MergedStack = {
-            name: sname,
-            drift: stackDrift,
-            iacEnabled: effectiveAuto,
-            pullPolicy: hasIac ? is?.pull_policy : undefined,
-            sops: hasIac ? is?.sops_status === "all" : false,
-            deployKind: hasIac ? is?.deploy_kind || "compose" : sname === "(none)" ? "unmanaged" : "unmanaged",
-            rows,
-            iacId: (is as any)?.id,
-            hasIac,
-            hasContent,
-          };
-
-          // @ts-ignore
-          if (enh?.drift_reason) (mergedRow as any).driftReason = enh.drift_reason;
-
-          merged.push(mergedRow);
+        merged.push(mergedRow);
         }
 
         if (!cancel) setStacks(merged);

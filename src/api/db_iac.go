@@ -1,5 +1,4 @@
 // src/api/db_iac.go
-// src/api/db_iac.go
 package main
 
 import (
@@ -313,10 +312,12 @@ type ContainerBrief struct {
 
 type EnhancedIacStackOut struct {
 	IacStackOut
-	LatestDeployment *DeploymentStamp `json:"latest_deployment,omitempty"`
-	DriftDetected    bool             `json:"drift_detected"`
-	DriftReason      string           `json:"drift_reason,omitempty"`
-	Containers       []ContainerBrief `json:"containers"`
+	LatestDeployment  *DeploymentStamp  `json:"latest_deployment,omitempty"`
+	DriftDetected     bool              `json:"drift_detected"`
+	DriftReason       string            `json:"drift_reason,omitempty"`
+	Containers        []ContainerBrief  `json:"containers"`
+	RenderedServices  []RenderedService `json:"rendered_services,omitempty"`
+	RenderedConfigSha string            `json:"rendered_config_hash,omitempty"`
 }
 
 func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]EnhancedIacStackOut, error) {
@@ -339,11 +340,11 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 	for _, s := range base {
 		e := EnhancedIacStackOut{IacStackOut: s}
 
-		// Gather runtime by Compose project label derived ONLY from the stack name (non-opinionated)
+		// Lookup runtime by Compose project label = sanitized(stack_name)
 		projectLabel := composeProjectLabelFromStack(s.Name)
+
 		ff := filters.NewArgs()
 		ff.Add("label", "com.docker.compose.project="+projectLabel)
-
 		ctrs, lerr := cli.ContainerList(ctx, container.ListOptions{All: true, Filters: ff})
 		if lerr == nil {
 			for _, c := range ctrs {
@@ -368,54 +369,34 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 			}
 		}
 
-		// Stage current compose for hash comparisons (SOPS-aware; no `up`)
-		var curRendered, curComposeContent string
+		// Stage for render (SOPS-aware); compute rendered services & hashes.
 		stageDir, stagedComposes, cleanup, derr := stageStackForCompose(ctx, s.ID)
 		if derr == nil {
-			curRendered = computeRenderedConfigHash(ctx, stageDir, s.Name /* raw name */, stagedComposes)
-			curComposeContent = computeComposeFilesContentHash(stageDir, stagedComposes)
 			if cleanup != nil {
-				cleanup()
+				defer cleanup()
 			}
-		}
+			// Rendered config hash (best effort)
+			e.RenderedConfigSha = computeRenderedConfigHash(ctx, stageDir, s.Name, stagedComposes)
 
-		// Compare against last successful stamp (like-with-like on content)
-		if stamp, serr := GetLatestDeploymentStamp(ctx, s.ID); serr == nil {
-			e.LatestDeployment = stamp
-
-			// Fallback-safe: raw compose-content hash vs stamp.DeploymentHash
-			if !e.DriftDetected && curComposeContent != "" && stamp.DeploymentHash != "" &&
-				curComposeContent != stamp.DeploymentHash {
-				e.DriftDetected = true
-				e.DriftReason = "Compose content changed since last deploy"
-			}
-		}
-
-		// Additional authoritative signal: compare CURRENT rendered config to RUNTIME labels.
-		// If IaC changed rendering and containers weren't recreated, labels differ.
-		if !e.DriftDetected && curRendered != "" {
-			// If any container lacks a config-hash OR mismatches, mark drift.
-			for _, c := range e.Containers {
-				if strings.TrimSpace(c.ConfigHash) == "" {
-					e.DriftDetected = true
-					e.DriftReason = "Runtime missing config hash"
-					break
+			// Compose-files content hash (exactly what we stamp in DeploymentHash)
+			if hsh, herr := computeComposeFilesHash(stageDir, stagedComposes); herr == nil {
+				// Compare with last stamp (only if exists)
+				if stamp, serr := GetLatestDeploymentStamp(ctx, s.ID); serr == nil && stamp != nil {
+					e.LatestDeployment = stamp
+					if stamp.DeploymentHash != "" && hsh != "" && stamp.DeploymentHash != hsh {
+						e.DriftDetected = true
+						e.DriftReason = "Compose files changed since last deploy"
+					}
 				}
 			}
-			if !e.DriftDetected {
-				// We hashed the whole `docker compose config --hash` output into one digest.
-				// Containers carry per-service hashes; we can't map per-service without metadata,
-				// but a safe conservative check is: if ANY container's hash doesn't appear in
-				// the rendered set string, mark drift.
-				//
-				// Since our rendered digest is of the sorted lines (service:hash), we can't
-				// do direct inclusion. So we only use this path if compose-content comparison
-				// above didn’t trigger. If you want per-service checks, add a function that
-			 // parses `config --hash` lines instead of hashing them first.
+
+			// Fully rendered services (post-decrypt, post-interpolation)
+			if rs, rerr := renderComposeServices(ctx, stageDir, s.Name, stagedComposes); rerr == nil {
+				e.RenderedServices = rs
 			}
 		}
 
-		// Presence rule: enabled + has content but zero containers ⇒ needs deploy
+		// Runtime presence rule: if policy enabled + has content + no containers -> drift
 		if !e.DriftDetected && s.IacEnabled {
 			if has, _ := stackHasContent(ctx, s.ID); has && len(e.Containers) == 0 {
 				e.DriftDetected = true

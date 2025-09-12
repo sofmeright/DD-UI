@@ -83,9 +83,11 @@ RUN set -eux; \
 
 RUN docker --version && docker compose version && sops --version
 
-WORKDIR /home/ddui
+WORKDIR /app
 COPY --from=api /bin/ddui /usr/local/bin/ddui
 COPY --from=ui /ui/dist ./ui/dist
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod 755 /entrypoint.sh
 
 # (optional, rootless mode?)
 # RUN useradd -r -u 10001 -g root ddui
@@ -95,4 +97,5 @@ EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD curl -fsSk https://127.0.0.1:443/healthz || exit 1
 
+ENTRYPOINT ["/entrypoint.sh"]
 CMD ["ddui"]

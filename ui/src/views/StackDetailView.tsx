@@ -10,6 +10,7 @@ import MiniEditor from "@/editors/MiniEditor";
 import StatePill from "@/components/StatePill";
 import { ApiContainer, Host, IacFileMeta, InspectOut } from "@/types";
 import { formatDT } from "@/utils/format";
+import { debugLog, errorLog, warnLog } from "@/utils/logging";
 
 /* ---------- Shared row primitives (uniform font/spacing/columns) ---------- */
 
@@ -374,8 +375,10 @@ export default function StackDetailView({
 
   const [deploying, setDeploying] = useState<boolean>(false);
   const [watching, setWatching] = useState<boolean>(false);
+  const [deployResult, setDeployResult] = useState<{ success: boolean; message: string } | null>(null);
   const watchTimer = useRef<number | null>(null);
   const watchUntil = useRef<number>(0);
+  const preDeployContainerCount = useRef<number>(0);
 
   useEffect(() => { setAutoDevOps(false); }, [stackName]);
 
@@ -387,27 +390,69 @@ export default function StackDetailView({
     setFiles(j.files || []);
   }
 
-  // Dedicated runtime refresh (containers + inspect)
-  async function refreshRuntime() {
+  // Dedicated runtime refresh (containers + inspect) - optimized to reduce API spam
+  async function refreshRuntime(skipInspect = false) {
     try {
       const rc = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`, { credentials: "include" });
       if (rc.status === 401) { window.location.replace("/auth/login"); return; }
       const contJson = await rc.json();
       const runtimeAll: ApiContainer[] = (contJson.items || []) as ApiContainer[];
-      const my = runtimeAll.filter(c => (c.compose_project || c.stack || "(none)") === stackName);
+      // Use sanitized stack name to match Docker Compose project labels (same logic as backend)
+      const sanitizedStackName = stackName.toLowerCase().replace(/[^a-z0-9_-]/g, '_').replace(/^[_-]+|[_-]+$/g, '') || 'default';
+      const my = runtimeAll.filter(c => {
+        const project = c.compose_project || c.stack || "(none)";
+        return project === stackName || project === sanitizedStackName;
+      });
       setRuntime(my);
 
-      const ins: InspectOut[] = [];
-      for (const c of my) {
-        const r = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(c.name)}/inspect`, { credentials: "include" });
-        if (!r.ok) continue;
-        ins.push(await r.json());
+      // Check for deployment completion (if we're watching after a deploy)
+      if (watching && deployResult?.message === "Deployment initiated...") {
+        const runningContainers = my.filter(c => c.state === "running").length;
+        const totalContainers = my.length;
+        
+        // More relaxed completion detection - just wait for containers to stabilize
+        if (totalContainers > 0) {
+          // If all containers are running, it's a success
+          if (runningContainers === totalContainers) {
+            setDeployResult({ success: true, message: "🎉 Deployment completed successfully!" });
+          }
+          // If we have some containers but some are not running
+          else if (runningContainers < totalContainers) {
+            const failedCount = totalContainers - runningContainers;
+            const stoppedContainers = my.filter(c => c.state === "exited" || c.state === "stopped").length;
+            
+            if (stoppedContainers > 0) {
+              setDeployResult({ 
+                success: false, 
+                message: `❌ Deployment failed - ${failedCount} container(s) stopped/failed` 
+              });
+            } else {
+              // Still starting up, keep the "started..." message
+            }
+          }
+        }
+        // If no containers found, might be an issue
+        else if (totalContainers === 0) {
+          setDeployResult({ 
+            success: false, 
+            message: "⚠️ No containers found after deployment - check logs" 
+          });
+        }
       }
-      setContainers(ins);
+
+      // Skip detailed inspection during rapid polling to reduce API load
+      if (!skipInspect) {
+        const ins: InspectOut[] = [];
+        for (const c of my) {
+          const r = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(c.name)}/inspect`, { credentials: "include" });
+          if (!r.ok) continue;
+          ins.push(await r.json());
+        }
+        setContainers(ins);
+      }
     } catch (e) {
       // soft-fail
-      // eslint-disable-next-line no-console
-      console.warn("refreshRuntime failed", e);
+      warnLog("refreshRuntime failed", e);
     }
   }
 
@@ -494,7 +539,7 @@ export default function StackDetailView({
   }
 
   // Begin/stop short-lived watch that polls runtime so user sees changes roll in.
-  function beginWatch(durationMs = 120_000, intervalMs = 3_000) {
+  function beginWatch(durationMs = 30_000, intervalMs = 5_000) {
     // clear any existing
     if (watchTimer.current) {
       window.clearTimeout(watchTimer.current);
@@ -503,13 +548,20 @@ export default function StackDetailView({
     setWatching(true);
     watchUntil.current = Date.now() + durationMs;
 
+    let tickCount = 0;
     const tick = async () => {
-      await refreshRuntime();
+      tickCount++;
+      // Skip detailed inspection for rapid polls, only do it every 3rd tick to reduce API load
+      const skipInspect = tickCount % 3 !== 0;
+      await refreshRuntime(skipInspect);
+      
       if (Date.now() < watchUntil.current) {
         watchTimer.current = window.setTimeout(tick, intervalMs);
       } else {
         setWatching(false);
         watchTimer.current = null;
+        // Do a final full refresh when watch ends
+        await refreshRuntime(false);
       }
     };
     // immediate refresh and schedule
@@ -537,18 +589,132 @@ export default function StackDetailView({
   async function deployNow() {
     if (!stackIacId) { alert("Create the stack (save a file) before deploying."); return; }
     if (files.length === 0) { alert("This stack has no files to deploy. Add a compose file or scripts first."); return; }
+    
     setDeploying(true);
+    setDeployResult(null);
+    
     try {
-      // Manual deploy (server treats manual as default when auto param is absent)
-      const r = await fetch(`/api/iac/stacks/${stackIacId}/deploy`, { method: "POST", credentials: "include" });
-      const result = await r.json();
-      if (!r.ok) { alert(`Deploy failed: ${r.status} ${result.error || 'Unknown error'}`); return; }
-      if (result.status === 'skipped') { alert(`Deploy skipped: ${result.reason}`); return; }
-
-      // Kick off a watch so the Active Containers panel keeps refreshing for a bit.
-      beginWatch(120_000, 3_000);
+      // First check if configuration has changed
+      debugLog('Checking if configuration has changed for stack ID:', stackIacId);
+      let forceDeployment = false;
+      
+      const checkResponse = await fetch(`/api/iac/stacks/${stackIacId}/deploy-check`, {
+        method: "POST",
+        credentials: "include"
+      });
+      
+      if (checkResponse.ok) {
+        const checkData = await checkResponse.json();
+        if (checkData.config_unchanged) {
+          // Configuration unchanged - ask user for confirmation
+          const shouldContinue = window.confirm(
+            `Configuration unchanged since ${checkData.last_deploy_time}.\n\nLast deployment: ${checkData.last_deploy_status}\n\nDeploy anyway?`
+          );
+          
+          if (!shouldContinue) {
+            setDeployResult({ success: false, message: "⏭️ Deployment cancelled by user" });
+            setDeploying(false);
+            return;
+          }
+          
+          // User confirmed, so force the deployment
+          forceDeployment = true;
+        }
+      }
+      
+      // Start streaming deployment
+      setDeployResult({ success: true, message: "⏳ Starting deployment..." });
+      
+      // Build the deployment URL with force parameter if needed
+      let deployUrl = `/api/iac/stacks/${stackIacId}/deploy-stream`;
+      if (forceDeployment) {
+        deployUrl += "?force=true";
+      }
+      
+      const response = await fetch(deployUrl, {
+        method: "GET",
+        credentials: "include"
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Deploy stream failed: ${response.status} ${response.statusText}`);
+      }
+      
+      if (!response.body) {
+        throw new Error("No response body for streaming");
+      }
+      
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+      let deploymentCompleted = false;
+      let deploymentError = false;
+      
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          
+          buffer += decoder.decode(value, { stream: true });
+          const lines = buffer.split('\n');
+          buffer = lines.pop() || ''; // Keep incomplete line in buffer
+          
+          for (const line of lines) {
+            if (line.startsWith('data: ')) {
+              try {
+                const eventData = JSON.parse(line.substring(6));
+                debugLog('Stream event:', eventData);
+                
+                switch (eventData.type) {
+                  case 'info':
+                    setDeployResult({ success: true, message: `⏳ ${eventData.message}` });
+                    break;
+                  case 'stdout':
+                    setDeployResult({ success: true, message: `📋 ${eventData.message}` });
+                    break;
+                  case 'stderr':
+                    setDeployResult({ success: true, message: `⚠️ ${eventData.message}` });
+                    break;
+                  case 'success':
+                    setDeployResult({ success: true, message: `✅ ${eventData.message}` });
+                    break;
+                  case 'complete':
+                    setDeployResult({ success: true, message: "🎉 Deployment completed successfully!" });
+                    refreshRuntime();
+                    deploymentCompleted = true;
+                    break;
+                  case 'error':
+                    setDeployResult({ success: false, message: `❌ ${eventData.message}` });
+                    deploymentError = true;
+                    return; // Exit the loop on error
+                  case 'config_unchanged':
+                    // This shouldn't happen since we check above, but handle it gracefully
+                    setDeployResult({ success: false, message: `⏭️ ${eventData.message}` });
+                    deploymentError = true;
+                    return;
+                  default:
+                    debugLog('Unknown stream event type:', eventData.type);
+                }
+              } catch (parseError) {
+                debugLog('Failed to parse stream event:', line, parseError);
+              }
+            }
+          }
+        }
+        
+        // Check if deployment completed properly
+        if (!deploymentCompleted && !deploymentError) {
+          debugLog('Stream ended without completion or error event');
+          setDeployResult({ success: false, message: "❌ Deployment stream ended unexpectedly" });
+        }
+        
+      } finally {
+        reader.releaseLock();
+      }
+      
     } catch (e: any) {
-      alert(`Deploy failed: ${e?.message || e}`);
+      errorLog('Deployment error:', e);
+      setDeployResult({ success: false, message: `Deploy failed: ${e?.message || e}` });
     } finally {
       setDeploying(false);
     }
@@ -587,14 +753,45 @@ export default function StackDetailView({
           {watching && (
             <span className="ml-1 inline-flex items-center gap-2 text-xs text-emerald-300">
               <RefreshCw className="h-3 w-3 animate-spin" />
-              Watching updates…
-              <Button size="sm" variant="ghost" className="h-6 px-2 text-emerald-200" onClick={stopWatch} title="Stop watching">
+              Monitoring deployment…
+              <Button size="sm" variant="ghost" className="h-6 px-2 text-emerald-200" onClick={stopWatch} title="Stop monitoring">
                 <Square className="h-3 w-3 mr-1" /> Stop
               </Button>
             </span>
           )}
         </div>
       </div>
+
+      {/* Deployment Result Banner */}
+      {deployResult && (
+        <div className={`p-4 rounded-lg border ${deployResult.success 
+          ? 'bg-emerald-900/30 border-emerald-700 text-emerald-100' 
+          : 'bg-red-900/30 border-red-700 text-red-100'
+        }`}>
+          <div className="flex items-center gap-2">
+            {deployResult.message === "Deployment initiated..." ? (
+              <div className="text-2xl">⏳</div>
+            ) : deployResult.success ? (
+              <div className="text-2xl animate-bounce">🎉</div>
+            ) : (
+              <div className="text-2xl">❌</div>
+            )}
+            <span className="font-medium flex-1">{deployResult.message}</span>
+            {deployResult.success && watching && (
+              <span className="text-sm text-emerald-300">Monitoring containers...</span>
+            )}
+            <Button 
+              variant="ghost" 
+              size="sm" 
+              onClick={() => setDeployResult(null)}
+              className="ml-2 h-6 w-6 p-0 text-slate-400 hover:text-slate-200"
+              title="Dismiss"
+            >
+              ×
+            </Button>
+          </div>
+        </div>
+      )}
 
       {loading && <div className="text-sm px-3 py-2 rounded-lg border border-slate-800 bg-slate-900/60 text-slate-300">Loading…</div>}
       {err && <div className="text-sm px-3 py-2 rounded-lg border border-rose-800/50 bg-rose-950/50 text-rose-200">Error: {err}</div>}

@@ -28,6 +28,7 @@ import LiveLogsModal from "@/components/LiveLogsModal";
 import ConsoleModal from "@/components/ConsoleModal";
 import { ApiContainer, Host, IacService, IacStack, MergedRow, MergedStack } from "@/types";
 import { formatDT, formatPortsLines } from "@/utils/format";
+import { debugLog, warnLog } from "@/utils/logging";
 
 function sanitizeLabel(s: string): string {
   // match compose label semantics: lowercase, spaces -> _, only [a-z0-9_-]
@@ -61,6 +62,7 @@ export default function HostStacksView({
   onSync: () => void;
   onOpenStack: (stackName: string, iacId?: number) => void;
 }) {
+  debugLog('[DDUI] HostStacksView component mounted for host:', host.name);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [stacks, setStacks] = useState<MergedStack[]>([]);
@@ -132,6 +134,7 @@ export default function HostStacksView({
   }
 
   useEffect(() => {
+    debugLog('[DDUI] HostStacksView useEffect starting for host:', host.name);
     let cancel = false;
     (async () => {
       setLoading(true);
@@ -161,12 +164,16 @@ export default function HostStacksView({
         }
         >();
         try {
+        debugLog('[DDUI] Fetching enhanced-iac data for host:', host.name);
         const re = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/enhanced-iac`, {
           credentials: "include",
         });
+        debugLog('[DDUI] Enhanced-iac response status:', re.status, re.statusText);
         if (re.ok) {
           const ej = await re.json();
+          debugLog('[DDUI] Enhanced-iac response data:', ej);
           const items = Array.isArray(ej?.stacks) ? ej.stacks : [];
+          debugLog('[DDUI] Enhanced-iac found', items.length, 'stacks');
           for (const s of items) {
             const nm = (s?.name || s?.stack_name || "").toString();
             if (!nm) continue;
@@ -186,9 +193,12 @@ export default function HostStacksView({
               })),
             });
           }
+          debugLog('[DDUI] Enhanced-iac enhancedByName map populated with', enhancedByName.size, 'entries');
+        } else {
+          warnLog('[DDUI] Enhanced-iac API failed:', re.status, re.statusText);
         }
-        } catch {
-        /* ignore */
+        } catch (error) {
+        errorLog('[DDUI] Enhanced-iac API error:', error);
         }
 
         // Per-stack effective Auto DevOps (unchanged)
@@ -241,20 +251,63 @@ export default function HostStacksView({
         const names = new Set<string>([...rtByStack.keys(), ...iacByStack.keys()]);
         const merged: MergedStack[] = [];
 
+        debugLog('Processing stacks:', Array.from(names));
+
         for (const sname of Array.from(names).sort()) {
         const rcs = rtByStack.get(sname) || [];
         const is = iacByStack.get(sname);
 
         // Prefer fully-rendered (post-SOPS, post-interpolation) services from enhanced API.
         const enh = enhancedByName.get(sname);
-        const rendered = (enh?.rendered_services || []).map((rv) => ({
+        // Fallback to DB services only if nothing rendered
+        const rawSvcs: IacService[] = Array.isArray(is?.services) ? (is!.services as IacService[]) : [];
+        
+        // Try rendered_services from enhanced API first, then from basic API (since basic now uses enhanced logic)
+        const enhancedRenderedServices = enh?.rendered_services || [];
+        // Check both camelCase and snake_case for compatibility
+        const basicRenderedServices = Array.isArray((is as any)?.rendered_services) 
+          ? (is as any).rendered_services 
+          : Array.isArray((is as any)?.renderedServices) 
+            ? (is as any).renderedServices 
+            : [];
+        const allRenderedServices = enhancedRenderedServices.length > 0 ? enhancedRenderedServices : basicRenderedServices;
+        
+        if (sname === 'it-tools') {
+          debugLog(`[DDUI] DETAILED it-tools analysis:`, {
+            enhanced_data: enh,
+            basic_stack_full: is,
+            enhanced_rendered_services: enhancedRenderedServices,
+            basic_rendered_services: basicRenderedServices,
+            all_rendered_services: allRenderedServices,
+            raw_services: rawSvcs
+          });
+        }
+        
+        debugLog(`[DDUI] Processing stack: ${sname}`, {
+          enhanced_count: enhancedRenderedServices.length,
+          basic_count: basicRenderedServices.length,
+          raw_count: rawSvcs.length,
+          using_enhanced: enhancedRenderedServices.length > 0,
+          has_rendered_services: (is as any)?.rendered_services !== undefined,
+          has_renderedServices: (is as any)?.renderedServices !== undefined,
+          basic_stack_data: is ? Object.keys(is) : [],
+          enhanced_api_data: enh ? Object.keys(enh) : [],
+          basic_rendered_services_sample: basicRenderedServices.slice(0, 1),
+          enhanced_rendered_services_sample: enhancedRenderedServices.slice(0, 1)
+        });
+        
+        if (allRenderedServices.length > 0) {
+          allRenderedServices.forEach((svc, idx) => {
+            const hasEncrypted = svc.image && (svc.image.includes('ENC[') || svc.image.includes('${'));
+            debugLog(`[DDUI] ${sname}/${svc.service_name}: ${hasEncrypted ? '🔒' : '✅'} ${svc.image || 'no-image'}`);
+          });
+        }
+        
+        const rendered = allRenderedServices.map((rv: any) => ({
           service_name: rv.service_name,
           container_name: rv.container_name,
           image: rv.image,
         }));
-
-        // Fallback to DB services only if nothing rendered
-        const rawSvcs: IacService[] = Array.isArray(is?.services) ? (is!.services as IacService[]) : [];
         const servicesResolved: Array<{ service_name: string; container_name?: string; image?: string }> =
           rendered.length > 0
             ? rendered
@@ -305,9 +358,6 @@ export default function HostStacksView({
             ip: c.ip_addr,
             portsText,
             owner: c.owner || "—",
-            drift: false,
-            // @ts-ignore
-            configHash: cfgHashByName.get(c.name) || undefined,
             // @ts-ignore
             _desiredImage: _desired,
           } as any);
@@ -325,6 +375,21 @@ export default function HostStacksView({
           });
 
           if (!exists) {
+            debugLog(`[DDUI] Missing service in ${sname}:`, {
+              service_name: svc.service_name,
+              container_name: svc.container_name,
+              image: svc.image,
+              is_encrypted: svc.image?.includes('ENC['),
+              using_rendered: rendered.length > 0,
+              rendered_count: rendered.length,
+              raw_count: rawSvcs.length
+            });
+            // Skip adding missing service rows if they contain encrypted values
+            // This indicates we're using raw services when we should be using rendered
+            if (svc.image?.includes('ENC[')) {
+              warnLog(`[DDUI] Skipping encrypted missing service ${svc.service_name} - check rendered services`);
+              continue;
+            }
             rows.push({
               name: svc.container_name || svc.service_name,
               state: "missing",
@@ -335,7 +400,6 @@ export default function HostStacksView({
               ip: "—",
               portsText: "—",
               owner: "—",
-              drift: true,
             });
           }
         }
@@ -638,8 +702,6 @@ export default function HostStacksView({
                       const isRunning =
                         st.includes("running") || st.includes("up") || st.includes("healthy") || st.includes("restarting");
                       const isPaused = st.includes("paused");
-                      const cfgShort = (r as any).configHash ? String((r as any).configHash).slice(0, 12) : "";
-
                       return (
                         <tr key={r.name} className="border-t border-slate-800 hover:bg-slate-900/40 align-top">
                           <td className="px-2 py-1.5 font-medium text-slate-200 truncate">{r.name}</td>
@@ -651,14 +713,6 @@ export default function HostStacksView({
                               <div className="max-w-[24rem] truncate" title={r.imageRun || ""}>
                                 {r.imageRun || "—"}
                               </div>
-                              {cfgShort && (
-                                <span
-                                  className="text-[10px] px-1.5 py-0.5 rounded border border-slate-700 text-slate-400"
-                                  title={(r as any).configHash}
-                                >
-                                  cfg {cfgShort}
-                                </span>
-                              )}
                               {r.imageIac && r.state === "missing" && (
                                 <>
                                   <ChevronRight className="h-4 w-4 text-slate-500" />
@@ -677,61 +731,72 @@ export default function HostStacksView({
                           <td className="px-2 py-1.5 text-slate-300">{r.owner || "—"}</td>
                           <td className="px-2 py-1">
                             <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap py-0.5">
-                              {!isRunning && !isPaused && (
-                                <ActionBtn title="Start" icon={Play} onClick={() => doCtrAction(r.name, "start")} />
-                              )}
-                              {isRunning && (
-                                <ActionBtn title="Stop" icon={Pause} onClick={() => doCtrAction(r.name, "stop")} />
-                              )}
-                              {(isRunning || isPaused) && (
-                                <ActionBtn
-                                  title="Restart"
-                                  icon={RotateCw}
-                                  onClick={() => doCtrAction(r.name, "restart")}
-                                />
-                              )}
-                              {isRunning && !isPaused && (
-                                <ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />
-                              )}
-                              {isPaused && (
-                                <ActionBtn
-                                  title="Resume"
-                                  icon={PlayCircle}
-                                  onClick={() => doCtrAction(r.name, "unpause")}
-                                />
-                              )}
+                              {r.state === "missing" ? (
+                                // For missing services, only show inspect action
+                                <>
+                                  <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
+                                  <span className="text-slate-500 text-xs ml-2">Service not running</span>
+                                </>
+                              ) : (
+                                // Normal container actions for running/stopped containers
+                                <>
+                                  {!isRunning && !isPaused && (
+                                    <ActionBtn title="Start" icon={Play} onClick={() => doCtrAction(r.name, "start")} />
+                                  )}
+                                  {isRunning && (
+                                    <ActionBtn title="Stop" icon={Pause} onClick={() => doCtrAction(r.name, "stop")} />
+                                  )}
+                                  {(isRunning || isPaused) && (
+                                    <ActionBtn
+                                      title="Restart"
+                                      icon={RotateCw}
+                                      onClick={() => doCtrAction(r.name, "restart")}
+                                    />
+                                  )}
+                                  {isRunning && !isPaused && (
+                                    <ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />
+                                  )}
+                                  {isPaused && (
+                                    <ActionBtn
+                                      title="Resume"
+                                      icon={PlayCircle}
+                                      onClick={() => doCtrAction(r.name, "unpause")}
+                                    />
+                                  )}
 
-                              <span className="mx-1 h-4 w-px bg-slate-700/60" />
+                                  <span className="mx-1 h-4 w-px bg-slate-700/60" />
 
-                              <ActionBtn title="Live logs" icon={FileText} onClick={() => openLiveLogs(r.name)} />
-                              <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
-                              <ActionBtn
-                                title="Stats"
-                                icon={Activity}
-                                onClick={async () => {
-                                  try {
-                                    const r2 = await fetch(
-                                      `/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(r.name)}/stats`,
-                                      { credentials: "include" }
-                                    );
-                                    const txt = await r2.text();
-                                    setInfoModal({ title: `${r.name} (stats)`, text: txt || "(no data)" });
-                                  } catch {
-                                    setInfoModal({ title: `${r.name} (stats)`, text: "(failed to load stats)" });
-                                  }
-                                }}
-                              />
+                                  <ActionBtn title="Live logs" icon={FileText} onClick={() => openLiveLogs(r.name)} />
+                                  <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
+                                  <ActionBtn
+                                    title="Stats"
+                                    icon={Activity}
+                                    onClick={async () => {
+                                      try {
+                                        const r2 = await fetch(
+                                          `/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(r.name)}/stats`,
+                                          { credentials: "include" }
+                                        );
+                                        const txt = await r2.text();
+                                        setInfoModal({ title: `${r.name} (stats)`, text: txt || "(no data)" });
+                                      } catch {
+                                        setInfoModal({ title: `${r.name} (stats)`, text: "(failed to load stats)" });
+                                      }
+                                    }}
+                                  />
 
-                              <span className="mx-1 h-4 w-px bg-slate-700/60" />
+                                  <span className="mx-1 h-4 w-px bg-slate-700/60" />
 
-                              <ActionBtn title="Kill" icon={ZapOff} onClick={() => doCtrAction(r.name, "kill")} />
-                              <ActionBtn title="Remove" icon={Trash2} onClick={() => doCtrAction(r.name, "remove")} />
-                              <ActionBtn
-                                title="Console"
-                                icon={Terminal}
-                                onClick={() => setConsoleTarget({ ctr: r.name })}
-                                disabled={!isRunning}
-                              />
+                                  <ActionBtn title="Kill" icon={ZapOff} onClick={() => doCtrAction(r.name, "kill")} />
+                                  <ActionBtn title="Remove" icon={Trash2} onClick={() => doCtrAction(r.name, "remove")} />
+                                  <ActionBtn
+                                    title="Console"
+                                    icon={Terminal}
+                                    onClick={() => setConsoleTarget({ ctr: r.name })}
+                                    disabled={!isRunning}
+                                  />
+                                </>
+                              )}
                             </div>
                           </td>
                         </tr>

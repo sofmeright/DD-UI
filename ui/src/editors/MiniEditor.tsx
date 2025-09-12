@@ -6,6 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Shield, ShieldOff, Eye, EyeOff, Save, Maximize2, Minimize2 } from "lucide-react";
 import { Editor } from "@monaco-editor/react";
 import type { IacFileMeta } from "@/types";
+import { errorLog } from "@/utils/logging";
 
 /**
  * MiniEditor with:
@@ -105,7 +106,7 @@ export default function MiniEditor({
     } catch (e) {
       // Keep failure soft to avoid interrupting editing flow
       setContent((prev) => prev); // no-op, preserve any local edits
-      console.error("Editor load failed:", e);
+      errorLog("Editor load failed:", e);
     } finally {
       setLoading(false);
     }

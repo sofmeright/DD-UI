@@ -20,14 +20,22 @@ import (
 /* ---------------- SOPS helpers ---------------- */
 
 func hasSopsKeys() bool {
-	if strings.TrimSpace(os.Getenv("SOPS_AGE_KEY")) != "" {
+	ageKey := strings.TrimSpace(os.Getenv("SOPS_AGE_KEY"))
+	ageKeyFile := strings.TrimSpace(os.Getenv("SOPS_AGE_KEY_FILE"))
+	
+	if ageKey != "" {
+		debugLog("SOPS keys: SOPS_AGE_KEY is set (length: %d)", len(ageKey))
 		return true
 	}
-	if fp := strings.TrimSpace(os.Getenv("SOPS_AGE_KEY_FILE")); fp != "" {
-		if st, err := os.Stat(fp); err == nil && !st.IsDir() {
+	if ageKeyFile != "" {
+		if st, err := os.Stat(ageKeyFile); err == nil && !st.IsDir() {
+			debugLog("SOPS keys: SOPS_AGE_KEY_FILE exists at %s", ageKeyFile)
 			return true
+		} else {
+			debugLog("SOPS keys: SOPS_AGE_KEY_FILE set to %s but file not found or is directory: %v", ageKeyFile, err)
 		}
 	}
+	debugLog("SOPS keys: no SOPS keys found (SOPS_AGE_KEY empty, SOPS_AGE_KEY_FILE empty or missing)")
 	return false
 }
 
@@ -35,19 +43,35 @@ func hasSopsKeys() bool {
 func looksSopsEncrypted(path, inputType string) bool {
 	b, err := os.ReadFile(path)
 	if err != nil {
+		debugLog("SOPS detection: failed to read file %s: %v", path, err)
 		return false
 	}
 	s := strings.ToLower(string(b))
+	
 	if inputType == "dotenv" {
 		// SOPS dotenv adds metadata keys like: sops_mac, sops_version, sops_age__*, etc.
-		return strings.Contains(s, "sops_mac=") ||
-			strings.Contains(s, "sops_version=") ||
-			strings.Contains(s, "sops_age__")
+		hasMac := strings.Contains(s, "sops_mac=")
+		hasVersion := strings.Contains(s, "sops_version=")
+		hasAge := strings.Contains(s, "sops_age__")
+		result := hasMac || hasVersion || hasAge
+		debugLog("SOPS detection for dotenv %s: sops_mac=%v, sops_version=%v, sops_age=%v -> encrypted=%v", path, hasMac, hasVersion, hasAge, result)
+		return result
 	}
 	// YAML/JSON compose: top-level "sops:" (yaml) or a "sops" object (json)
-	return strings.Contains(s, "\nsops:") ||
-		strings.Contains(s, "\n sops:") ||
-		strings.Contains(s, `"sops"`)
+	hasSopsColon := strings.Contains(s, "\nsops:")
+	hasSopsIndent := strings.Contains(s, "\n sops:")
+	hasSopsJson := strings.Contains(s, `"sops"`)
+	result := hasSopsColon || hasSopsIndent || hasSopsJson
+	debugLog("SOPS detection for compose %s: \\nsops=%v, \\n sops=%v, \"sops\"=%v -> encrypted=%v", path, hasSopsColon, hasSopsIndent, hasSopsJson, result)
+	if !result {
+		// Show a sample of the content for debugging
+		sample := string(b)
+		if len(sample) > 200 {
+			sample = sample[:200] + "..."
+		}
+		debugLog("SOPS detection: file %s content sample: %s", path, sample)
+	}
+	return result
 }
 
 // Read plaintext for file `full`. If SOPS can decrypt it, return decrypted bytes;

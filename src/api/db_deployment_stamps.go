@@ -35,8 +35,11 @@ func CreateDeploymentStamp(ctx context.Context, stackID int64, method, user stri
 	var stamp DeploymentStamp
 	err := db.QueryRow(ctx, `
 		INSERT INTO deployment_stamps 
-			(stack_id, deployment_hash, deployment_method, deployment_user, deployment_env_hash, deployment_status)
-		VALUES ($1, $2, $3, $4, $5, 'pending')
+			(host_id, stack_id, deployment_hash, deployment_method, deployment_user, deployment_env_hash, deployment_status)
+		SELECT h.id, s.id, $2, $3, $4, $5, 'pending'
+		FROM iac_stacks s
+		LEFT JOIN hosts h ON (s.scope_kind='host' AND s.scope_name=h.name)
+		WHERE s.id = $1
 		RETURNING id, stack_id, deployment_hash, deployment_timestamp, deployment_method, 
 		          COALESCE(deployment_user, ''), COALESCE(deployment_env_hash, ''), deployment_status, 
 		          created_at, updated_at
@@ -58,8 +61,11 @@ func CreateDeploymentStampWithHash(ctx context.Context, stackID int64, method, u
 	var stamp DeploymentStamp
 	err := db.QueryRow(ctx, `
 		INSERT INTO deployment_stamps 
-			(stack_id, deployment_hash, deployment_method, deployment_user, deployment_env_hash, deployment_status)
-		VALUES ($1, $2, $3, $4, $5, 'pending')
+			(host_id, stack_id, deployment_hash, deployment_method, deployment_user, deployment_env_hash, deployment_status)
+		SELECT h.id, s.id, $2, $3, $4, $5, 'pending'
+		FROM iac_stacks s
+		LEFT JOIN hosts h ON (s.scope_kind='host' AND s.scope_name=h.name)
+		WHERE s.id = $1
 		RETURNING id, stack_id, deployment_hash, deployment_timestamp, deployment_method, 
 		          COALESCE(deployment_user, ''), COALESCE(deployment_env_hash, ''), deployment_status, 
 		          created_at, updated_at
@@ -69,6 +75,31 @@ func CreateDeploymentStampWithHash(ctx context.Context, stackID int64, method, u
 		&stamp.DeploymentStatus, &stamp.CreatedAt, &stamp.UpdatedAt,
 	)
 	return &stamp, err
+}
+
+// CheckDeploymentStampExists checks if a deployment stamp already exists for the given config
+func CheckDeploymentStampExists(ctx context.Context, stackID int64, config []byte) (*DeploymentStamp, error) {
+	deploymentHash := generateDeploymentHash(config)
+	
+	var stamp DeploymentStamp
+	err := db.QueryRow(ctx, `
+		SELECT id, stack_id, deployment_hash, deployment_timestamp, deployment_method, 
+		       COALESCE(deployment_user, ''), COALESCE(deployment_env_hash, ''), deployment_status, 
+		       created_at, updated_at
+		FROM deployment_stamps
+		WHERE stack_id = $1 AND deployment_hash = $2
+		ORDER BY created_at DESC
+		LIMIT 1
+	`, stackID, deploymentHash).Scan(
+		&stamp.ID, &stamp.StackID, &stamp.DeploymentHash, &stamp.DeploymentTimestamp,
+		&stamp.DeploymentMethod, &stamp.DeploymentUser, &stamp.DeploymentEnvHash,
+		&stamp.DeploymentStatus, &stamp.CreatedAt, &stamp.UpdatedAt,
+	)
+	
+	if err != nil {
+		return nil, err
+	}
+	return &stamp, nil
 }
 
 // UpdateDeploymentStampStatus updates the status of a deployment stamp.

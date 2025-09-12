@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -980,13 +981,31 @@ func makeRouter() http.Handler {
 				})
 			})
 
-			// Desired stacks/services for a host (host + groups)
+			// Desired stacks/services for a host (host + groups) - now using enhanced logic for drift detection
 			priv.Get("/hosts/{name}/iac", func(w http.ResponseWriter, r *http.Request) {
 				name := chi.URLParam(r, "name")
-				items, err := listIacStacksForHost(r.Context(), name)
+				debugLog("Basic-IAC request for host: %s (using enhanced logic)", name)
+				items, err := listEnhancedIacStacksForHost(r.Context(), name)
 				if err != nil {
+					debugLog("Basic-IAC (enhanced) failed for host %s: %v", name, err)
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
+				}
+				debugLog("Basic-IAC (enhanced) returning %d stacks for host %s", len(items), name)
+				for i, stack := range items {
+					debugLog("Response stack[%d]: %s has %d services, %d rendered_services, compose=%v", i, stack.Name, len(stack.Services), len(stack.RenderedServices), stack.Compose != "")
+					if len(stack.RenderedServices) > 0 {
+						debugLog("  Stack %s using RENDERED services (decrypted):", stack.Name)
+						for j, rs := range stack.RenderedServices {
+							debugLog("    RenderedService[%d]: %s -> image=%s, container=%s", j, rs.ServiceName, rs.Image, rs.ContainerName)
+						}
+					}
+					if len(stack.Services) > 0 {
+						debugLog("  Stack %s raw services (may be encrypted):", stack.Name)
+						for j, svc := range stack.Services {
+							debugLog("    RawService[%d]: %s -> image=%s, container=%s", j, svc.ServiceName, svc.Image, svc.ContainerName)
+						}
+					}
 				}
 				writeJSON(w, http.StatusOK, map[string]any{"stacks": items})
 			})
@@ -1002,6 +1021,15 @@ func makeRouter() http.Handler {
 					return
 				}
 				debugLog("Enhanced-IAC returning %d stacks for host %s", len(items), name)
+				for i, stack := range items {
+					debugLog("Enhanced stack[%d]: %s has %d services, %d rendered_services", i, stack.Name, len(stack.Services), len(stack.RenderedServices))
+					for j, rs := range stack.RenderedServices {
+						debugLog("  Enhanced RenderedService[%d]: %s -> image=%s, container=%s", j, rs.ServiceName, rs.Image, rs.ContainerName)
+					}
+					for j, svc := range stack.Services {
+						debugLog("  Enhanced RawService[%d]: %s -> image=%s, container=%s", j, svc.ServiceName, svc.Image, svc.ContainerName)
+					}
+				}
 				writeJSON(w, http.StatusOK, map[string]any{"stacks": items})
 			})
 
@@ -1474,6 +1502,247 @@ func makeRouter() http.Handler {
 					"allowed": true,
 				})
 			})
+
+			// Streaming deploy endpoint (compatible with existing frontend)
+			priv.Get("/iac/stacks/{id}/deploy-stream", func(w http.ResponseWriter, r *http.Request) {
+				idStr := chi.URLParam(r, "id")
+				id, err := strconv.ParseInt(idStr, 10, 64)
+				if err != nil || id <= 0 {
+					http.Error(w, "bad id", http.StatusBadRequest)
+					return
+				}
+
+				// Check if stack has content
+				ok, derr := stackHasContent(r.Context(), id)
+				if derr != nil {
+					http.Error(w, derr.Error(), http.StatusInternalServerError)
+					return
+				}
+				if !ok {
+					http.Error(w, "stack has no deployable content", http.StatusBadRequest)
+					return
+				}
+
+				// Set up Server-Sent Events
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				
+				// Create event channel
+				eventChan := make(chan map[string]interface{}, 100)
+				
+				// Start deployment in background
+				ctx := context.WithValue(r.Context(), ctxManualKey{}, true)
+				// Check for force parameter to bypass config unchanged checks
+				if r.URL.Query().Get("force") == "true" {
+					ctx = context.WithValue(ctx, ctxForceKey{}, true)
+				}
+				go func() {
+					if err := deployStackWithStream(ctx, id, eventChan); err != nil {
+						errorLog("deploy-stream: stack %d failed: %v", id, err)
+					}
+				}()
+
+				// Stream events to client
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+					return
+				}
+
+				for event := range eventChan {
+					eventJSON, _ := json.Marshal(event)
+					fmt.Fprintf(w, "data: %s\n\n", eventJSON)
+					flusher.Flush()
+
+					// Break on completion or error
+					if eventType, ok := event["type"].(string); ok && (eventType == "complete" || eventType == "error") {
+						break
+					}
+				}
+			})
+
+			// Alternative streaming deploy endpoint using scope/stack name
+			priv.Get("/scopes/{scope}/stacks/{stackname}/deploy-stream", func(w http.ResponseWriter, r *http.Request) {
+				scope := chi.URLParam(r, "scope")
+				stackName := chi.URLParam(r, "stackname")
+
+				// Find the stack ID
+				var stackID int64
+				err := db.QueryRow(r.Context(), `
+					SELECT id FROM iac_stacks 
+					WHERE scope_name = $1 AND stack_name = $2
+				`, scope, stackName).Scan(&stackID)
+				if err != nil {
+					http.Error(w, "Stack not found", http.StatusNotFound)
+					return
+				}
+
+				// Check if stack has content
+				ok, derr := stackHasContent(r.Context(), stackID)
+				if derr != nil {
+					http.Error(w, derr.Error(), http.StatusInternalServerError)
+					return
+				}
+				if !ok {
+					http.Error(w, "stack has no deployable content", http.StatusBadRequest)
+					return
+				}
+
+				// Set up Server-Sent Events
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				
+				// Create event channel
+				eventChan := make(chan map[string]interface{}, 100)
+				
+				// Start deployment in background
+				ctx := context.WithValue(r.Context(), ctxManualKey{}, true)
+				// Check for force parameter to bypass config unchanged checks
+				if r.URL.Query().Get("force") == "true" {
+					ctx = context.WithValue(ctx, ctxForceKey{}, true)
+				}
+				go func() {
+					if err := deployStackWithStream(ctx, stackID, eventChan); err != nil {
+						errorLog("deploy-stream: stack %d failed: %v", stackID, err)
+					}
+				}()
+
+				// Stream events to client
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+					return
+				}
+
+				for event := range eventChan {
+					eventJSON, _ := json.Marshal(event)
+					fmt.Fprintf(w, "data: %s\n\n", eventJSON)
+					flusher.Flush()
+
+					// Break on completion
+					if eventType, ok := event["type"].(string); ok && eventType == "complete" {
+						break
+					}
+				}
+			})
+
+			// Check if configuration has changed endpoint
+			priv.Post("/iac/stacks/{id}/deploy-check", func(w http.ResponseWriter, r *http.Request) {
+				idStr := chi.URLParam(r, "id")
+				id, err := strconv.ParseInt(idStr, 10, 64)
+				if err != nil || id <= 0 {
+					http.Error(w, "bad id", http.StatusBadRequest)
+					return
+				}
+
+				// Get the current configuration
+				_, err = getRepoRootForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, "failed to get repo root", http.StatusInternalServerError)
+					return
+				}
+				var rel string
+				_ = db.QueryRow(r.Context(), `SELECT rel_path FROM iac_stacks WHERE id=$1`, id).Scan(&rel)
+				if strings.TrimSpace(rel) == "" {
+					http.Error(w, "stack has no rel_path", http.StatusBadRequest)
+					return
+				}
+
+				// Stage (SOPS decrypts into tmpfs and is cleaned afterwards)
+				_, stagedComposes, cleanup, derr := stageStackForCompose(r.Context(), id)
+				if derr != nil {
+					http.Error(w, fmt.Sprintf("failed to stage stack: %v", derr), http.StatusInternalServerError)
+					return
+				}
+				defer func() {
+					if cleanup != nil {
+						cleanup()
+					}
+				}()
+
+				if len(stagedComposes) == 0 {
+					respondJSON(w, map[string]interface{}{
+						"config_unchanged": false,
+					})
+					return
+				}
+
+				var allComposeContent []byte
+				for _, f := range stagedComposes {
+					b, rerr := os.ReadFile(f)
+					if rerr != nil {
+						http.Error(w, fmt.Sprintf("failed to read compose file: %v", rerr), http.StatusInternalServerError)
+						return
+					}
+					allComposeContent = append(allComposeContent, b...)
+					allComposeContent = append(allComposeContent, '\n')
+				}
+
+				// Check if this configuration exists
+				existingStamp, checkErr := CheckDeploymentStampExists(r.Context(), id, allComposeContent)
+				if checkErr == nil && existingStamp != nil {
+					respondJSON(w, map[string]interface{}{
+						"config_unchanged":    true,
+						"last_deploy_time":    existingStamp.DeploymentTimestamp.Format("2006-01-02 15:04:05"),
+						"last_deploy_status":  existingStamp.DeploymentStatus,
+						"existing_stamp_id":   existingStamp.ID,
+					})
+					return
+				}
+
+				respondJSON(w, map[string]interface{}{
+					"config_unchanged": false,
+				})
+			})
+
+			// Confirmation endpoint for deploying unchanged configuration
+			priv.Get("/iac/stacks/{id}/deploy-force", func(w http.ResponseWriter, r *http.Request) {
+				idStr := chi.URLParam(r, "id")
+				id, err := strconv.ParseInt(idStr, 10, 64)
+				if err != nil || id <= 0 {
+					http.Error(w, "bad id", http.StatusBadRequest)
+					return
+				}
+
+				// Set up Server-Sent Events
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					http.Error(w, "streaming not supported", http.StatusInternalServerError)
+					return
+				}
+
+				eventChan := make(chan map[string]interface{}, 100)
+
+				// Start forced deployment in background
+				ctx := context.WithValue(r.Context(), ctxManualKey{}, true)
+				ctx = context.WithValue(ctx, ctxForceKey{}, true)
+				go func() {
+					if err := deployStackWithStream(ctx, id, eventChan); err != nil {
+						errorLog("deploy-force: stack %d failed: %v", id, err)
+					}
+				}()
+
+				// Stream events to client
+				for event := range eventChan {
+					eventJSON, _ := json.Marshal(event)
+					fmt.Fprintf(w, "data: %s\n\n", eventJSON)
+					flusher.Flush()
+
+					// Break on completion
+					if eventType, ok := event["type"].(string); ok && eventType == "complete" {
+						break
+					}
+				}
+			})
 		})
 	})
 
@@ -1490,7 +1759,7 @@ func makeRouter() http.Handler {
 	r.Post("/auth/logout", LogoutHandler) // alias
 
 	// -------- Static SPA (Vite)
-	uiRoot := env("DDUI_UI_DIR", "/home/ddui/ui/dist")
+	uiRoot := env("DDUI_UI_DIR", "/app/ui/dist")
 	fs := http.FileServer(http.Dir(uiRoot))
 
 	// Serve built assets directly

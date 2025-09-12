@@ -147,8 +147,10 @@ type IacStackOut struct {
 }
 
 func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, error) {
+	debugLog("listIacStacksForHost called for host: %s", hostName)
 	h, err := GetHostByName(ctx, hostName)
 	if err != nil {
+		debugLog("GetHostByName failed for %s: %v", hostName, err)
 		return nil, err
 	}
 
@@ -156,6 +158,7 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 	if groups == nil {
 		groups = []string{}
 	}
+	debugLog("Host %s belongs to groups: %v", hostName, groups)
 
 	rows, err := db.Query(ctx, `
 	  SELECT id, repo_id, scope_kind, scope_name, stack_name, rel_path, compose_file, deploy_kind, pull_policy, sops_status, iac_enabled
@@ -181,6 +184,8 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	
+	debugLog("Found %d basic stacks for host %s", len(stacks), hostName)
 
 	// load services per stack
 	for i := range stacks {
@@ -376,7 +381,20 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 			}
 		}
 
-		// Stage for render (SOPS-aware); compute rendered services & hashes.
+		// Use hash-based drift detection
+		hasDrift, driftReason, err := detectDriftViaHashes(ctx, s.ID, s.Name, cli)
+		if err != nil {
+			debugLog("Hash-based drift detection failed for stack %s: %v", s.Name, err)
+			// Fallback to no drift detected on error
+			e.DriftDetected = false
+			e.DriftReason = "Unable to determine drift status"
+		} else {
+			e.DriftDetected = hasDrift
+			e.DriftReason = driftReason
+			debugLog("Stack %s: drift=%v, reason=%s", s.Name, hasDrift, driftReason)
+		}
+
+		// Stage for render (SOPS-aware) - still needed for UI display of rendered services
 		stageDir, stagedComposes, cleanup, derr := stageStackForCompose(ctx, s.ID)
 		if derr == nil {
 			if cleanup != nil {
@@ -392,75 +410,12 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 				for _, r := range rs {
 					debugLog("Service %s -> image %s, container %s", r.ServiceName, r.Image, r.ContainerName)
 				}
+				debugLog("Stack %s RenderedServices field populated with %d items", s.Name, len(e.RenderedServices))
 			} else {
 				debugLog("Stack %s render services failed: %v", s.Name, rerr)
 			}
-
-			// Bundle content hash (file-level changes)
-			bundleHash, bherr := ComputeCurrentBundleHash(ctx, s.ID)
-			if bherr == nil {
-				// Compare with last stamp (only if exists)
-				if stamp, serr := GetLatestDeploymentStamp(ctx, s.ID); serr == nil && stamp != nil {
-					e.LatestDeployment = stamp
-					// Only flag drift if deployment hash differs AND we have a valid bundle hash
-					if stamp.DeploymentHash != "" && bundleHash != "" && stamp.DeploymentHash != bundleHash {
-						e.DriftDetected = true
-						e.DriftReason = "IaC changed since last deploy"
-					}
-				} else if len(e.Containers) == 0 && s.IacEnabled {
-					// No deployment stamp but IaC enabled and has content -> needs initial deploy
-					if has, _ := stackHasContent(ctx, s.ID); has {
-						e.DriftDetected = true
-						e.DriftReason = "No containers for this stack"
-					}
-				}
-			}
-
-			// Config hash drift detection (runtime vs rendered per-service)
-			if !e.DriftDetected {
-				serviceHashes, sherr := parseServiceConfigHashes(ctx, stageDir, s.Name, stagedComposes)
-				if sherr == nil && len(serviceHashes) > 0 {
-					for _, container := range e.Containers {
-						if container.Service != "" && container.ConfigHash != "" {
-							if expectedHash, exists := serviceHashes[container.Service]; exists {
-								if container.ConfigHash != expectedHash {
-									e.DriftDetected = true
-									e.DriftReason = fmt.Sprintf("Service %s config differs from IaC", container.Service)
-									break
-								}
-							}
-						}
-					}
-				}
-			}
 		} else {
 			debugLog("Stack %s staging failed: %v", s.Name, derr)
-		}
-
-		// Check for missing services (declared in IaC but not running)
-		if !e.DriftDetected && len(e.RenderedServices) > 0 {
-			runningServices := make(map[string]bool)
-			for _, container := range e.Containers {
-				if container.Service != "" {
-					runningServices[container.Service] = true
-				}
-			}
-			
-			missingServices := 0
-			for _, service := range e.RenderedServices {
-				if !runningServices[service.ServiceName] {
-					missingServices++
-				}
-			}
-			
-			if missingServices > 0 {
-				e.DriftDetected = true
-				if missingServices == len(e.RenderedServices) {
-					e.DriftReason = "No containers for this stack"
-				} else {
-					e.DriftReason = fmt.Sprintf("%d service(s) not running", missingServices)
-				}
-			}
 		}
 
 		out = append(out, e)

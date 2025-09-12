@@ -1,0 +1,3 @@
+-- This file moved to 002_runtime_inventory.sql
+-- Left empty to maintain migration numbering
+-- All deployment tracking tables moved to migration 002

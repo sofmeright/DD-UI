@@ -4,7 +4,6 @@ import { Routes, Route, useNavigate, useLocation, useParams } from "react-router
 import LeftNav from "@/components/LeftNav";
 import LoginGate from "@/components/LoginGate";
 import HostsView from "@/views/HostsView";
-import StacksView from "@/views/StacksView";
 import HostStacksView from "@/views/HostStacksView";
 import StackDetailView from "@/views/StackDetailView";
 import ImagesView from "@/views/ImagesView";
@@ -147,14 +146,22 @@ export default function App() {
 
   // Pages bound to new routes
 
-  // Stacks list WITH DROPDOWN (wrap StacksView and remount on :hostName to avoid stale data)
+  // Stacks list WITH DROPDOWN (wrap HostStacksView and remount on :hostName to avoid stale data)
   const HostStacksPage = () => {
     const { hostName } = useParams<{ hostName: string }>();
+    const host = hosts.find(h => h.name === decodeURIComponent(hostName || ""));
+    
+    if (!host) {
+      navigate("/hosts");
+      return null;
+    }
+    
     return (
-      <StacksView
+      <HostStacksView
         key={hostName || "all"}
-        hosts={hosts}
-        onOpenStack={(host, stackName, iacId) =>
+        host={host}
+        onSync={() => refreshMetricsForHosts([host.name])}
+        onOpenStack={(stackName, iacId) =>
           navigate(`/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}${iacId ? `?iacId=${iacId}` : ""}`)
         }
       />

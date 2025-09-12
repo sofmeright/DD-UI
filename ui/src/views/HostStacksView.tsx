@@ -1,5 +1,5 @@
 // ui/src/views/HostsStacksView.tsx
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -28,6 +28,8 @@ import ConsoleModal from "@/components/ConsoleModal";
 import { ApiContainer, Host, IacService, IacStack, MergedRow, MergedStack } from "@/types";
 import { formatDT, formatPortsLines } from "@/utils/format";
 
+type OverrideState = "unset" | "enable" | "disable";
+
 export default function HostStacksView({
   host,
   onSync,
@@ -48,6 +50,10 @@ export default function HostStacksView({
 
   // Lightweight info modal
   const [infoModal, setInfoModal] = useState<{ title: string; text: string } | null>(null);
+
+  // Per-stack policy view: effective state + explicit override
+  const [effectiveById, setEffectiveById] = useState<Record<number, boolean>>({});
+  const [overrideById, setOverrideById] = useState<Record<number, OverrideState>>({});
 
   function matchRow(r: MergedRow, q: string) {
     if (!q) return true;
@@ -98,7 +104,7 @@ export default function HostStacksView({
           ),
         }))
       );
-    } catch (e) {
+    } catch {
       alert("Action failed");
     }
   }
@@ -156,8 +162,9 @@ export default function HostStacksView({
           /* ignore */
         }
 
-        // Per-stack effective Auto DevOps
-        const effMap: Record<number, boolean> = {};
+        // Fetch per-stack policy view (effective + explicit override)
+        const eff: Record<number, boolean> = {};
+        const ovr: Record<number, OverrideState> = {};
         await Promise.all(
           (iacStacks || [])
             .filter((s) => typeof (s as any)?.id === "number")
@@ -167,14 +174,21 @@ export default function HostStacksView({
                 if (!r.ok) return;
                 const j = await r.json();
                 if (j?.stack?.id) {
-                  effMap[j.stack.id] = !!j.stack.effective_auto_devops;
+                  eff[j.stack.id] = !!j.stack.effective_auto_devops;
+                  const raw = (j.stack.auto_devops_override || "").toString().toLowerCase();
+                  ovr[j.stack.id] = raw === "enable" || raw === "disable" ? (raw as OverrideState) : "unset";
                 }
               } catch {
                 /* ignore */
               }
             })
         );
+        if (!cancel) {
+          setEffectiveById(eff);
+          setOverrideById(ovr);
+        }
 
+        // Runtime containers grouped by compose project (label-sanitized) or stack
         const rtByStack = new Map<string, ApiContainer[]>();
         for (const c of runtime) {
           const key = (c.compose_project || c.stack || "(none)").trim() || "(none)";
@@ -225,13 +239,13 @@ export default function HostStacksView({
               state: c.state,
               stack: sname,
               imageRun: c.image,
-              imageIac: undefined, // do not compare images for drift
+              imageIac: undefined, // no image drift comparison
               created: formatDT(c.created_ts),
               ip: c.ip_addr,
               portsText,
               owner: c.owner || "—",
-              drift: false, // runtime rows not marked as drift via image mismatch
-              // @ts-ignore: stash for optional badge/details
+              drift: false,
+              // @ts-ignore: extra display
               configHash: cfgHashByName.get(c.name) || undefined,
               // @ts-ignore
               _desiredImage: _desired,
@@ -240,10 +254,8 @@ export default function HostStacksView({
 
           if (is) {
             for (const svc of services) {
-              // A service exists if any runtime container in this stack reports the same compose_service,
-              // or if its container's actual name matches an explicit container_name the user set.
-              const exists =
-              (rcs || []).some(
+              // Consider exists if either compose_service matches or explicit container_name matches
+              const exists = (rcs || []).some(
                 (c) =>
                   (c.compose_service && c.compose_service === svc.service_name) ||
                   (!!svc.container_name && c.name === svc.container_name)
@@ -254,7 +266,7 @@ export default function HostStacksView({
                   state: "missing",
                   stack: sname,
                   imageRun: undefined,
-                  imageIac: svc.image, // keep IaC image for missing only
+                  imageIac: svc.image, // show IaC image for missing rows only
                   created: "—",
                   ip: "—",
                   portsText: "—",
@@ -273,24 +285,26 @@ export default function HostStacksView({
             stackDrift = "unknown";
           }
 
-          const effectiveAuto =
-            is && typeof (is as any).id === "number" && effMap[(is as any).id] ? true : false;
+          const idNum = (is as any)?.id as number | undefined;
+          const effective = idNum ? !!eff[idNum] : false;
 
           const mergedRow: MergedStack = {
             name: sname,
             drift: stackDrift,
-            iacEnabled: effectiveAuto,
+            iacEnabled: effective, // shows EFFECTIVE state
             pullPolicy: hasIac ? is?.pull_policy : undefined,
             sops: hasIac ? is?.sops_status === "all" : false,
             deployKind: hasIac ? is?.deploy_kind || "compose" : sname === "(none)" ? "unmanaged" : "unmanaged",
             rows,
-            iacId: (is as any)?.id,
+            iacId: idNum,
             hasIac,
             hasContent,
           };
 
-          // @ts-ignore: drift reason tooltip
+          // @ts-ignore: drift reason tooltip + override value for display
           if (enh?.drift_reason) (mergedRow as any).driftReason = enh.drift_reason;
+          // @ts-ignore
+          if (idNum) (mergedRow as any).override = ovr[idNum] || "unset";
 
           merged.push(mergedRow);
         }
@@ -359,61 +373,47 @@ export default function HostStacksView({
     }
   }
 
-  // PATCH the stack Auto DevOps OVERRIDE (decoupled from iac_enabled)
-  async function setAutoDevOps(id: number, enabled: boolean) {
+  // PATCH the stack Auto DevOps **override** (tri-state)
+  async function setAutoDevOpsOverride(id: number, state: OverrideState) {
     const r = await fetch(`/api/iac/stacks/${id}`, {
       method: "PATCH",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ auto_devops: enabled }),
+      body: JSON.stringify({ auto_devops_override: state }),
     });
     if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-  }
-
-  function handleToggleAuto(sIndex: number, enabled: boolean) {
-    const s = stacks[sIndex];
-    if (!s.iacId || !s.hasContent) {
-      if (enabled) {
-        alert("This stack needs compose files or services before Auto DevOps can be enabled. Add content first.");
+    // Re-fetch the single stack to refresh effective state & stored override
+    const r2 = await fetch(`/api/iac/stacks/${id}`, { credentials: "include" });
+    if (r2.ok) {
+      const j = await r2.json();
+      if (j?.stack?.id) {
+        const idN = j.stack.id as number;
+        setEffectiveById((prev) => ({ ...prev, [idN]: !!j.stack.effective_auto_devops }));
+        const raw = (j.stack.auto_devops_override || "").toString().toLowerCase();
+        setOverrideById((prev) => ({
+          ...prev,
+          [idN]: raw === "enable" || raw === "disable" ? (raw as OverrideState) : "unset",
+        }));
+        // reflect immediately in displayed rows
+        setStacks((prev) =>
+          prev.map((s) =>
+            s.iacId === idN ? { ...s, iacEnabled: !!j.stack.effective_auto_devops } : s
+          )
+        );
       }
-      return;
     }
-    setStacks((prev) => prev.map((row, i) => (i === sIndex ? { ...row, iacEnabled: enabled } : row)));
-    setAutoDevOps(s.iacId!, enabled).catch((err) => {
-      alert(`Failed to update Auto DevOps: ${err?.message || err}`);
-      setStacks((prev) =>
-        prev.map((row, i) => (i === sIndex ? { ...row, iacEnabled: !enabled } : row))
-      );
-    });
   }
 
-  async function deleteStackAt(index: number) {
-    const s = stacks[index];
-    if (!s.iacId) return;
-    if (!confirm(`Delete IaC for stack "${s.name}"? This removes IaC files/metadata but not runtime containers.`))
-      return;
-    const r = await fetch(`/api/iac/stacks/${s.iacId}`, { method: "DELETE", credentials: "include" });
-    if (!r.ok) {
-      alert(`Failed to delete: ${r.status} ${r.statusText}`);
-      return;
-    }
-    setStacks((prev) =>
-      prev.map((row, i) =>
-        i === index
-          ? {
-              ...row,
-              iacId: undefined,
-              hasIac: false,
-              iacEnabled: false,
-              pullPolicy: undefined,
-              sops: false,
-              drift: "unknown",
-              hasContent: false,
-            }
-          : row
-      )
-    );
-  }
+  // Filter stacks by search: hide stacks with zero matching rows
+  const visibleStacks = useMemo(() => {
+    if (!hostQuery.trim()) return stacks;
+    return stacks
+      .map((s) => ({
+        ...s,
+        rows: s.rows.filter((r) => matchRow(r, hostQuery)),
+      }))
+      .filter((s) => s.rows.length > 0);
+  }, [stacks, hostQuery]);
 
   useEffect(() => {
     if (!infoModal) return;
@@ -498,7 +498,7 @@ export default function HostStacksView({
         </div>
       )}
 
-      {stacks.map((s, idx) => (
+      {visibleStacks.map((s, idx) => (
         <Card key={`${host.name}:${s.name}`} className="bg-slate-900/50 border-slate-800 rounded-xl">
           <CardHeader className="pb-2 flex flex-row items-center justify-between">
             <div className="space-y-1">
@@ -526,23 +526,80 @@ export default function HostStacksView({
                 )}
               </div>
             </div>
-            <div className="flex items-center gap-2">
-              <label htmlFor={`auto-${idx}`} className="text-sm text-slate-300">
-                Auto DevOps
-              </label>
-              <Switch
-                id={`auto-${idx}`}
-                checked={!!s.iacEnabled}
-                onCheckedChange={(v) => handleToggleAuto(idx, !!v)}
-                disabled={!s.iacId || !s.hasContent}
-              />
+
+            <div className="flex items-center gap-3">
+              <div className="flex items-center gap-2">
+                <label htmlFor={`auto-${idx}`} className="text-sm text-slate-300">
+                  Auto DevOps
+                </label>
+                {/* Switch is READ-ONLY and shows the **effective** state */}
+                <Switch id={`auto-${idx}`} checked={!!s.iacEnabled} disabled />
+              </div>
+
+              {/* Override 3-state selector */}
+              {s.iacId && s.hasContent && (
+                <div className="flex items-center gap-1">
+                  <span className="text-xs text-slate-400">Override:</span>
+                  <select
+                    className="text-xs bg-slate-900 border border-slate-700 text-slate-200 rounded px-2 py-1"
+                    value={(s as any).override || "unset"}
+                    onChange={(e) =>
+                      setAutoDevOpsOverride(s.iacId!, (e.target.value as OverrideState)).catch((err) =>
+                        alert(`Failed to set override: ${err?.message || err}`)
+                      )
+                    }
+                  >
+                    <option value="unset">Inherit</option>
+                    <option value="enable">Force On</option>
+                    <option value="disable">Force Off</option>
+                  </select>
+                </div>
+              )}
+
               {s.iacId && (
-                <Button size="icon" variant="ghost" title="Delete IaC for this stack" onClick={() => deleteStackAt(idx)}>
+                <Button
+                  size="icon"
+                  variant="ghost"
+                  title="Delete IaC for this stack"
+                  onClick={async () => {
+                    if (
+                      confirm(
+                        `Delete IaC for stack "${s.name}"? This removes IaC files/metadata but not runtime containers.`
+                      )
+                    ) {
+                      const r = await fetch(`/api/iac/stacks/${s.iacId}`, {
+                        method: "DELETE",
+                        credentials: "include",
+                      });
+                      if (!r.ok) {
+                        alert(`Failed to delete: ${r.status} ${r.statusText}`);
+                        return;
+                      }
+                      setStacks((prev) =>
+                        prev.map((row) =>
+                          row.iacId === s.iacId
+                            ? {
+                                ...row,
+                                iacId: undefined,
+                                hasIac: false,
+                                iacEnabled: false,
+                                pullPolicy: undefined,
+                                sops: false,
+                                drift: "unknown",
+                                hasContent: false,
+                              }
+                            : row
+                        )
+                      );
+                    }
+                  }}
+                >
                   <Trash2 className="h-4 w-4 text-rose-300" />
                 </Button>
               )}
             </div>
           </CardHeader>
+
           <CardContent className="pt-0">
             <div className="overflow-x-auto rounded-lg border border-slate-800">
               <table className="w-full text-xs table-fixed">
@@ -559,113 +616,103 @@ export default function HostStacksView({
                   </tr>
                 </thead>
                 <tbody>
-                  {s.rows
-                    .filter((r) => matchRow(r, hostQuery))
-                    .map((r) => {
-                      const st = (r.state || "").toLowerCase();
-                      const isRunning =
-                        st.includes("running") || st.includes("up") || st.includes("healthy") || st.includes("restarting");
-                      const isPaused = st.includes("paused");
-                      const cfgShort = (r as any).configHash ? String((r as any).configHash).slice(0, 12) : "";
+                  {s.rows.map((r) => {
+                    const st = (r.state || "").toLowerCase();
+                    const isRunning =
+                      st.includes("running") || st.includes("up") || st.includes("healthy") || st.includes("restarting");
+                    const isPaused = st.includes("paused");
+                    const cfgShort = (r as any).configHash ? String((r as any).configHash).slice(0, 12) : "";
 
-                      return (
-                        <tr key={r.name} className="border-t border-slate-800 hover:bg-slate-900/40 align-top">
-                          <td className="px-2 py-1.5 font-medium text-slate-200 truncate">{r.name}</td>
-                          <td className="px-2 py-1.5 text-slate-300">
-                            <StatePill state={r.state} />
-                          </td>
-                          <td className="px-2 py-1.5 text-slate-300">
-                            <div className="flex items-center gap-2">
-                              <div className="max-w-[24rem] truncate" title={r.imageRun || ""}>
-                                {r.imageRun || "—"}
-                              </div>
-                              {cfgShort && (
-                                <span
-                                  className="text-[10px] px-1.5 py-0.5 rounded border border-slate-700 text-slate-400"
-                                  title={(r as any).configHash}
-                                >
-                                  cfg {cfgShort}
-                                </span>
-                              )}
-                              {r.imageIac && r.state === "missing" && (
-                                <>
-                                  <ChevronRight className="h-4 w-4 text-slate-500" />
-                                  <div className="max-w-[24rem] truncate text-slate-300" title={r.imageIac}>
-                                    {r.imageIac}
-                                  </div>
-                                </>
-                              )}
+                    return (
+                      <tr key={r.name} className="border-t border-slate-800 hover:bg-slate-900/40 align-top">
+                        <td className="px-2 py-1.5 font-medium text-slate-200 truncate">{r.name}</td>
+                        <td className="px-2 py-1.5 text-slate-300">
+                          <StatePill state={r.state} />
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-300">
+                          <div className="flex items-center gap-2">
+                            <div className="max-w-[24rem] truncate" title={r.imageRun || ""}>
+                              {r.imageRun || "—"}
                             </div>
-                          </td>
-                          <td className="px-2 py-1.5 text-slate-300">{r.created || "—"}</td>
-                          <td className="px-2 py-1.5 text-slate-300">{r.ip || "—"}</td>
-                          <td className="px-2 py-1.5 text-slate-300 align-top">
-                            <div className="max-w-56 whitespace-pre-line leading-tight">{r.portsText || "—"}</div>
-                          </td>
-                          <td className="px-2 py-1.5 text-slate-300">{r.owner || "—"}</td>
-                          <td className="px-2 py-1">
-                            <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap py-0.5">
-                              {!isRunning && !isPaused && (
-                                <ActionBtn title="Start" icon={Play} onClick={() => doCtrAction(r.name, "start")} />
-                              )}
-                              {isRunning && (
-                                <ActionBtn title="Stop" icon={Pause} onClick={() => doCtrAction(r.name, "stop")} />
-                              )}
-                              {(isRunning || isPaused) && (
-                                <ActionBtn
-                                  title="Restart"
-                                  icon={RotateCw}
-                                  onClick={() => doCtrAction(r.name, "restart")}
-                                />
-                              )}
-                              {isRunning && !isPaused && (
-                                <ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />
-                              )}
-                              {isPaused && (
-                                <ActionBtn
-                                  title="Resume"
-                                  icon={PlayCircle}
-                                  onClick={() => doCtrAction(r.name, "unpause")}
-                                />
-                              )}
+                            {cfgShort && (
+                              <span
+                                className="text-[10px] px-1.5 py-0.5 rounded border border-slate-700 text-slate-400"
+                                title={(r as any).configHash}
+                              >
+                                cfg {cfgShort}
+                              </span>
+                            )}
+                            {r.imageIac && r.state === "missing" && (
+                              <>
+                                <ChevronRight className="h-4 w-4 text-slate-500" />
+                                <div className="max-w-[24rem] truncate text-slate-300" title={r.imageIac}>
+                                  {r.imageIac}
+                                </div>
+                              </>
+                            )}
+                          </div>
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-300">{r.created || "—"}</td>
+                        <td className="px-2 py-1.5 text-slate-300">{r.ip || "—"}</td>
+                        <td className="px-2 py-1.5 text-slate-300 align-top">
+                          <div className="max-w-56 whitespace-pre-line leading-tight">{r.portsText || "—"}</div>
+                        </td>
+                        <td className="px-2 py-1.5 text-slate-300">{r.owner || "—"}</td>
+                        <td className="px-2 py-1">
+                          <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap py-0.5">
+                            {!isRunning && !isPaused && (
+                              <ActionBtn title="Start" icon={Play} onClick={() => doCtrAction(r.name, "start")} />
+                            )}
+                            {isRunning && (
+                              <ActionBtn title="Stop" icon={Pause} onClick={() => doCtrAction(r.name, "stop")} />
+                            )}
+                            {(isRunning || isPaused) && (
+                              <ActionBtn title="Restart" icon={RotateCw} onClick={() => doCtrAction(r.name, "restart")} />
+                            )}
+                            {isRunning && !isPaused && (
+                              <ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />
+                            )}
+                            {isPaused && (
+                              <ActionBtn title="Resume" icon={PlayCircle} onClick={() => doCtrAction(r.name, "unpause")} />
+                            )}
 
-                              <span className="mx-1 h-4 w-px bg-slate-700/60" />
+                            <span className="mx-1 h-4 w-px bg-slate-700/60" />
 
-                              <ActionBtn title="Live logs" icon={FileText} onClick={() => openLiveLogs(r.name)} />
-                              <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
-                              <ActionBtn
-                                title="Stats"
-                                icon={Activity}
-                                onClick={async () => {
-                                  try {
-                                    const r2 = await fetch(
-                                      `/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(r.name)}/stats`,
-                                      { credentials: "include" }
-                                    );
-                                    const txt = await r2.text();
-                                    setInfoModal({ title: `${r.name} (stats)`, text: txt || "(no data)" });
-                                  } catch {
-                                    setInfoModal({ title: `${r.name} (stats)`, text: "(failed to load stats)" });
-                                  }
-                                }}
-                              />
+                            <ActionBtn title="Live logs" icon={FileText} onClick={() => openLiveLogs(r.name)} />
+                            <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
+                            <ActionBtn
+                              title="Stats"
+                              icon={Activity}
+                              onClick={async () => {
+                                try {
+                                  const r2 = await fetch(
+                                    `/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(r.name)}/stats`,
+                                    { credentials: "include" }
+                                  );
+                                  const txt = await r2.text();
+                                  setInfoModal({ title: `${r.name} (stats)`, text: txt || "(no data)" });
+                                } catch {
+                                  setInfoModal({ title: `${r.name} (stats)`, text: "(failed to load stats)" });
+                                }
+                              }}
+                            />
 
-                              <span className="mx-1 h-4 w-px bg-slate-700/60" />
+                            <span className="mx-1 h-4 w-px bg-slate-700/60" />
 
-                              <ActionBtn title="Kill" icon={ZapOff} onClick={() => doCtrAction(r.name, "kill")} />
-                              <ActionBtn title="Remove" icon={Trash2} onClick={() => doCtrAction(r.name, "remove")} />
-                              <ActionBtn
-                                title="Console"
-                                icon={Terminal}
-                                onClick={() => setConsoleTarget({ ctr: r.name })}
-                                disabled={!isRunning}
-                              />
-                            </div>
-                          </td>
-                        </tr>
-                      );
-                    })}
-                  {(!s.rows || s.rows.filter((r) => matchRow(r, hostQuery)).length === 0) && (
+                            <ActionBtn title="Kill" icon={ZapOff} onClick={() => doCtrAction(r.name, "kill")} />
+                            <ActionBtn title="Remove" icon={Trash2} onClick={() => doCtrAction(r.name, "remove")} />
+                            <ActionBtn
+                              title="Console"
+                              icon={Terminal}
+                              onClick={() => setConsoleTarget({ ctr: r.name })}
+                              disabled={!isRunning}
+                            />
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                  {(!s.rows || s.rows.length === 0) && (
                     <tr>
                       <td className="p-3 text-slate-500" colSpan={8}>
                         No containers or services.

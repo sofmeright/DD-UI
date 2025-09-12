@@ -370,22 +370,21 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 		// Determine drift (authoritative first = rendered config-hash)
 		curBundleHash, _ := ComputeCurrentBundleHash(ctx, s.ID)
 
-		// Try to compute current rendered config-hash using the same staging logic (no up).
-		// Best effort; if it fails we still have bundle hash + runtime rules.
+		// Best effort rendered config-hash from a staged render (no `up`)
 		var curRendered string
-		{
-			stageDir, stagedComposes, cleanup, derr := stageStackForCompose(ctx, s.ID)
-			if derr == nil {
-				curRendered = computeRenderedConfigHash(ctx, stageDir, s.Name /* RAW name */, stagedComposes)
-				if cleanup != nil {
-					cleanup()
-				}
+		stageDir, stagedComposes, cleanup, derr := stageStackForCompose(ctx, s.ID)
+		if derr == nil {
+			curRendered = computeRenderedConfigHash(ctx, stageDir, s.Name /* RAW name */, stagedComposes)
+			if cleanup != nil {
+				cleanup()
 			}
+		}
 
 		// Compare against last successful stamp
 		if stamp, serr := GetLatestDeploymentStamp(ctx, s.ID); serr == nil {
 			e.LatestDeployment = stamp
-			// Prefer rendered_config_hash if present on stamp metadata
+
+			// Prefer rendered_config_hash if present in stamp metadata (optional)
 			var stampRendered string
 			if stamp.Metadata != nil {
 				if v, ok := stamp.Metadata["rendered_config_hash"].(string); ok {
@@ -410,7 +409,6 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 				e.DriftReason = "No containers for this stack"
 			}
 		}
-
 
 		out = append(out, e)
 	}

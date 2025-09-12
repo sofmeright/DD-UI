@@ -1,4 +1,5 @@
 // ui/src/views/HostsStacksView.tsx
+// ui/src/views/HostsStacksView.tsx
 import { useEffect, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -25,16 +26,31 @@ import DriftBadge from "@/components/DriftBadge";
 import ActionBtn from "@/components/ActionBtn";
 import LiveLogsModal from "@/components/LiveLogsModal";
 import ConsoleModal from "@/components/ConsoleModal";
-import { ApiContainer, Host, IacStack, MergedRow, MergedStack } from "@/types";
+import { ApiContainer, Host, IacService, IacStack, MergedRow, MergedStack } from "@/types";
 import { formatDT, formatPortsLines } from "@/utils/format";
 
-type EnhancedStackWire = {
-  name: string;
-  drift_detected: boolean;
-  drift_reason?: string;
-  containers?: Array<{ name: string; service?: string; config_hash?: string }>;
-  rendered_services?: Array<{ service_name: string; container_name?: string; image?: string; hash?: string }>;
-};
+function sanitizeLabel(s: string): string {
+  // match compose label semantics: lowercase, spaces -> _, only [a-z0-9_-]
+  const lowered = (s || "").trim().toLowerCase().replaceAll(" ", "_");
+  const stripped = lowered.replace(/[^a-z0-9_-]/g, "_");
+  return stripped.replace(/^[-_]+|[-_]+$/g, "") || "default";
+}
+
+function isEncryptedOrTemplated(v?: string | null) {
+  if (!v) return false;
+  return v.startsWith("ENC[") || v.includes("${");
+}
+
+function guessServiceFromContainerName(containerName: string, projectLabel: string): string | undefined {
+  // strip trailing -N or _N
+  let base = containerName.replace(/[-_]\d+$/, "");
+  // prefer exact compose_project if available; otherwise use provided projectLabel
+  // pattern 1: <project>-<service>
+  if (base.startsWith(projectLabel + "-")) return base.slice(projectLabel.length + 1);
+  // pattern 2: <project>_<service>
+  if (base.startsWith(projectLabel + "_")) return base.slice(projectLabel.length + 1);
+  return undefined;
+}
 
 export default function HostStacksView({
   host,
@@ -106,19 +122,13 @@ export default function HostStacksView({
           ),
         }))
       );
-    } catch {
+    } catch (e) {
       alert("Action failed");
     }
   }
 
   function openLiveLogs(ctr: string) {
     setStreamLogs({ ctr });
-  }
-
-  // Local sanitizer to *map* runtime compose_project back to user stack names for grouping
-  function sanitizeProject(s: string): string {
-    const lowered = s.trim().toLowerCase().replaceAll(" ", "_");
-    return lowered.replace(/[^a-z0-9_-]/g, "_").replace(/^[_-]+|[_-]+$/g, "") || "default";
   }
 
   useEffect(() => {
@@ -140,15 +150,10 @@ export default function HostStacksView({
         const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
         const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
 
-        // Enhanced drift/runtime (drift + config-hash + *rendered services*)
+        // Enhanced drift/runtime (source drift & config-hash from backend)
         const enhancedByName = new Map<
           string,
-          {
-            drift_detected: boolean;
-            drift_reason?: string;
-            containers: Array<{ name: string; service?: string; config_hash?: string }>;
-            rendered: Array<{ service_name: string; container_name?: string; image?: string; hash?: string }>;
-          }
+          { drift_detected: boolean; drift_reason?: string; containers?: Array<{ name: string; config_hash?: string }> }
         >();
         try {
           const re = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/enhanced-iac`, {
@@ -156,23 +161,26 @@ export default function HostStacksView({
           });
           if (re.ok) {
             const ej = await re.json();
-            const items = Array.isArray(ej?.stacks) ? (ej.stacks as EnhancedStackWire[]) : [];
+            const items = Array.isArray(ej?.stacks) ? ej.stacks : [];
             for (const s of items) {
-              const nm = (s?.name || "").toString();
+              const nm = (s?.name || s?.stack_name || "").toString();
               if (!nm) continue;
+              const ctrs = Array.isArray(s?.containers) ? s.containers : [];
               enhancedByName.set(nm, {
-                drift_detected: !!s.drift_detected,
-                drift_reason: s.drift_reason || "",
-                containers: Array.isArray(s.containers) ? s.containers : [],
-                rendered: Array.isArray(s.rendered_services) ? s.rendered_services : [],
+                drift_detected: !!s?.drift_detected,
+                drift_reason: s?.drift_reason || "",
+                containers: ctrs.map((c: any) => ({
+                  name: (c?.name || "").toString(),
+                  config_hash: (c?.config_hash || "").toString(),
+                })),
               });
             }
           }
         } catch {
-          /* ignore; UI still renders with base info */
+          /* ignore */
         }
 
-        // Effective Auto DevOps per stack (for the toggle only)
+        // Per-stack effective Auto DevOps
         const effMap: Record<number, boolean> = {};
         await Promise.all(
           (iacStacks || [])
@@ -191,16 +199,9 @@ export default function HostStacksView({
             })
         );
 
-        // Build a map of sanitized->raw IaC stack names so we can regroup runtime under **user** names
-        const rawBySanitized = new Map<string, string>();
-        for (const s of iacStacks) rawBySanitized.set(sanitizeProject(s.name), s.name);
-
-        // Group runtime by the *user* stack name when possible
         const rtByStack = new Map<string, ApiContainer[]>();
         for (const c of runtime) {
-          const label = (c.compose_project || "").trim();
-          const mapped = label ? rawBySanitized.get(sanitizeProject(label)) : undefined;
-          const key = mapped || (c.stack || "(none)").trim() || "(none)";
+          const key = (c.compose_project || c.stack || "(none)").trim() || "(none)";
           if (!rtByStack.has(key)) rtByStack.set(key, []);
           rtByStack.get(key)!.push(c);
         }
@@ -208,17 +209,12 @@ export default function HostStacksView({
         const iacByStack = new Map<string, IacStack>();
         for (const s of iacStacks) iacByStack.set(s.name, s);
 
-        // Fast-lookup maps for enhanced data
-        const cfgHashByCtr = new Map<string, string>();
-        const renderedByStack = new Map<
-          string,
-          Array<{ service_name: string; container_name?: string; image?: string; hash?: string }>
-        >();
+        // config-hash by container name (from enhanced)
+        const cfgHashByName = new Map<string, string>();
         for (const [sname, e] of enhancedByName.entries()) {
           for (const c of e.containers || []) {
-            if (c?.name && c?.config_hash) cfgHashByCtr.set(c.name, c.config_hash);
+            if (c?.name && c?.config_hash) cfgHashByName.set(c.name, c.config_hash);
           }
-          if (e.rendered?.length) renderedByStack.set(sname, e.rendered);
         }
 
         const names = new Set<string>([...rtByStack.keys(), ...iacByStack.keys()]);
@@ -227,46 +223,74 @@ export default function HostStacksView({
         for (const sname of Array.from(names).sort()) {
           const rcs = rtByStack.get(sname) || [];
           const is = iacByStack.get(sname);
-          const hasIac = !!is && (!!is.compose || (Array.isArray((is as any).services) && (is as any).services.length > 0));
-          const hasContent = !!is && (!!is.compose || (Array.isArray((is as any).services) && (is as any).services.length > 0));
+          const services: IacService[] = Array.isArray(is?.services) ? (is!.services as IacService[]) : [];
+          const hasIac = !!is && (services.length > 0 || !!is.compose);
+          const hasContent = !!is && (!!is.compose || services.length > 0);
 
           const rows: MergedRow[] = [];
+
+          const projectLabel = sanitizeLabel(sname);
+
+          function desiredImageFor(c: ApiContainer): string | undefined {
+            if (!is || services.length === 0) return undefined;
+            // pick service by label if present, else try inference from name
+            const reported = (c as any).compose_service as string | undefined;
+            const guessed = reported || guessServiceFromContainerName(c.name, c.compose_project || projectLabel);
+            const svc = services.find(
+              (x) =>
+                (guessed && x.service_name === guessed) ||
+                (!!x.container_name && x.container_name === c.name)
+            );
+            return svc?.image || undefined;
+          }
 
           for (const c of rcs) {
             const portsLines = formatPortsLines((c as any).ports);
             const portsText = portsLines.join("\n");
+            const _desired = desiredImageFor(c);
+
             rows.push({
               name: c.name,
               state: c.state,
               stack: sname,
               imageRun: c.image,
-              imageIac: undefined, // no image-compare drift
+              imageIac: undefined, // do not compare images for drift
               created: formatDT(c.created_ts),
               ip: c.ip_addr,
               portsText,
               owner: c.owner || "—",
               drift: false,
-              // @ts-ignore: carry config-hash tag
-              configHash: cfgHashByCtr.get(c.name) || undefined,
+              // @ts-ignore
+              configHash: cfgHashByName.get(c.name) || undefined,
+              // @ts-ignore
+              _desiredImage: _desired,
             } as any);
           }
 
-          // Prefer **rendered** services to compute "missing" rows (post-SOPS, post-interpolation)
-          const rendered = renderedByStack.get(sname) || [];
-          if (rendered.length) {
-            for (const svc of rendered) {
-              const exists = (rcs || []).some(
-                (c) =>
-                  (c.compose_service && c.compose_service === svc.service_name) ||
-                  (!!svc.container_name && c.name === svc.container_name)
-              );
+          if (is) {
+            for (const svc of services) {
+              // Prefer explicit container_name when it's usable; otherwise match by service
+              const nameForRow =
+                svc.container_name && !isEncryptedOrTemplated(svc.container_name)
+                  ? svc.container_name
+                  : svc.service_name;
+
+              const exists = (rcs || []).some((c) => {
+                if (svc.container_name && !isEncryptedOrTemplated(svc.container_name)) {
+                  return c.name === svc.container_name;
+                }
+                const reported = (c as any).compose_service as string | undefined;
+                const guessed = reported || guessServiceFromContainerName(c.name, c.compose_project || projectLabel);
+                return guessed === svc.service_name;
+              });
+
               if (!exists) {
                 rows.push({
-                  name: svc.container_name || svc.service_name,
+                  name: nameForRow,
                   state: "missing",
                   stack: sname,
                   imageRun: undefined,
-                  imageIac: svc.image || "—",
+                  imageIac: svc.image, // only show IaC image on missing rows
                   created: "—",
                   ip: "—",
                   portsText: "—",
@@ -301,7 +325,7 @@ export default function HostStacksView({
             hasContent,
           };
 
-          // @ts-ignore drift reason tooltip
+          // @ts-ignore
           if (enh?.drift_reason) (mergedRow as any).driftReason = enh.drift_reason;
 
           merged.push(mergedRow);
@@ -319,7 +343,7 @@ export default function HostStacksView({
     };
   }, [host.name, onSync]);
 
-  // --- Name validation helpers (warn-only; Compose will normalize), storage keeps exact name ---
+  // --- Name validation helpers (warn-only; Compose will normalize) ---
   function dockerSanitizePreview(s: string): string {
     const lowered = s.trim().toLowerCase().replaceAll(" ", "_");
     return lowered.replace(/[^a-z0-9_-]/g, "_") || "default";
@@ -370,7 +394,6 @@ export default function HostStacksView({
     }
   }
 
-  // PATCH the stack Auto DevOps OVERRIDE (decoupled from iac_enabled)
   async function setAutoDevOps(id: number, enabled: boolean) {
     const r = await fetch(`/api/iac/stacks/${id}`, {
       method: "PATCH",
@@ -437,14 +460,17 @@ export default function HostStacksView({
 
   return (
     <div className="space-y-4">
+      {/* Streaming Logs Modal */}
       {streamLogs && (
         <LiveLogsModal host={host.name} container={streamLogs.ctr} onClose={() => setStreamLogs(null)} />
       )}
 
+      {/* Console Modal */}
       {consoleTarget && (
         <ConsoleModal host={host.name} container={consoleTarget.ctr} onClose={() => setConsoleTarget(null)} />
       )}
 
+      {/* Info Modal */}
       {infoModal && (
         <div
           className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4"

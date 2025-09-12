@@ -1,4 +1,5 @@
 // src/api/deploy.go
+// src/api/deploy.go
 package main
 
 import (
@@ -68,10 +69,16 @@ func deployStack(ctx context.Context, stackID int64) error {
 		return nil
 	}
 
-	// Precompute rendered config-hash (best effort; used as stamp metadata)
+	// Precompute rendered config-hash + bundle hash (best effort; for stamping/drift).
 	renderedCfgHash := computeRenderedConfigHash(ctx, stageDir, rawProjectName, stagedComposes)
+	bundleHash, _ := ComputeCurrentBundleHash(ctx, stackID)
 
 	// Build a deployment stamp (content bytes = concatenated staged compose files).
+	// We also pass metadata (string map).
+	meta := map[string]string{
+		"rendered_config_hash": renderedCfgHash,
+		"bundle_hash":          bundleHash,
+	}
 	var allComposeContent []byte
 	for _, f := range stagedComposes {
 		b, rerr := os.ReadFile(f)
@@ -79,11 +86,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 			return fmt.Errorf("failed to read staged compose file %s: %v", f, rerr)
 		}
 		allComposeContent = append(allComposeContent, b...)
-	}
-
-	var meta map[string]string
-	if renderedCfgHash != "" {
-		meta = map[string]string{"rendered_config_hash": renderedCfgHash}
+		allComposeContent = append(allComposeContent, '\n')
 	}
 	stamp, serr := CreateDeploymentStamp(ctx, stackID, "compose", "", allComposeContent, meta)
 	if serr != nil {
@@ -116,6 +119,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 			log.Printf("deploy: failed to update deployment stamp status: %v", uerr)
 		}
 		go func(label string, stampID int64, depHash string) {
+          // depHash is the stamp.DeploymentHash (content hash)
 			backoff := []time.Duration{1 * time.Second, 2 * time.Second, 3 * time.Second, 5 * time.Second}
 			for i := 0; i < len(backoff); i++ {
 				if i > 0 {

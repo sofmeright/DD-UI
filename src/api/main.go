@@ -24,6 +24,11 @@ var startedAt = time.Now()
 
 func main() {
 	addr := env("DDUI_BIND", ":443")
+	
+	// Show current log level on startup
+	currentLevel := getLogLevel()
+	infoLog("DDUI starting with log level: %s", currentLevel)
+	debugLog("Debug logging is enabled")
 
 	if err := InitAuthFromEnv(); err != nil {
 		fatalLog("OIDC setup failed: %v", err)
@@ -176,7 +181,7 @@ func fatalLog(format string, args ...interface{}) {
 func scanAllOnce(ctx context.Context, perHostTO time.Duration, conc int) {
 	hostRows, err := ListHosts(ctx)
 	if err != nil {
-		log.Printf("scan: list hosts failed: %v", err)
+		errorLog("scan: list hosts failed: %v", err)
 		return
 	}
 	sem := make(chan struct{}, conc)
@@ -206,12 +211,12 @@ func scanAllOnce(ctx context.Context, perHostTO time.Duration, conc int) {
 					return
 				}
 				failed++
-				log.Printf("scan: host=%s error=%v", h.Name, err)
+				errorLog("scan: host=%s error=%v", h.Name, err)
 				return
 			}
 			scanned++
 			total += n
-			log.Printf("scan: host=%s saved=%d", h.Name, n)
+			infoLog("scan: host=%s saved=%d", h.Name, n)
 		}()
 	}
 	wg.Wait()
@@ -221,14 +226,14 @@ func scanAllOnce(ctx context.Context, perHostTO time.Duration, conc int) {
 
 func startAutoScanner(ctx context.Context) {
 	if !envBool("DDUI_SCAN_DOCKER_AUTO", "true") {
-		log.Printf("scan: auto disabled (DDUI_SCAN_DOCKER_AUTO=false)")
+		infoLog("scan: auto disabled (DDUI_SCAN_DOCKER_AUTO=false)")
 		return
 	}
 	interval := envDur("DDUI_SCAN_DOCKER_INTERVAL", "1m")       // Portainer-like
 	perHostTO := envDur("DDUI_SCAN_DOCKER_HOST_TIMEOUT", "45s") // per host protection
 	conc := envInt("DDUI_SCAN_DOCKER_CONCURRENCY", 3)
 
-	log.Printf("scan: auto enabled interval=%s host_timeout=%s conc=%d", interval, perHostTO, conc)
+	infoLog("scan: auto enabled interval=%s host_timeout=%s conc=%d", interval, perHostTO, conc)
 
 	// optional boot scan
 	if envBool("DDUI_SCAN_DOCKER_ON_START", "true") {
@@ -243,7 +248,7 @@ func startAutoScanner(ctx context.Context) {
 			case <-t.C:
 				scanAllOnce(ctx, perHostTO, conc)
 			case <-ctx.Done():
-				log.Printf("scan: auto scanner stopping: %v", ctx.Err())
+				infoLog("scan: auto scanner stopping: %v", ctx.Err())
 				return
 			}
 		}
@@ -254,19 +259,19 @@ func startAutoScanner(ctx context.Context) {
 
 func startIacAutoScanner(ctx context.Context) {
 	if !envBool("DDUI_SCAN_IAC_AUTO", "true") {
-		log.Printf("iac: auto disabled (DDUI_SCAN_IAC_AUTO=false)")
+		infoLog("iac: auto disabled (DDUI_SCAN_IAC_AUTO=false)")
 		return
 	}
 	interval := envDur("DDUI_SCAN_IAC_INTERVAL", "90s") // default 1m30s
-	log.Printf("iac: auto enabled interval=%s", interval)
+	infoLog("iac: auto enabled interval=%s", interval)
 
 	// initial scan on boot (non-fatal)
 	go func() {
 		if _, _, err := ScanIacLocal(ctx); err != nil {
-			log.Printf("iac: initial scan failed: %v", err)
+			errorLog("iac: initial scan failed: %v", err)
 		}
 		if err := applyAutoDevOps(ctx); err != nil {
-			log.Printf("iac: initial apply failed: %v", err)
+			errorLog("iac: initial apply failed: %v", err)
 		}
 	}()
 
@@ -277,13 +282,13 @@ func startIacAutoScanner(ctx context.Context) {
 			select {
 			case <-t.C:
 				if _, _, err := ScanIacLocal(ctx); err != nil {
-					log.Printf("iac: periodic scan failed: %v", err)
+					errorLog("iac: periodic scan failed: %v", err)
 				}
 				if err := applyAutoDevOps(ctx); err != nil {
-					log.Printf("iac: apply failed: %v", err)
+					errorLog("iac: apply failed: %v", err)
 				}
 			case <-ctx.Done():
-				log.Printf("iac: auto scanner stopping: %v", ctx.Err())
+				infoLog("iac: auto scanner stopping: %v", ctx.Err())
 				return
 			}
 		}

@@ -874,7 +874,7 @@ func makeRouter() http.Handler {
 			priv.Post("/scan/all", func(w http.ResponseWriter, r *http.Request) {
 				// IaC scan (non-fatal)
 				if _, _, err := ScanIacLocal(r.Context()); err != nil {
-					log.Printf("iac: sync scan failed: %v", err)
+					errorLog("iac: sync scan failed: %v", err)
 				}
 
 				hostRows, err := ListHosts(r.Context())
@@ -1461,10 +1461,10 @@ func makeRouter() http.Handler {
 					defer cancel()
 					ctx = context.WithValue(ctx, ctxManualKey{}, manual)
 					if err := deployStack(ctx, stackID); err != nil {
-						log.Printf("deploy: stack %d failed: %v", stackID, err)
+						errorLog("deploy: stack %d failed: %v", stackID, err)
 						return
 					}
-					log.Printf("deploy: stack %d ok", stackID)
+					infoLog("deploy: stack %d ok", stackID)
 				}(id, manual)
 
 				writeJSON(w, http.StatusAccepted, map[string]any{

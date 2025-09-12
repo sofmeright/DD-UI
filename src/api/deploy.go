@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"os/exec"
 	"strings"
@@ -30,7 +29,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 			return aerr
 		}
 		if !allowed {
-			log.Printf("deploy: stack %d skipped (auto_devops disabled by effective policy)", stackID)
+			infoLog("deploy: stack %d skipped (auto_devops disabled by effective policy)", stackID)
 			return nil
 		}
 	}
@@ -65,7 +64,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 	}()
 
 	if len(stagedComposes) == 0 {
-		log.Printf("deploy: stack %d: no compose files tracked; skipping", stackID)
+		infoLog("deploy: stack %d: no compose files tracked; skipping", stackID)
 		return nil
 	}
 
@@ -130,7 +129,7 @@ func deployStack(ctx context.Context, stackID int64) error {
 				}
 			}
 			if err := associateByProjectInspect(context.Background(), label, stampID, depHash); err != nil {
-				log.Printf("deploy: association (inspect) still failing for project=%s: %v", label, err)
+				errorLog("deploy: association (inspect) still failing for project=%s: %v", label, err)
 			}
 		}(labelProject, stamp.ID, stamp.DeploymentHash)
 	}

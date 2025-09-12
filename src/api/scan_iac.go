@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io/fs"
-	"log"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -46,11 +45,11 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 	dirname := strings.TrimSpace(env(iacDirNameEnv, iacDefaultDirName))
 	base := filepath.Join(root, dirname)
 
-	log.Printf("iac: scan start root=%q base=%q", root, base)
+	infoLog("iac: scan start root=%q base=%q", root, base)
 
 	repoID, err := upsertIacRepoLocal(ctx, root)
 	if err != nil {
-		log.Printf("iac: repo upsert failed root=%q err=%v", root, err)
+		errorLog("iac: repo upsert failed root=%q err=%v", root, err)
 		return 0, 0, err
 	}
 
@@ -62,15 +61,15 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 	// If the base doesn't exist or isn't a dir, treat as "nothing to scan".
 	if fi, err := os.Stat(base); err != nil {
 		if os.IsNotExist(err) {
-			log.Printf("iac: base dir %q missing; nothing to scan", base)
+			infoLog("iac: base dir %q missing; nothing to scan", base)
 			_, _ = db.Exec(ctx, `UPDATE iac_repos SET last_scan_at=now() WHERE id=$1`, repoID)
 			return 0, 0, nil
 		}
-		log.Printf("iac: stat base err=%v", err)
+		errorLog("iac: stat base err=%v", err)
 		return 0, 0, err
 	} else if !fi.IsDir() {
 		err := fmt.Errorf("%s is not a directory", base)
-		log.Printf("iac: %v", err)
+		errorLog("iac: %v", err)
 		return 0, 0, err
 	}
 
@@ -116,10 +115,10 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 			filepath.ToSlash(filepath.Join(dirname, scopeName, stackName)),
 			composeFile, deployKind, "", sopsStatus, true)
 		if err != nil {
-			log.Printf("iac: stack upsert failed scope=%s stack=%s path=%s err=%v", scopeName, stackName, p, err)
+			errorLog("iac: stack upsert failed scope=%s stack=%s path=%s err=%v", scopeName, stackName, p, err)
 			return fs.SkipDir
 		}
-		log.Printf("iac: stack %s/%s id=%d deploy=%s compose=%q sops=%s", scopeName, stackName, stackID, deployKind, composeFile, sopsStatus)
+		infoLog("iac: stack %s/%s id=%d deploy=%s compose=%q sops=%s", scopeName, stackName, stackID, deployKind, composeFile, sopsStatus)
 
 		keepStackIDs = append(keepStackIDs, stackID)
 		stacksFound++
@@ -128,14 +127,14 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 		for _, ef := range envFiles {
 			sum, sz := sha256File(ef.fullPath)
 			if err := upsertIacFile(ctx, stackID, "env", relFrom(root, ef.fullPath), ef.sops, sum, sz); err != nil {
-				log.Printf("iac: upsert file(env) failed stack_id=%d file=%s err=%v", stackID, ef.fullPath, err)
+				errorLog("iac: upsert file(env) failed stack_id=%d file=%s err=%v", stackID, ef.fullPath, err)
 			}
 		}
 		if composeFile != "" {
 			full := filepath.Join(p, composeFile)
 			sum, sz := sha256File(full)
 			if err := upsertIacFile(ctx, stackID, "compose", filepath.ToSlash(filepath.Join(dirname, scopeName, stackName, composeFile)), false, sum, sz); err != nil {
-				log.Printf("iac: upsert file(compose) failed stack_id=%d file=%s err=%v", stackID, full, err)
+				errorLog("iac: upsert file(compose) failed stack_id=%d file=%s err=%v", stackID, full, err)
 			}
 		}
 		for _, s := range []string{"deploy.sh", "pre.sh", "post.sh"} {
@@ -143,7 +142,7 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 			if fi, err := os.Stat(full); err == nil && !fi.IsDir() {
 				sum, sz := sha256File(full)
 				if err := upsertIacFile(ctx, stackID, "script", relFrom(root, full), false, sum, sz); err != nil {
-					log.Printf("iac: upsert file(script) failed stack_id=%d file=%s err=%v", stackID, full, err)
+					errorLog("iac: upsert file(script) failed stack_id=%d file=%s err=%v", stackID, full, err)
 				}
 			}
 		}
@@ -185,7 +184,7 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 					Volumes:       vols,
 					Deploy:        svc.Deploy,
 				}); err != nil {
-					log.Printf("iac: upsert service failed stack_id=%d svc=%s err=%v", stackID, svcName, err)
+					errorLog("iac: upsert service failed stack_id=%d svc=%s err=%v", stackID, svcName, err)
 				} else {
 					servicesSaved++
 				}
@@ -203,19 +202,19 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 
 	if err := filepath.WalkDir(base, walkFn); err != nil {
 		if !os.IsNotExist(err) {
-			log.Printf("iac: walk err=%v", err)
+			errorLog("iac: walk err=%v", err)
 			return 0, 0, err
 		}
 	}
 
 	// prune removed stacks for this repo
 	if n, err := pruneIacStacksNotIn(ctx, repoID, keepStackIDs); err == nil && n > 0 {
-		log.Printf("iac: pruned %d stacks no longer present in repo_id=%d", n, repoID)
+		infoLog("iac: pruned %d stacks no longer present in repo_id=%d", n, repoID)
 	}
 
 	_, _ = db.Exec(ctx, `UPDATE iac_repos SET last_scan_at=now() WHERE id=$1`, repoID)
 
-	log.Printf("iac: scan done repo_id=%d stacks=%d services=%d", repoID, stacksFound, servicesSaved)
+	infoLog("iac: scan done repo_id=%d stacks=%d services=%d", repoID, stacksFound, servicesSaved)
 	return stacksFound, servicesSaved, nil
 }
 

@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -153,7 +152,7 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 		return 0, ErrSkipScan
 	}
 	if strings.EqualFold(env("DDUI_SCAN_DOCKER_DEBUG", "false"), "true") {
-		log.Printf("scan: host=%s docker_url=%s", h.Name, url)
+		infoLog("scan: host=%s docker_url=%s", h.Name, url)
 	}
 
 	cli, done, err := dockerClientForURL(ctx, url, sshCmd)

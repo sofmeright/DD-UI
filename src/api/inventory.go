@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log"
 	"os"
 	"strings"
 	"sync"
@@ -94,7 +93,7 @@ func loadInventory(p string) error {
 	hosts = parsed
 	invMu.Unlock()
 
-	log.Printf("inventory: loaded %d hosts from %s (%s)", len(parsed), p, kind)
+	infoLog("inventory: loaded %d hosts from %s (%s)", len(parsed), p, kind)
 	return nil
 }
 

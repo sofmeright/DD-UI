@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -194,7 +195,7 @@ func effectiveAutoDevops(ctx context.Context, stackID int64) (bool, string) {
 		h, err := GetHostByName(ctx, scopeName)
 		if err == nil && len(h.Groups) > 0 {
 			groups = append(groups, h.Groups...)
-			sort.Strings(groups)
+			slices.Sort(groups)
 		}
 	}
 

@@ -1,9 +1,7 @@
-// compose_render_hash.go
 // src/api/compose_render_hash.go
 package main
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -47,7 +45,7 @@ func computeRenderedConfigHash(ctx context.Context, stageDir string, projectName
 }
 
 // computeComposeFilesContentHash reads the staged compose files in order, concatenates
-// their raw bytes, and returns sha256 hex — matching CreateDeploymentStamp().
+// their raw bytes, and returns sha256 hex — same shape as CreateDeploymentStamp(…content…).
 func computeComposeFilesContentHash(stageDir string, files []string) string {
 	h := sha256.New()
 	for _, f := range files {
@@ -56,14 +54,7 @@ func computeComposeFilesContentHash(stageDir string, files []string) string {
 			return ""
 		}
 		h.Write(b)
-		// delimiter to avoid accidental boundary issues between files
-		h.Write([]byte{'\n'})
+		h.Write([]byte{'\n'}) // separator to avoid boundary collisions
 	}
 	return hex.EncodeToString(h.Sum(nil))
-}
-
-// helper for tests
-func hashBytes(b []byte) string {
-	h := sha256.Sum256(b)
-	return hex.EncodeToString(h[:])
 }

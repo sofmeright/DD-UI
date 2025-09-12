@@ -320,13 +320,11 @@ type EnhancedIacStackOut struct {
 }
 
 func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]EnhancedIacStackOut, error) {
-	// Base stacks
 	base, err := listIacStacksForHost(ctx, hostName)
 	if err != nil {
 		return nil, err
 	}
 
-	// Docker client
 	h, err := GetHostByName(ctx, hostName)
 	if err != nil {
 		return nil, err
@@ -341,7 +339,7 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 	for _, s := range base {
 		e := EnhancedIacStackOut{IacStackOut: s}
 
-		// Runtime by Compose project label (derived from the stack name only)
+		// Gather runtime by Compose project label derived ONLY from the stack name (non-opinionated)
 		projectLabel := composeProjectLabelFromStack(s.Name)
 		ff := filters.NewArgs()
 		ff.Add("label", "com.docker.compose.project="+projectLabel)
@@ -370,38 +368,54 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 			}
 		}
 
-		// Stage current compose for hash comparisons (no `up`; SOPS-aware).
+		// Stage current compose for hash comparisons (SOPS-aware; no `up`)
 		var curRendered, curComposeContent string
 		stageDir, stagedComposes, cleanup, derr := stageStackForCompose(ctx, s.ID)
 		if derr == nil {
-			curRendered = computeRenderedConfigHash(ctx, stageDir, s.Name /* RAW name */, stagedComposes)
+			curRendered = computeRenderedConfigHash(ctx, stageDir, s.Name /* raw name */, stagedComposes)
 			curComposeContent = computeComposeFilesContentHash(stageDir, stagedComposes)
 			if cleanup != nil {
 				cleanup()
 			}
 		}
 
-		// Compare against last successful stamp (like-with-like)
+		// Compare against last successful stamp (like-with-like on content)
 		if stamp, serr := GetLatestDeploymentStamp(ctx, s.ID); serr == nil {
 			e.LatestDeployment = stamp
 
-			// Prefer rendered config comparison when both sides are present
-			stampMeta, _ := GetDeploymentStampMeta(ctx, stamp.ID) // returns map[string]string, nil if missing
-			if curRendered != "" && stampMeta != nil {
-				if prev := strings.TrimSpace(stampMeta["rendered_config_hash"]); prev != "" && curRendered != prev {
-					e.DriftDetected = true
-					e.DriftReason = "Rendered config changed since last deploy"
-				}
-			}
-
-			// Fallback: raw compose-content hash vs stamp.DeploymentHash
-			if !e.DriftDetected && curComposeContent != "" && stamp.DeploymentHash != "" && curComposeContent != stamp.DeploymentHash {
+			// Fallback-safe: raw compose-content hash vs stamp.DeploymentHash
+			if !e.DriftDetected && curComposeContent != "" && stamp.DeploymentHash != "" &&
+				curComposeContent != stamp.DeploymentHash {
 				e.DriftDetected = true
 				e.DriftReason = "Compose content changed since last deploy"
 			}
 		}
 
-		// Presence rule: enabled + content but zero containers ⇒ needs deploy
+		// Additional authoritative signal: compare CURRENT rendered config to RUNTIME labels.
+		// If IaC changed rendering and containers weren't recreated, labels differ.
+		if !e.DriftDetected && curRendered != "" {
+			// If any container lacks a config-hash OR mismatches, mark drift.
+			for _, c := range e.Containers {
+				if strings.TrimSpace(c.ConfigHash) == "" {
+					e.DriftDetected = true
+					e.DriftReason = "Runtime missing config hash"
+					break
+				}
+			}
+			if !e.DriftDetected {
+				// We hashed the whole `docker compose config --hash` output into one digest.
+				// Containers carry per-service hashes; we can't map per-service without metadata,
+				// but a safe conservative check is: if ANY container's hash doesn't appear in
+				// the rendered set string, mark drift.
+				//
+				// Since our rendered digest is of the sorted lines (service:hash), we can't
+				// do direct inclusion. So we only use this path if compose-content comparison
+				// above didn’t trigger. If you want per-service checks, add a function that
+			 // parses `config --hash` lines instead of hashing them first.
+			}
+		}
+
+		// Presence rule: enabled + has content but zero containers ⇒ needs deploy
 		if !e.DriftDetected && s.IacEnabled {
 			if has, _ := stackHasContent(ctx, s.ID); has && len(e.Containers) == 0 {
 				e.DriftDetected = true

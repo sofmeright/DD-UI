@@ -199,17 +199,32 @@ export default function HostStacksView({
             })
         );
 
+        // Build IaC maps first (RAW stack names from IaC)
+        const iacByStack = new Map<string, IacStack>();
+        for (const s of iacStacks) iacByStack.set(s.name, s);
+
+        // Map <sanitized compose label> -> <raw stack name>
+        // so runtime buckets merge with IaC buckets (no ghost “missing” rows).
+        const labelToRaw = new Map<string, string>();
+        for (const s of iacStacks) {
+          labelToRaw.set(sanitizeLabel(s.name), s.name);
+        }
+
+        // Bucket runtime by RAW stack name when we can map, else by the label itself.
+        // Note: runtime compose_project is already the sanitized label in practice.
+        // We sanitize again defensively before looking it up.
         const rtByStack = new Map<string, ApiContainer[]>();
         for (const c of runtime) {
-          const key = (c.compose_project || c.stack || "(none)").trim() || "(none)";
+          const label = (c.compose_project || c.stack || "(none)").trim() || "(none)";
+          const key =
+            label !== "(none)"
+              ? labelToRaw.get(sanitizeLabel(label)) || label
+              : label;
           if (!rtByStack.has(key)) rtByStack.set(key, []);
           rtByStack.get(key)!.push(c);
         }
 
-        const iacByStack = new Map<string, IacStack>();
-        for (const s of iacStacks) iacByStack.set(s.name, s);
-
-        // config-hash by container name (from enhanced)
+        // config-hash by container name (from enhanced) — keep using this map
         const cfgHashByName = new Map<string, string>();
         for (const [sname, e] of enhancedByName.entries()) {
           for (const c of e.containers || []) {
@@ -217,6 +232,7 @@ export default function HostStacksView({
           }
         }
 
+        // Union of names (now normalized to RAW where possible)
         const names = new Set<string>([...rtByStack.keys(), ...iacByStack.keys()]);
         const merged: MergedStack[] = [];
 

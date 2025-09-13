@@ -9,6 +9,8 @@ import StackDetailView from "@/views/StackDetailView";
 import ImagesView from "@/views/ImagesView";
 import NetworksView from "@/views/NetworksView";
 import VolumesView from "@/views/VolumesView";
+import DashboardView from "@/views/DashboardView";
+import GroupsView from "@/views/GroupsView";
 import { SessionResp, Host, ApiContainer, IacStack } from "@/types";
 import { computeHostMetrics } from "@/utils/metrics";
 
@@ -28,18 +30,31 @@ export default function App() {
   // Determine current page from URL (for LeftNav highlight)
   const getCurrentPage = () => {
     const path = location.pathname;
+    if (path === "/dashboard") return "dashboard";
     if (path === "/hosts") return "hosts";
     if (/^\/hosts\/[^/]+\/stacks/.test(path)) return "stacks";
+    if (path === "/groups") return "groups";
     if (/^\/hosts\/[^/]+\/images/.test(path)) return "images";
     if (/^\/hosts\/[^/]+\/networks/.test(path)) return "networks";
     if (/^\/hosts\/[^/]+\/volumes/.test(path)) return "volumes";
     return "hosts";
   };
 
-  // Current host inferred from URL, fallback to first host if needed
+  // Current host inferred from URL, fallback to localStorage, then first host
   const currentHostFromPath = () => {
     const m = location.pathname.match(/^\/hosts\/([^/]+)/);
     return (m && decodeURIComponent(m[1])) || hosts[0]?.name || "";
+  };
+
+  // Get best host for navigation: URL -> localStorage -> first host
+  const getBestHost = () => {
+    const urlHost = currentHostFromPath();
+    if (urlHost) return urlHost;
+    
+    const stored = localStorage.getItem('ddui_selected_host');
+    if (stored && hosts.some(h => h.name === stored)) return stored;
+    
+    return hosts[0]?.name || "";
   };
 
   useEffect(() => {
@@ -220,24 +235,26 @@ export default function App() {
     <div className="min-h-screen bg-slate-950 flex">
       <LeftNav
         page={getCurrentPage()}
+        onGoDashboard={() => navigate('/dashboard')}
         onGoHosts={() => navigate('/hosts')}
         onGoStacks={() => {
-          const h = currentHostFromPath();
+          const h = getBestHost();
           if (h) navigate(`/hosts/${encodeURIComponent(h)}/stacks`);
           else navigate('/hosts');
         }}
+        onGoGroups={() => navigate('/groups')}
         onGoImages={() => {
-          const h = currentHostFromPath();
+          const h = getBestHost();
           if (h) navigate(`/hosts/${encodeURIComponent(h)}/images`);
           else navigate('/hosts');
         }}
         onGoNetworks={() => {
-          const h = currentHostFromPath();
+          const h = getBestHost();
           if (h) navigate(`/hosts/${encodeURIComponent(h)}/networks`);
           else navigate('/hosts');
         }}
         onGoVolumes={() => {
-          const h = currentHostFromPath();
+          const h = getBestHost();
           if (h) navigate(`/hosts/${encodeURIComponent(h)}/volumes`);
           else navigate('/hosts');
         }}
@@ -247,7 +264,10 @@ export default function App() {
       <div className="flex-1 min-w-0 max-h-screen flex flex-col">
         <main className="flex-1 overflow-y-auto overflow-x-hidden p-3 sm:p-4 lg:p-6">
           <Routes>
-            {/* Only the allowed states */}
+            {/* Dashboard */}
+            <Route path="/dashboard" element={<DashboardView hosts={hosts} />} />
+            
+            {/* Infrastructure routes */}
             <Route path="/hosts" element={
               <HostsView
                 metrics={metrics}
@@ -264,17 +284,22 @@ export default function App() {
             } />
             <Route path="/hosts/:hostName/stacks" element={<HostStacksPage />} />
             <Route path="/hosts/:hostName/stacks/:stackName" element={<StackDetailPage />} />
+            <Route path="/groups" element={<GroupsView hosts={hosts} />} />
+            
+            {/* Resource routes */}
             <Route path="/hosts/:hostName/images" element={<HostImagesPage />} />
             <Route path="/hosts/:hostName/networks" element={<HostNetworksPage />} />
             <Route path="/hosts/:hostName/volumes" element={<HostVolumesPage />} />
-            {/* Catch-all fallback - redirect to /hosts */}
+            
+            {/* Default and catch-all */}
+            <Route path="/" element={<DashboardView hosts={hosts} />} />
             <Route path="*" element={
               <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center">
                 <div className="text-center">
                   <h1 className="text-2xl mb-4 text-white">Page Not Found</h1>
                   <p className="text-slate-300 mb-6">The page you're looking for doesn't exist.</p>
                   <button 
-                    onClick={() => navigate('/hosts')} 
+                    onClick={() => navigate('/dashboard')} 
                     className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors"
                   >
                     Go to Dashboard

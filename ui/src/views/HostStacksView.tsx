@@ -27,6 +27,7 @@ import DriftBadge from "@/components/DriftBadge";
 import ActionBtn from "@/components/ActionBtn";
 import LiveLogsModal from "@/components/LiveLogsModal";
 import ConsoleModal from "@/components/ConsoleModal";
+import SearchBar from "@/components/SearchBar";
 import { ApiContainer, Host, IacService, IacStack, MergedRow, MergedStack } from "@/types";
 import { formatDT, formatPortsLines } from "@/utils/format";
 import { debugLog, warnLog } from "@/utils/logging";
@@ -587,28 +588,21 @@ export default function HostStacksView({
         </div>
       )}
 
-      <div className="flex items-center justify-between gap-4">
-        <div className="flex items-center gap-4">
-          <div className="text-lg font-semibold text-white">Stacks</div>
-          <HostPicker hosts={hosts} activeHost={host.name} setActiveHost={onHostChange} />
-        </div>
-        <div className="flex items-center gap-2">
-          <Button onClick={onSync} className="bg-[#310937] hover:bg-[#2a0830] text-white">
-            <RefreshCw className="h-4 w-4 mr-1" /> Sync
-          </Button>
-          <Button onClick={createStackFlow} variant="outline" className="border-slate-700 text-slate-200">
-            <Eye className="hidden" />
-            New Stack
-          </Button>
-          <div className="relative w-72">
-            <Input
-              value={hostQuery}
-              onChange={(e) => setHostQuery(e.target.value)}
-              placeholder={`Search ${host.name}…`}
-              className="pl-3 bg-slate-900/50 border-slate-800 text-slate-200 placeholder:text-slate-500"
-            />
-          </div>
-        </div>
+      <div className="flex items-center gap-4">
+        <div className="text-lg font-semibold text-white">Stacks</div>
+        <HostPicker hosts={hosts} activeHost={host.name} setActiveHost={onHostChange} />
+        <SearchBar 
+          value={hostQuery}
+          onChange={setHostQuery}
+          placeholder="Search stacks, services, containers..."
+          className="w-96"
+        />
+        <Button onClick={onSync} className="bg-[#310937] hover:bg-[#2a0830] text-white">
+          <RefreshCw className="h-4 w-4 mr-1" /> Sync
+        </Button>
+        <Button onClick={createStackFlow} variant="outline" className="border-slate-700 text-slate-200">
+          New Stack
+        </Button>
       </div>
 
       {loading && (

@@ -10,6 +10,8 @@ export default function LeftNav({
   onGoImages,
   onGoNetworks,
   onGoVolumes,
+  onGoDashboard,
+  onGoGroups,
 }: {
   page: string;
   onGoHosts: () => void;
@@ -17,6 +19,8 @@ export default function LeftNav({
   onGoImages: () => void;
   onGoNetworks: () => void;
   onGoVolumes: () => void;
+  onGoDashboard?: () => void;
+  onGoGroups?: () => void;
 }) {
   const item = (id: string, label: string, onClick: () => void) => (
     <button
@@ -49,12 +53,24 @@ export default function LeftNav({
         </div>
       </div>
 
+      {onGoDashboard && (
+        <>
+          <div className="px-4 py-3 text-xs tracking-wide uppercase text-slate-400">
+            Overview
+          </div>
+          <nav className="px-2 pb-4 space-y-1">
+            {item("dashboard", "Dashboard", onGoDashboard)}
+          </nav>
+        </>
+      )}
+
       <div className="px-4 py-3 text-xs tracking-wide uppercase text-slate-400">
         Infrastructure
       </div>
       <nav className="px-2 pb-4 space-y-1">
         {item("hosts", "Hosts", onGoHosts)}
         {item("stacks", "Stacks", onGoStacks)}
+        {onGoGroups && item("groups", "Groups", onGoGroups)}
       </nav>
 
       <div className="px-4 py-3 text-xs tracking-wide uppercase text-slate-400">

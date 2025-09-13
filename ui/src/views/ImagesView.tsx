@@ -1,7 +1,9 @@
 // ui/src/views/ImagesView.tsx
 import { useEffect, useMemo, useState } from "react";
+import { useParams, useNavigate } from "react-router-dom";
 import HostPicker from "@/components/HostPicker";
 import SortableHeader from "@/components/SortableHeader";
+import SearchBar from "@/components/SearchBar";
 import { Host } from "@/types";
 
 type ImageRow = {
@@ -13,10 +15,40 @@ type ImageRow = {
 };
 
 export default function ImagesView({ hosts }: { hosts: Host[] }) {
-  const [hostName, setHostName] = useState(hosts[0]?.name || "");
+  const { hostName: urlHostName } = useParams<{ hostName: string }>();
+  const navigate = useNavigate();
+  
+  // Get host from URL parameter, fallback to localStorage, then first host
+  const getInitialHost = () => {
+    if (urlHostName) return decodeURIComponent(urlHostName);
+    const stored = localStorage.getItem('ddui_selected_host');
+    if (stored && hosts.some(h => h.name === stored)) return stored;
+    return hosts[0]?.name || "";
+  };
+
+  const [hostName, setHostName] = useState(getInitialHost);
   const [rows, setRows] = useState<ImageRow[]>([]);
   const [loading, setLoading] = useState(false);
   const [sort, setSort] = useState<{ key: keyof ImageRow; direction: 'asc' | 'desc' }>({ key: 'repo', direction: 'asc' });
+  const [searchQuery, setSearchQuery] = useState("");
+
+  // Handle host change - update URL and localStorage
+  const handleHostChange = (newHostName: string) => {
+    setHostName(newHostName);
+    localStorage.setItem('ddui_selected_host', newHostName);
+    navigate(`/hosts/${encodeURIComponent(newHostName)}/images`);
+  };
+
+  // Sync state when URL changes (e.g., from navigation)
+  useEffect(() => {
+    if (urlHostName) {
+      const decodedHost = decodeURIComponent(urlHostName);
+      if (decodedHost !== hostName) {
+        setHostName(decodedHost);
+        localStorage.setItem('ddui_selected_host', decodedHost);
+      }
+    }
+  }, [urlHostName, hostName]);
 
   // selection
   const [selected, setSelected] = useState<string[]>([]); // image IDs
@@ -39,7 +71,19 @@ export default function ImagesView({ hosts }: { hosts: Host[] }) {
   }, [hostName]);
 
   const sortedRows = useMemo(() => {
-    const copy = [...rows];
+    let filtered = rows;
+    
+    // Apply search filter
+    if (searchQuery.trim()) {
+      const query = searchQuery.trim().toLowerCase();
+      filtered = rows.filter(row => {
+        const searchText = [row.repo, row.tag, row.id, row.size].filter(Boolean).join(' ').toLowerCase();
+        return searchText.includes(query);
+      });
+    }
+    
+    // Apply sorting
+    const copy = [...filtered];
     copy.sort((a, b) => {
       const aVal = (a[sort.key] || '') as string;
       const bVal = (b[sort.key] || '') as string;
@@ -47,7 +91,7 @@ export default function ImagesView({ hosts }: { hosts: Host[] }) {
       return sort.direction === 'asc' ? result : -result;
     });
     return copy;
-  }, [rows, sort]);
+  }, [rows, sort, searchQuery]);
 
   const handleSort = (key: keyof ImageRow) => {
     setSort(prev => ({ key, direction: prev.key === key && prev.direction === 'asc' ? 'desc' : 'asc' }));
@@ -107,32 +151,34 @@ export default function ImagesView({ hosts }: { hosts: Host[] }) {
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-4">
-        <div className="flex items-center gap-4">
-          <div className="text-lg font-semibold text-white">Images</div>
-          <HostPicker hosts={hosts} activeHost={hostName} setActiveHost={setHostName} />
-        </div>
-        <div className="flex items-center gap-3">
-          <label className="flex items-center gap-2 text-slate-300 text-sm">
-            <input
-              type="checkbox"
-              className="h-4 w-4"
-              checked={force}
-              onChange={(e) => setForce(e.target.checked)}
-            />
-            Force
-          </label>
-          <button
-            onClick={handleDeleteSelected}
-            disabled={!selected.length || loading}
-            className={`px-3 py-1.5 rounded-lg text-sm ${
-              selected.length ? "bg-rose-600 hover:bg-rose-700 text-white" : "bg-slate-800 text-slate-400 cursor-not-allowed"
-            }`}
-            title={selected.length ? `Delete ${selected.length} selected` : "Select rows to delete"}
-          >
-            Delete selected{selected.length ? ` (${selected.length})` : ""}
-          </button>
-        </div>
+      <div className="flex items-center gap-4">
+        <div className="text-lg font-semibold text-white">Images</div>
+        <HostPicker hosts={hosts} activeHost={hostName} setActiveHost={handleHostChange} />
+        <SearchBar 
+          value={searchQuery}
+          onChange={setSearchQuery}
+          placeholder="Search images..."
+          className="w-96"
+        />
+        <button
+          onClick={handleDeleteSelected}
+          disabled={!selected.length || loading}
+          className={`px-3 py-1.5 rounded-lg text-sm ${
+            selected.length ? "bg-rose-600 hover:bg-rose-700 text-white" : "bg-slate-800 text-slate-400 cursor-not-allowed"
+          }`}
+          title={selected.length ? `Delete ${selected.length} selected` : "Select rows to delete"}
+        >
+          Delete selected{selected.length ? ` (${selected.length})` : ""}
+        </button>
+        <label className="flex items-center gap-2 text-slate-300 text-sm">
+          <input
+            type="checkbox"
+            className="h-4 w-4"
+            checked={force}
+            onChange={(e) => setForce(e.target.checked)}
+          />
+          Force Deletion
+        </label>
       </div>
 
       <div className="overflow-hidden rounded-xl border border-slate-800">

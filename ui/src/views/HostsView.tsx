@@ -2,9 +2,8 @@
 import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
-import { Input } from "@/components/ui/input";
-import MetricCard from "@/components/MetricCard";
-import { Boxes, Layers, AlertTriangle, XCircle, RefreshCw } from "lucide-react";
+import SearchBar from "@/components/SearchBar";
+import { Boxes, Layers, AlertTriangle, XCircle, RefreshCw, Server } from "lucide-react";
 import { Host } from "@/types";
 
 export default function HostsView({
@@ -24,34 +23,47 @@ export default function HostsView({
   const [query, setQuery] = useState("");
 
   return (
-    <div className="space-y-4">
-      <div className="text-lg font-semibold text-white">Hosts</div>
-      <div className="grid md:grid-cols-5 gap-4">
-        <MetricCard title="Hosts" value={metrics.hosts} icon={Boxes} />
-        <MetricCard title="Stacks" value={metrics.stacks} icon={Boxes} />
-        <MetricCard title="Containers" value={metrics.containers} icon={Layers} />
-        <MetricCard title="Drift" value={<span className="text-amber-400">{metrics.drift}</span>} icon={AlertTriangle} />
-        <MetricCard title="Errors" value={<span className="text-rose-400">{metrics.errors}</span>} icon={XCircle} />
-      </div>
-
-      <Card className="bg-slate-900/40 border-slate-800">
-        <CardContent className="py-4">
-          <div className="flex items-center gap-2">
-            <Button onClick={onScanAll} disabled={scanning} className="bg-[#310937] hover:bg-[#2a0830] text-white">
-              <RefreshCw className={`h-4 w-4 mr-1 ${scanning ? "animate-spin" : ""}`} />
-              {scanning ? "Scanning…" : "Sync"}
-            </Button>
-            <div className="relative w-full md:w-96">
-              <Input
-                placeholder="Filter by host, group, address…"
-                className="pl-3 bg-slate-900/50 border-slate-800 text-slate-200 placeholder:text-slate-500"
-                value={query}
-                onChange={(e) => { setQuery(e.target.value); onFilter(e.target.value); }}
-              />
-            </div>
+    <div className="space-y-3">
+      {/* Action bar matching other pages */}
+      <div className="flex items-center gap-4">
+        <div className="text-lg font-semibold text-white">Hosts</div>
+        
+        {/* Small square metric cards matching host picker size */}
+        <div className="flex items-center gap-2">
+          <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
+            <Server className="h-4 w-4 text-slate-400" />
+            <span className="text-sm text-slate-300">{metrics.hosts}</span>
           </div>
-        </CardContent>
-      </Card>
+          <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
+            <Boxes className="h-4 w-4 text-slate-400" />
+            <span className="text-sm text-slate-300">{metrics.stacks}</span>
+          </div>
+          <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
+            <Layers className="h-4 w-4 text-slate-400" />
+            <span className="text-sm text-slate-300">{metrics.containers}</span>
+          </div>
+          <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-amber-400" />
+            <span className="text-sm text-amber-400">{metrics.drift}</span>
+          </div>
+          <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
+            <XCircle className="h-4 w-4 text-rose-400" />
+            <span className="text-sm text-rose-400">{metrics.errors}</span>
+          </div>
+        </div>
+        
+        <SearchBar 
+          value={query}
+          onChange={(value) => { setQuery(value); onFilter(value); }}
+          placeholder="Search hosts, groups, addresses..."
+          className="w-96"
+        />
+        
+        <Button onClick={onScanAll} disabled={scanning} className="bg-[#310937] hover:bg-[#2a0830] text-white">
+          <RefreshCw className={`h-4 w-4 mr-1 ${scanning ? "animate-spin" : ""}`} />
+          {scanning ? "Scanning…" : "Sync"}
+        </Button>
+      </div>
 
       <div className="overflow-hidden rounded-xl border border-slate-800">
         <table className="w-full text-sm">

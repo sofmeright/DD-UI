@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 	"os/exec"
 	"strings"
 )
@@ -72,7 +71,7 @@ type ContainerOpResult struct {
 func StartContainer(ctx context.Context, hostName, containerID string) *ContainerOpResult {
 	err := performContainerAction(ctx, hostName, containerID, "start")
 	if err != nil {
-		log.Printf("start container failed: host=%s container=%s error=%v", hostName, containerID, err)
+		errorLog("start container failed: host=%s container=%s error=%v", hostName, containerID, err)
 		return &ContainerOpResult{
 			Success: false,
 			Error:   err.Error(),
@@ -89,7 +88,7 @@ func StartContainer(ctx context.Context, hostName, containerID string) *Containe
 func StopContainer(ctx context.Context, hostName, containerID string) *ContainerOpResult {
 	err := performContainerAction(ctx, hostName, containerID, "stop")
 	if err != nil {
-		log.Printf("stop container failed: host=%s container=%s error=%v", hostName, containerID, err)
+		errorLog("stop container failed: host=%s container=%s error=%v", hostName, containerID, err)
 		return &ContainerOpResult{
 			Success: false,
 			Error:   err.Error(),
@@ -106,7 +105,7 @@ func StopContainer(ctx context.Context, hostName, containerID string) *Container
 func RestartContainer(ctx context.Context, hostName, containerID string) *ContainerOpResult {
 	err := performContainerAction(ctx, hostName, containerID, "restart")
 	if err != nil {
-		log.Printf("restart container failed: host=%s container=%s error=%v", hostName, containerID, err)
+		errorLog("restart container failed: host=%s container=%s error=%v", hostName, containerID, err)
 		return &ContainerOpResult{
 			Success: false,
 			Error:   err.Error(),

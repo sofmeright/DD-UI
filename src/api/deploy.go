@@ -105,13 +105,13 @@ func deployStack(ctx context.Context, stackID int64) error {
 	}
 	stamp, serr := CreateDeploymentStamp(ctx, stackID, "compose", "", allComposeContent, meta)
 	if serr != nil {
-		errorLog("deploy: failed to create deployment stamp: %v", serr)
+		warnLog("deploy: failed to create deployment stamp: %v", serr)
 		// If stamp creation fails due to unique constraint, try to find the existing one
 		if existingStamp, findErr := CheckDeploymentStampExists(ctx, stackID, allComposeContent); findErr == nil && existingStamp != nil {
-			debugLog("deploy: reusing existing deployment stamp %d", existingStamp.ID)
+			infoLog("deploy: reusing existing deployment stamp %d", existingStamp.ID)
 			stamp = existingStamp
 		} else {
-			debugLog("deploy: could not find existing stamp either: %v", findErr)
+			errorLog("deploy: could not find existing stamp either: %v", findErr)
 			return serr
 		}
 	}
@@ -132,11 +132,15 @@ func deployStack(ctx context.Context, stackID int64) error {
 	// Get the host info to set up proper Docker connection
 	var dockerEnv []string
 	if host, herr := getHostForStack(ctx, stackID); herr == nil {
-		dockerURL, sshCmd := dockerURLFor(host)
-		dockerEnv = append(os.Environ(), "DOCKER_HOST="+dockerURL)
-		if sshCmd != "" {
-			dockerEnv = append(dockerEnv, "DOCKER_SSH_CMD="+sshCmd)
+		dockerURL, _ := dockerURLFor(host)
+		
+		// Set up SSH config for Docker CLI instead of using DOCKER_SSH_CMD
+		if err := setupSSHConfigForDocker(host); err != nil {
+			errorLog("deploy: failed to setup SSH config for Docker CLI: %v", err)
+			return err
 		}
+		
+		dockerEnv = append(os.Environ(), "DOCKER_HOST="+dockerURL)
 		debugLog("deploy: using Docker host %s for stack %d", dockerURL, stackID)
 	} else {
 		errorLog("deploy: failed to get host for stack %d, using default Docker connection: %v", stackID, herr)
@@ -312,14 +316,14 @@ func deployStackWithStream(ctx context.Context, stackID int64, eventChannel chan
 
 	stamp, serr := CreateDeploymentStamp(ctx, stackID, "compose", "", allComposeContent, meta)
 	if serr != nil {
-		errorLog("deploy: failed to create deployment stamp: %v", serr)
+		warnLog("deploy: failed to create deployment stamp: %v", serr)
 		// If stamp creation fails due to unique constraint, try to find the existing one
 		if existingStamp, findErr := CheckDeploymentStampExists(ctx, stackID, allComposeContent); findErr == nil && existingStamp != nil {
-			debugLog("deploy: reusing existing deployment stamp %d", existingStamp.ID)
+			infoLog("deploy: reusing existing deployment stamp %d", existingStamp.ID)
 			stamp = existingStamp
 			sendEvent("info", "Reusing existing deployment stamp", nil)
 		} else {
-			debugLog("deploy: could not find existing stamp either: %v", findErr)
+			errorLog("deploy: could not find existing stamp either: %v", findErr)
 			sendEvent("error", fmt.Sprintf("Failed to create deployment stamp: %v", serr), nil)
 			return serr
 		}
@@ -342,11 +346,16 @@ func deployStackWithStream(ctx context.Context, stackID int64, eventChannel chan
 	// Get the host info to set up proper Docker connection
 	var dockerEnv []string
 	if host, herr := getHostForStack(ctx, stackID); herr == nil {
-		dockerURL, sshCmd := dockerURLFor(host)
-		dockerEnv = append(os.Environ(), "DOCKER_HOST="+dockerURL)
-		if sshCmd != "" {
-			dockerEnv = append(dockerEnv, "DOCKER_SSH_CMD="+sshCmd)
+		dockerURL, _ := dockerURLFor(host)
+		
+		// Set up SSH config for Docker CLI instead of using DOCKER_SSH_CMD
+		if err := setupSSHConfigForDocker(host); err != nil {
+			errorLog("deploy: failed to setup SSH config for Docker CLI: %v", err)
+			sendEvent("error", fmt.Sprintf("Failed to setup SSH config: %v", err), nil)
+			return err
 		}
+		
+		dockerEnv = append(os.Environ(), "DOCKER_HOST="+dockerURL)
 		debugLog("deploy: using Docker host %s for stack %d", dockerURL, stackID)
 		sendEvent("info", fmt.Sprintf("Using Docker host: %s", dockerURL), nil)
 	} else {
@@ -505,5 +514,71 @@ func associateByProjectInspect(ctx context.Context, projectLabel string, stampID
 	if assocErrs > 0 {
 		return fmt.Errorf("associated %d/%d containers (some failed)", len(list)-assocErrs, len(list))
 	}
+	return nil
+}
+
+// setupSSHConfigForDocker creates SSH config for Docker CLI to use proper authentication
+func setupSSHConfigForDocker(host HostRow) error {
+	// Get SSH configuration
+	user := host.Vars["ansible_user"]
+	if user == "" {
+		user = env("SSH_USER", "root")
+	}
+	addr := host.Addr
+	if addr == "" {
+		addr = host.Name
+	}
+	keyFile := env("SSH_KEY_FILE", "")
+	if keyFile == "" {
+		return fmt.Errorf("SSH_KEY_FILE not configured")
+	}
+	
+	// Create ~/.ssh directory if it doesn't exist
+	homeDir := os.Getenv("HOME")
+	if homeDir == "" {
+		homeDir = "/root" // fallback for root user
+	}
+	sshDir := homeDir + "/.ssh"
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		return fmt.Errorf("failed to create SSH directory: %v", err)
+	}
+	
+	// Create SSH config file
+	configPath := sshDir + "/config"
+	
+	// Check if config already has this host
+	configContent := fmt.Sprintf(`Host %s
+    User %s
+    IdentityFile %s
+    StrictHostKeyChecking no
+    ConnectTimeout 30
+    UserKnownHostsFile /dev/null
+
+`, addr, user, keyFile)
+	
+	// Read existing config
+	existingConfig := ""
+	if data, err := os.ReadFile(configPath); err == nil {
+		existingConfig = string(data)
+	}
+	
+	// Check if this host config already exists
+	if strings.Contains(existingConfig, fmt.Sprintf("Host %s", addr)) {
+		debugLog("SSH config for host %s already exists", addr)
+		return nil
+	}
+	
+	// Append new host config
+	file, err := os.OpenFile(configPath, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
+	if err != nil {
+		return fmt.Errorf("failed to open SSH config file: %v", err)
+	}
+	defer file.Close()
+	
+	if _, err := file.WriteString(configContent); err != nil {
+		return fmt.Errorf("failed to write SSH config: %v", err)
+	}
+	
+	debugLog("SSH config added for host %s (%s@%s)", host.Name, user, addr)
 	return nil
 }

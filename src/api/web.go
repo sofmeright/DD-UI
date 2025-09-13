@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"os/exec"
@@ -23,6 +22,7 @@ import (
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
 	"github.com/docker/docker/api/types/volume"
+	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
@@ -71,128 +71,299 @@ func makeRouter() http.Handler {
 		api.Group(func(priv chi.Router) {
 			priv.Use(RequireAuth)
 
-			/* ---------- Global DevOps Apply (Auto DevOps) ---------- */
+			/* ---------- GitOps Automation Configuration (Hierarchical) ---------- */
 
-			// GET current global value (DB override or ENV fallback) + source
-			priv.Get("/devops/apply", func(w http.ResponseWriter, r *http.Request) {
+			// GET global auto-deployment setting (environment fallback)
+			priv.Get("/gitops/global", func(w http.ResponseWriter, r *http.Request) {
 				val, src := getGlobalDevopsApply(r.Context())
 				writeJSON(w, http.StatusOK, map[string]any{
-					"value":  val,
-					"source": src, // "db" or "env"
+					"auto_deploy": val,
+					"source":      src, // "db" or "env"
 				})
 			})
 
-			// PATCH global: { "value": true|false } or { "value": null } to clear to ENV
-			priv.Patch("/devops/apply", func(w http.ResponseWriter, r *http.Request) {
+			// PATCH global: { "auto_deploy": true|false } or { "auto_deploy": null } to clear to ENV
+			priv.Patch("/gitops/global", func(w http.ResponseWriter, r *http.Request) {
 				var body struct {
-					Value *bool `json:"value"`
+					AutoDeploy *bool `json:"auto_deploy"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					http.Error(w, "bad json", http.StatusBadRequest)
 					return
 				}
-				if err := setGlobalDevopsApply(r.Context(), body.Value); err != nil {
+				if err := setGlobalDevopsApply(r.Context(), body.AutoDeploy); err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
 				val, src := getGlobalDevopsApply(r.Context())
-				writeJSON(w, http.StatusOK, map[string]any{"value": val, "source": src, "status": "ok"})
+				writeJSON(w, http.StatusOK, map[string]any{"auto_deploy": val, "source": src, "status": "ok"})
 			})
 
-			/* ---------- Host-level DevOps Apply override ---------- */
-
-			// GET host override + effective (host override if set, else global)
-			priv.Get("/hosts/{name}/devops/apply", func(w http.ResponseWriter, r *http.Request) {
+			// GET host auto-deployment override + effective setting
+			priv.Get("/gitops/hosts/{name}", func(w http.ResponseWriter, r *http.Request) {
 				host := chi.URLParam(r, "name")
-				ov, _ := getHostDevopsOverride(r.Context(), host)
-				glob, _ := getAppSettingBool(r.Context(), "devops_apply")
-				if glob == nil {
+				override, _ := getHostDevopsOverride(r.Context(), host)
+				global, _ := getAppSettingBool(r.Context(), "devops_apply")
+				if global == nil {
 					d := envBool("DDUI_DEVOPS_APPLY", "false")
-					glob = &d
+					global = &d
 				}
-				eff := *glob
-				if ov != nil {
-					eff = *ov
+				effective := *global
+				if override != nil {
+					effective = *override
 				}
 				writeJSON(w, http.StatusOK, map[string]any{
-					"override": ov,   // null means inherit
-					"effective": eff, // bool
+					"override":   override,  // null means inherit from global
+					"effective":  effective, // actual value used
+					"inherits_from": "global",
 				})
 			})
 
-			// PATCH host override: { "value": true|false } or { "value": null } to clear
-			priv.Patch("/hosts/{name}/devops/apply", func(w http.ResponseWriter, r *http.Request) {
+			// PATCH host auto-deployment: { "auto_deploy": true|false|null }
+			priv.Patch("/gitops/hosts/{name}", func(w http.ResponseWriter, r *http.Request) {
 				host := chi.URLParam(r, "name")
 				var body struct {
-					Value *bool `json:"value"`
+					AutoDeploy *bool `json:"auto_deploy"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					http.Error(w, "bad json", http.StatusBadRequest)
 					return
 				}
-				if err := setHostDevopsOverride(r.Context(), host, body.Value); err != nil {
+				if err := setHostDevopsOverride(r.Context(), host, body.AutoDeploy); err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
-				ov, _ := getHostDevopsOverride(r.Context(), host)
-				glob, _ := getAppSettingBool(r.Context(), "devops_apply")
-				if glob == nil {
+				override, _ := getHostDevopsOverride(r.Context(), host)
+				global, _ := getAppSettingBool(r.Context(), "devops_apply")
+				if global == nil {
 					d := envBool("DDUI_DEVOPS_APPLY", "false")
-					glob = &d
+					global = &d
 				}
-				eff := *glob
-				if ov != nil {
-					eff = *ov
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"override": ov, "effective": eff, "status": "ok"})
-			})
-
-			/* ---------- Group-level DevOps Apply override ---------- */
-
-			// GET group override + effective (group override if set, else global)
-			priv.Get("/groups/{name}/devops/apply", func(w http.ResponseWriter, r *http.Request) {
-				group := chi.URLParam(r, "name")
-				ov, _ := getGroupDevopsOverride(r.Context(), group)
-				glob, _ := getAppSettingBool(r.Context(), "devops_apply")
-				if glob == nil {
-					d := envBool("DDUI_DEVOPS_APPLY", "false")
-					glob = &d
-				}
-				eff := *glob
-				if ov != nil {
-					eff = *ov
+				effective := *global
+				if override != nil {
+					effective = *override
 				}
 				writeJSON(w, http.StatusOK, map[string]any{
-					"override": ov,   // null means inherit
-					"effective": eff, // bool
+					"override": override, 
+					"effective": effective, 
+					"inherits_from": "global",
+					"status": "ok",
 				})
 			})
 
-			// PATCH group override: { "value": true|false } or { "value": null } to clear
-			priv.Patch("/groups/{name}/devops/apply", func(w http.ResponseWriter, r *http.Request) {
+			// GET group auto-deployment override + effective setting
+			priv.Get("/gitops/groups/{name}", func(w http.ResponseWriter, r *http.Request) {
+				group := chi.URLParam(r, "name")
+				override, _ := getGroupDevopsOverride(r.Context(), group)
+				global, _ := getAppSettingBool(r.Context(), "devops_apply")
+				if global == nil {
+					d := envBool("DDUI_DEVOPS_APPLY", "false")
+					global = &d
+				}
+				effective := *global
+				if override != nil {
+					effective = *override
+				}
+				writeJSON(w, http.StatusOK, map[string]any{
+					"override":   override,  // null means inherit from global
+					"effective":  effective, // actual value used
+					"inherits_from": "global",
+				})
+			})
+
+			// PATCH group auto-deployment: { "auto_deploy": true|false|null }
+			priv.Patch("/gitops/groups/{name}", func(w http.ResponseWriter, r *http.Request) {
 				group := chi.URLParam(r, "name")
 				var body struct {
-					Value *bool `json:"value"`
+					AutoDeploy *bool `json:"auto_deploy"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					http.Error(w, "bad json", http.StatusBadRequest)
 					return
 				}
-				if err := setGroupDevopsOverride(r.Context(), group, body.Value); err != nil {
+				if err := setGroupDevopsOverride(r.Context(), group, body.AutoDeploy); err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
-				ov, _ := getGroupDevopsOverride(r.Context(), group)
-				glob, _ := getAppSettingBool(r.Context(), "devops_apply")
-				if glob == nil {
+				override, _ := getGroupDevopsOverride(r.Context(), group)
+				global, _ := getAppSettingBool(r.Context(), "devops_apply")
+				if global == nil {
 					d := envBool("DDUI_DEVOPS_APPLY", "false")
-					glob = &d
+					global = &d
 				}
-				eff := *glob
-				if ov != nil {
-					eff = *ov
+				effective := *global
+				if override != nil {
+					effective = *override
 				}
-				writeJSON(w, http.StatusOK, map[string]any{"override": ov, "effective": eff, "status": "ok"})
+				writeJSON(w, http.StatusOK, map[string]any{
+					"override": override, 
+					"effective": effective, 
+					"inherits_from": "global",
+					"status": "ok",
+				})
+			})
+
+			/* Stack-specific GitOps Configuration */
+			// GET /api/gitops/hosts/{name}/stacks/{stackname}
+			priv.Get("/gitops/hosts/{name}/stacks/{stackname}", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				stackName := chi.URLParam(r, "stackname")
+				override, err := getStackDevopsOverride(r.Context(), "host", host, stackName)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusNotFound)
+					return
+				}
+				
+				// Determine effective value via hierarchy
+				hostOverride, _ := getHostDevopsOverride(r.Context(), host)
+				global, _ := getAppSettingBool(r.Context(), "devops_apply")
+				if global == nil {
+					d := envBool("DDUI_DEVOPS_APPLY", "false")
+					global = &d
+				}
+				
+				effective := *global
+				inheritsFrom := "global"
+				if hostOverride != nil {
+					effective = *hostOverride
+					inheritsFrom = "host"
+				}
+				if override != nil {
+					effective = *override
+					inheritsFrom = "stack"
+				}
+				
+				writeJSON(w, http.StatusOK, map[string]any{
+					"override": override, 
+					"effective": effective, 
+					"inherits_from": inheritsFrom,
+					"status": "ok",
+				})
+			})
+
+			// PATCH /api/gitops/hosts/{name}/stacks/{stackname}
+			priv.Patch("/gitops/hosts/{name}/stacks/{stackname}", func(w http.ResponseWriter, r *http.Request) {
+				host := chi.URLParam(r, "name")
+				stackName := chi.URLParam(r, "stackname")
+				var body struct {
+					AutoDeploy *bool `json:"auto_deploy"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				if err := setStackDevopsOverride(r.Context(), "host", host, stackName, body.AutoDeploy); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				
+				// Return updated configuration
+				override, _ := getStackDevopsOverride(r.Context(), "host", host, stackName)
+				hostOverride, _ := getHostDevopsOverride(r.Context(), host)
+				global, _ := getAppSettingBool(r.Context(), "devops_apply")
+				if global == nil {
+					d := envBool("DDUI_DEVOPS_APPLY", "false")
+					global = &d
+				}
+				
+				effective := *global
+				inheritsFrom := "global"
+				if hostOverride != nil {
+					effective = *hostOverride
+					inheritsFrom = "host"
+				}
+				if override != nil {
+					effective = *override
+					inheritsFrom = "stack"
+				}
+				
+				writeJSON(w, http.StatusOK, map[string]any{
+					"override": override, 
+					"effective": effective, 
+					"inherits_from": inheritsFrom,
+					"status": "ok",
+				})
+			})
+
+			// GET /api/gitops/groups/{name}/stacks/{stackname}
+			priv.Get("/gitops/groups/{name}/stacks/{stackname}", func(w http.ResponseWriter, r *http.Request) {
+				group := chi.URLParam(r, "name")
+				stackName := chi.URLParam(r, "stackname")
+				override, err := getStackDevopsOverride(r.Context(), "group", group, stackName)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusNotFound)
+					return
+				}
+				
+				// Determine effective value via hierarchy
+				groupOverride, _ := getGroupDevopsOverride(r.Context(), group)
+				global, _ := getAppSettingBool(r.Context(), "devops_apply")
+				if global == nil {
+					d := envBool("DDUI_DEVOPS_APPLY", "false")
+					global = &d
+				}
+				
+				effective := *global
+				inheritsFrom := "global"
+				if groupOverride != nil {
+					effective = *groupOverride
+					inheritsFrom = "group"
+				}
+				if override != nil {
+					effective = *override
+					inheritsFrom = "stack"
+				}
+				
+				writeJSON(w, http.StatusOK, map[string]any{
+					"override": override, 
+					"effective": effective, 
+					"inherits_from": inheritsFrom,
+					"status": "ok",
+				})
+			})
+
+			// PATCH /api/gitops/groups/{name}/stacks/{stackname}
+			priv.Patch("/gitops/groups/{name}/stacks/{stackname}", func(w http.ResponseWriter, r *http.Request) {
+				group := chi.URLParam(r, "name")
+				stackName := chi.URLParam(r, "stackname")
+				var body struct {
+					AutoDeploy *bool `json:"auto_deploy"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				if err := setStackDevopsOverride(r.Context(), "group", group, stackName, body.AutoDeploy); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				
+				// Return updated configuration
+				override, _ := getStackDevopsOverride(r.Context(), "group", group, stackName)
+				groupOverride, _ := getGroupDevopsOverride(r.Context(), group)
+				global, _ := getAppSettingBool(r.Context(), "devops_apply")
+				if global == nil {
+					d := envBool("DDUI_DEVOPS_APPLY", "false")
+					global = &d
+				}
+				
+				effective := *global
+				inheritsFrom := "global"
+				if groupOverride != nil {
+					effective = *groupOverride
+					inheritsFrom = "group"
+				}
+				if override != nil {
+					effective = *override
+					inheritsFrom = "stack"
+				}
+				
+				writeJSON(w, http.StatusOK, map[string]any{
+					"override": override, 
+					"effective": effective, 
+					"inherits_from": inheritsFrom,
+					"status": "ok",
+				})
 			})
 
 			/* ---------- Runtime / Inventory ---------- */
@@ -430,142 +601,27 @@ func makeRouter() http.Handler {
 					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: "+err.Error()))
 					return
 				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					debugLog("Console: Failed to create Docker client for host %s: %v", host, err)
-					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: "+err.Error()))
-					return
-				}
-				defer cli.Close()
-				debugLog("Console: Docker client created successfully for host %s", host)
 
-				// Choose command: prefer explicit ?cmd, else ?shell, else auto
-				rawCmd := strings.TrimSpace(r.URL.Query().Get("cmd"))
-				shell := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("shell")))
-
-				var candidates [][]string
-				if rawCmd != "" {
-					candidates = [][]string{strings.Fields(rawCmd)}
-				} else {
-					switch shell {
-					case "bash":
-						candidates = [][]string{{"/bin/bash"}, {"/usr/bin/bash"}}
-					case "ash":
-						candidates = [][]string{{"/bin/ash"}}
-					case "dash":
-						candidates = [][]string{{"/bin/dash"}}
-					case "sh":
-						candidates = [][]string{{"/bin/sh"}, {"sh"}}
-					default: // auto
-						candidates = [][]string{
-							{"/bin/bash"}, {"/usr/bin/bash"},
-							{"/bin/ash"},
-							{"/bin/dash"},
-							{"/bin/sh"}, {"sh"},
-						}
-					}
-				}
-
-				type runner struct {
-					id  string
-					att types.HijackedResponse
-				}
-				var chosen *runner
-
-				tryCtx, cancelTry := context.WithTimeout(r.Context(), 6*time.Second)
-				defer cancelTry()
-
-				for _, cmd := range candidates {
-					debugLog("Console: Trying shell command %v on host=%s container=%s", cmd, host, ctr)
-					created, cerr := cli.ContainerExecCreate(tryCtx, ctr, types.ExecConfig{
-						AttachStdin:  true,
-						AttachStdout: true,
-						AttachStderr: true,
-						Tty:          true,
-						Cmd:          cmd,
-						Env:          []string{},
-						WorkingDir:   "",
-					})
-					if cerr != nil || created.ID == "" {
-						debugLog("Console: Shell command %v failed on host=%s: %v", cmd, host, cerr)
-						continue
-					}
-
-					att, aerr := cli.ContainerExecAttach(tryCtx, created.ID, types.ExecStartCheck{Tty: true})
-					if aerr != nil {
-						continue
-					}
-
-					// Inspect quickly: if it already exited, treat as not available.
-					time.Sleep(150 * time.Millisecond) // tiny grace for startup
-					ins, ierr := cli.ContainerExecInspect(tryCtx, created.ID)
-					if ierr == nil && ins.Running {
-						debugLog("Console: Successfully started shell %v on host=%s container=%s", cmd, host, ctr)
-						chosen = &runner{id: created.ID, att: att}
-						break
-					}
-					// Not running (probably ENOENT / 127) — close & try next
-					debugLog("Console: Shell %v not running on host=%s container=%s (exit_code=%d)", cmd, host, ctr, ins.ExitCode)
-					att.Close()
-				}
-
-				if chosen == nil {
-					debugLog("Console: No supported shell found on host=%s container=%s", host, ctr)
-					_ = conn.WriteMessage(websocket.TextMessage, []byte("error: no supported shell found (tried bash, ash, dash, sh)"))
-					return
-				}
-				debugLog("Console: Console session established for host=%s container=%s", host, ctr)
-				defer chosen.att.Close()
-
-				// WS -> container stdin (handles resize control messages)
-				go func(execID string) {
-					for {
-						mt, data, err := conn.ReadMessage()
-						if err != nil {
-							// half-close write if possible
-							type closer interface{ CloseWrite() error }
-							if cw, ok := chosen.att.Conn.(closer); ok {
-								_ = cw.CloseWrite()
-							} else {
-								_ = chosen.att.Conn.Close()
-							}
-							return
-						}
-						if mt != websocket.TextMessage && mt != websocket.BinaryMessage {
-							continue
-						}
-
-						// Optional resize: {"type":"resize","cols":80,"rows":24}
-						if len(data) > 10 && data[0] == '{' {
-							var msg struct {
-								Type string `json:"type"`
-								Cols int    `json:"cols"`
-								Rows int    `json:"rows"`
-							}
-							if err := json.Unmarshal(data, &msg); err == nil && strings.EqualFold(msg.Type, "resize") {
-								_ = cli.ContainerExecResize(context.Background(), execID, container.ResizeOptions{
-									Width:  uint(msg.Cols),
-									Height: uint(msg.Rows),
-								})
-								continue
-							}
-						}
-
-						_, _ = chosen.att.Conn.Write(data)
-					}
-				}(chosen.id)
-
-				// Container stdout/err -> WS (binary)
-				buf := make([]byte, 32*1024)
-				for {
-					n, err := chosen.att.Reader.Read(buf)
-					if n > 0 {
-						_ = conn.WriteMessage(websocket.BinaryMessage, buf[:n])
-					}
+				// Hybrid approach: use local Docker client for local host, SSH exec for remote hosts
+				if localHostAllowed(h) {
+					debugLog("Console: Using local Docker client for host %s (local host optimization)", host)
+					cli, err := dockerClientForHost(h)
 					if err != nil {
+						debugLog("Console: Failed to create Docker client for host %s: %v", host, err)
+						_ = conn.WriteMessage(websocket.TextMessage, []byte("error: "+err.Error()))
 						return
 					}
+					defer cli.Close()
+					debugLog("Console: Docker client created successfully for host %s", host)
+					
+					// Use existing Docker client approach for local host
+					handleLocalConsole(conn, cli, host, ctr, r)
+				} else {
+					debugLog("Console: Using SSH exec for remote host %s", host)
+					// Use direct SSH exec approach for remote hosts
+					handleRemoteConsole(conn, h, host, ctr, r)
 				}
+
 			})
 
 			// Stats (one-shot JSON passthrough)
@@ -1414,9 +1470,9 @@ func makeRouter() http.Handler {
 					defer cancel()
 					out, err := exec.CommandContext(ctx, "sops", args...).CombinedOutput()
 					if err != nil {
-						log.Printf("sops: encrypt failed: %v out=%s", err, string(out))
+						errorLog("sops: encrypt failed: %v out=%s", err, string(out))
 					} else {
-						log.Printf("sops: encrypted %s", full)
+						debugLog("sops: encrypted %s", full)
 						body.Sops = true
 					}
 				}
@@ -2066,4 +2122,329 @@ var wsUpgrader = websocket.Upgrader{
 		}
 		return false
 	},
+}
+
+// handleLocalConsole handles console connections for local hosts using Docker client
+func handleLocalConsole(conn *websocket.Conn, cli *client.Client, host, ctr string, r *http.Request) {
+	// Choose command: prefer explicit ?cmd, else ?shell, else auto
+	rawCmd := strings.TrimSpace(r.URL.Query().Get("cmd"))
+	shell := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("shell")))
+
+	var candidates [][]string
+	if rawCmd != "" {
+		candidates = [][]string{strings.Fields(rawCmd)}
+	} else {
+		switch shell {
+		case "bash":
+			candidates = [][]string{{"/bin/bash"}, {"/usr/bin/bash"}}
+		case "ash":
+			candidates = [][]string{{"/bin/ash"}}
+		case "dash":
+			candidates = [][]string{{"/bin/dash"}}
+		case "sh":
+			candidates = [][]string{{"/bin/sh"}, {"sh"}}
+		default: // auto
+			candidates = [][]string{
+				{"/bin/bash"}, {"/usr/bin/bash"},
+				{"/bin/ash"},
+				{"/bin/dash"},
+				{"/bin/sh"}, {"sh"},
+			}
+		}
+	}
+
+	type runner struct {
+		id  string
+		att types.HijackedResponse
+	}
+	var chosen *runner
+
+	tryCtx, cancelTry := context.WithTimeout(r.Context(), 6*time.Second)
+	defer cancelTry()
+
+	for _, cmd := range candidates {
+		debugLog("Console: Trying shell command %v on host=%s container=%s", cmd, host, ctr)
+		created, cerr := cli.ContainerExecCreate(tryCtx, ctr, types.ExecConfig{
+			AttachStdin:  true,
+			AttachStdout: true,
+			AttachStderr: true,
+			Tty:          true,
+			Cmd:          cmd,
+			Env:          []string{},
+			WorkingDir:   "",
+		})
+		if cerr != nil || created.ID == "" {
+			debugLog("Console: Shell command %v failed on host=%s: %v", cmd, host, cerr)
+			continue
+		}
+
+		att, aerr := cli.ContainerExecAttach(tryCtx, created.ID, types.ExecStartCheck{Tty: true})
+		if aerr != nil {
+			errorLog("Console: Shell attach failed for %v on host=%s container=%s: %v", cmd, host, ctr, aerr)
+			continue
+		}
+
+		// Inspect quickly: if it already exited, treat as not available.
+		time.Sleep(150 * time.Millisecond) // tiny grace for startup
+		ins, ierr := cli.ContainerExecInspect(tryCtx, created.ID)
+		if ierr != nil {
+			errorLog("Console: Shell inspect failed for %v on host=%s container=%s: %v", cmd, host, ctr, ierr)
+			att.Close()
+			continue
+		}
+		if ins.Running {
+			debugLog("Console: Successfully started shell %v on host=%s container=%s", cmd, host, ctr)
+			chosen = &runner{id: created.ID, att: att}
+			break
+		}
+		// Not running (probably ENOENT / 127) — close & try next
+		debugLog("Console: Shell %v exited on host=%s container=%s (exit_code=%d)", cmd, host, ctr, ins.ExitCode)
+		att.Close()
+	}
+
+	if chosen == nil {
+		debugLog("Console: No supported shell found on host=%s container=%s", host, ctr)
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("error: no supported shell found (tried bash, ash, dash, sh)"))
+		return
+	}
+	debugLog("Console: Console session established for host=%s container=%s", host, ctr)
+	defer chosen.att.Close()
+
+	// WS -> container stdin (handles resize control messages)
+	go func(execID string) {
+		for {
+			mt, data, err := conn.ReadMessage()
+			if err != nil {
+				// half-close write if possible
+				type closer interface{ CloseWrite() error }
+				if cw, ok := chosen.att.Conn.(closer); ok {
+					_ = cw.CloseWrite()
+				} else {
+					_ = chosen.att.Conn.Close()
+				}
+				return
+			}
+			if mt != websocket.TextMessage && mt != websocket.BinaryMessage {
+				continue
+			}
+
+			// Optional resize: {"type":"resize","cols":80,"rows":24}
+			if len(data) > 10 && data[0] == '{' {
+				var msg struct {
+					Type string `json:"type"`
+					Cols int    `json:"cols"`
+					Rows int    `json:"rows"`
+				}
+				if err := json.Unmarshal(data, &msg); err == nil && strings.EqualFold(msg.Type, "resize") {
+					_ = cli.ContainerExecResize(context.Background(), execID, container.ResizeOptions{
+						Width:  uint(msg.Cols),
+						Height: uint(msg.Rows),
+					})
+					continue
+				}
+			}
+
+			_, _ = chosen.att.Conn.Write(data)
+		}
+	}(chosen.id)
+
+	// Container stdout/err -> WS (binary)
+	buf := make([]byte, 32*1024)
+	for {
+		n, err := chosen.att.Reader.Read(buf)
+		if n > 0 {
+			_ = conn.WriteMessage(websocket.BinaryMessage, buf[:n])
+		}
+		if err != nil {
+			return
+		}
+	}
+}
+
+// handleRemoteConsole handles console connections for remote hosts using direct SSH exec
+func handleRemoteConsole(conn *websocket.Conn, h HostRow, host, ctr string, r *http.Request) {
+	// Choose command: prefer explicit ?cmd, else ?shell, else auto
+	rawCmd := strings.TrimSpace(r.URL.Query().Get("cmd"))
+	shell := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("shell")))
+
+	var candidates [][]string
+	if rawCmd != "" {
+		candidates = [][]string{strings.Fields(rawCmd)}
+	} else {
+		switch shell {
+		case "bash":
+			candidates = [][]string{{"/bin/bash"}, {"/usr/bin/bash"}}
+		case "ash":
+			candidates = [][]string{{"/bin/ash"}}
+		case "dash":
+			candidates = [][]string{{"/bin/dash"}}
+		case "sh":
+			candidates = [][]string{{"/bin/sh"}, {"sh"}}
+		default: // auto
+			candidates = [][]string{
+				{"/bin/bash"}, {"/usr/bin/bash"},
+				{"/bin/ash"},
+				{"/bin/dash"},
+				{"/bin/sh"}, {"sh"},
+			}
+		}
+	}
+
+	// Get SSH configuration
+	user := h.Vars["ansible_user"]
+	if user == "" {
+		user = env("SSH_USER", "root")
+	}
+	addr := h.Addr
+	if addr == "" {
+		addr = h.Name
+	}
+	keyFile := env("SSH_KEY_FILE", "")
+	if keyFile == "" {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("error: SSH_KEY_FILE not configured"))
+		return
+	}
+
+	// Try to find a working shell
+	var chosenShell []string
+	for _, cmd := range candidates {
+		debugLog("Console: Testing shell %v on remote host=%s container=%s", cmd, host, ctr)
+		
+		// Test if the shell exists in the container via SSH + docker exec
+		testCmd := fmt.Sprintf("docker exec %s %s -c 'echo shell_test' 2>/dev/null", ctr, strings.Join(cmd, " "))
+		sshCmd := []string{
+			"ssh", "-i", keyFile, "-o", "StrictHostKeyChecking=no", 
+			"-o", "ConnectTimeout=10", fmt.Sprintf("%s@%s", user, addr), testCmd,
+		}
+		
+		testCtx, cancel := context.WithTimeout(r.Context(), 5*time.Second)
+		testResult := exec.CommandContext(testCtx, sshCmd[0], sshCmd[1:]...)
+		output, err := testResult.CombinedOutput()
+		cancel()
+		
+		if err == nil && strings.Contains(string(output), "shell_test") {
+			debugLog("Console: Found working shell %v on remote host=%s container=%s", cmd, host, ctr)
+			chosenShell = cmd
+			break
+		}
+		debugLog("Console: Shell %v not available on remote host=%s container=%s: %v", cmd, host, ctr, err)
+	}
+
+	if chosenShell == nil {
+		debugLog("Console: No supported shell found on remote host=%s container=%s", host, ctr)
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("error: no supported shell found (tried bash, ash, dash, sh)"))
+		return
+	}
+
+	// Start the interactive shell via SSH + docker exec
+	dockerExecCmd := fmt.Sprintf("docker exec -it %s %s", ctr, strings.Join(chosenShell, " "))
+	sshCmd := []string{
+		"ssh", "-i", keyFile, "-o", "StrictHostKeyChecking=no",
+		"-t", "-t", // Force TTY allocation
+		fmt.Sprintf("%s@%s", user, addr), dockerExecCmd,
+	}
+
+	debugLog("Console: Starting remote shell via: %v", sshCmd)
+	
+	cmd := exec.CommandContext(r.Context(), sshCmd[0], sshCmd[1:]...)
+	
+	// Create pipes for stdin/stdout/stderr
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("error: failed to create stdin pipe"))
+		return
+	}
+	defer stdin.Close()
+
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("error: failed to create stdout pipe"))
+		return
+	}
+	defer stdout.Close()
+
+	stderr, err := cmd.StderrPipe()
+	if err != nil {
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("error: failed to create stderr pipe"))
+		return
+	}
+	defer stderr.Close()
+
+	// Start the SSH command
+	if err := cmd.Start(); err != nil {
+		errorLog("Console: Failed to start remote shell on host=%s container=%s: %v", host, ctr, err)
+		_ = conn.WriteMessage(websocket.TextMessage, []byte("error: failed to start remote shell"))
+		return
+	}
+	defer func() {
+		if cmd.Process != nil {
+			cmd.Process.Kill()
+		}
+		cmd.Wait()
+	}()
+
+	debugLog("Console: Remote console session established for host=%s container=%s", host, ctr)
+
+	// WebSocket -> SSH stdin
+	go func() {
+		defer stdin.Close()
+		for {
+			mt, data, err := conn.ReadMessage()
+			if err != nil {
+				return
+			}
+			if mt != websocket.TextMessage && mt != websocket.BinaryMessage {
+				continue
+			}
+
+			// Handle resize messages (note: SSH doesn't support resize the same way)
+			if len(data) > 10 && data[0] == '{' {
+				var msg struct {
+					Type string `json:"type"`
+					Cols int    `json:"cols"`
+					Rows int    `json:"rows"`
+				}
+				if err := json.Unmarshal(data, &msg); err == nil && strings.EqualFold(msg.Type, "resize") {
+					// For SSH, we can't easily resize the remote TTY, so we'll skip this
+					continue
+				}
+			}
+
+			_, err = stdin.Write(data)
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// SSH stdout -> WebSocket
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := stdout.Read(buf)
+			if n > 0 {
+				_ = conn.WriteMessage(websocket.BinaryMessage, buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// SSH stderr -> WebSocket
+	go func() {
+		buf := make([]byte, 32*1024)
+		for {
+			n, err := stderr.Read(buf)
+			if n > 0 {
+				_ = conn.WriteMessage(websocket.BinaryMessage, buf[:n])
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+
+	// Wait for the SSH command to finish
+	cmd.Wait()
 }

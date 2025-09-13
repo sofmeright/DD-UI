@@ -4,7 +4,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 
 	"github.com/docker/docker/api/types/container"
 )
@@ -78,6 +77,6 @@ func oneShotStats(ctx context.Context, hostName, ctr string) (string, error) {
 			break
 		}
 	}
-	log.Printf("stats: %s len=%d", ctr, len(buf))
+	debugLog("stats: %s len=%d", ctr, len(buf))
 	return string(buf), nil
 }

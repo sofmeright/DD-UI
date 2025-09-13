@@ -58,7 +58,10 @@
 ### Planned / Known Issues
 
 - Testing / validating multi host docker features.
+- Urls in the navbar and forward and backwards browser navigation.
+- Bugs regarding drift and detection and processing of IAC when parts are encrypted or have environment variables the envs arent processed so it results in a mismatch where we cant tell the state would be the same.
 - Perhaps a local admin user.
+- Urls in the navbar and browser navigation; forward/back, by url.
 - Bug when a file is open outside DDUI it can create an empty temp file next to the file after saving.
 - Make the GUIs more responsive especially when things are changed by DDUI itself.
 - Cache names (and prior tags) for images in the DB for the case when images become orphaned / stranded and they might show as unnamed untagged.
@@ -534,7 +537,6 @@ To encrypt, SOPS needs one or more **AGE recipients** (public keys). You have tw
 | `DDUI_BUILDS_DIR`     | —       | Directory for build outputs and artifacts (e.g., generated bundles/manifests).                   |
 | `DDUI_INVENTORY_PATH` | —       | Path to the hosts inventory file (YAML/JSON) defining remote Docker targets.                     |
 | `DDUI_LOCAL_HOST`     | `""`    | Optional override for the local host name/label; leave empty to use the tool’s implicit/default. |
-| `DDUI_LOG_LEVEL`      | `info`  | Determines the verbosity of logging with available levels: info(1) → warn(2) → error(3) → fatal(4) |
 | `DDUI_BIND`           | —       | Server bind address, e.g. `:8080` or `0.0.0.0:8080`.                                             |
 | `DDUI_UI_ORIGIN`                             | empty                   | Additional allowed CORS origin for the dev UI (`http://localhost:5173` is allowed by default) |
 | `DDUI_UI_DIR`                           | `/home/ddui/ui/dist`    | Where built SPA is served from                                                              |

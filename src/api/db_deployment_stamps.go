@@ -25,7 +25,19 @@ type DeploymentStamp struct {
 
 // CreateDeploymentStamp keeps the original API (hash from config bytes).
 func CreateDeploymentStamp(ctx context.Context, stackID int64, method, user string, config []byte, envVars map[string]string) (*DeploymentStamp, error) {
-	deploymentHash := generateDeploymentHash(config)
+	// Get stack scope information to include in hash
+	var scopeKind, scopeName, stackName string
+	err := db.QueryRow(ctx, `
+		SELECT scope_kind, scope_name, stack_name 
+		FROM iac_stacks 
+		WHERE id = $1
+	`, stackID).Scan(&scopeKind, &scopeName, &stackName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get stack scope: %v", err)
+	}
+	
+	// Generate hash including scope context
+	deploymentHash := generateDeploymentHashWithScope(config, scopeKind, scopeName, stackName)
 
 	envHash := ""
 	if len(envVars) > 0 {
@@ -33,7 +45,7 @@ func CreateDeploymentStamp(ctx context.Context, stackID int64, method, user stri
 	}
 
 	var stamp DeploymentStamp
-	err := db.QueryRow(ctx, `
+	err = db.QueryRow(ctx, `
 		INSERT INTO deployment_stamps 
 			(host_id, stack_id, deployment_hash, deployment_method, deployment_user, deployment_env_hash, deployment_status)
 		SELECT h.id, s.id, $2, $3, $4, $5, 'pending'
@@ -79,10 +91,22 @@ func CreateDeploymentStampWithHash(ctx context.Context, stackID int64, method, u
 
 // CheckDeploymentStampExists checks if a deployment stamp already exists for the given config
 func CheckDeploymentStampExists(ctx context.Context, stackID int64, config []byte) (*DeploymentStamp, error) {
-	deploymentHash := generateDeploymentHash(config)
+	// Get stack scope information to include in hash
+	var scopeKind, scopeName, stackName string
+	err := db.QueryRow(ctx, `
+		SELECT scope_kind, scope_name, stack_name 
+		FROM iac_stacks 
+		WHERE id = $1
+	`, stackID).Scan(&scopeKind, &scopeName, &stackName)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get stack scope: %v", err)
+	}
+	
+	// Generate hash including scope context
+	deploymentHash := generateDeploymentHashWithScope(config, scopeKind, scopeName, stackName)
 	
 	var stamp DeploymentStamp
-	err := db.QueryRow(ctx, `
+	err = db.QueryRow(ctx, `
 		SELECT id, stack_id, deployment_hash, deployment_timestamp, deployment_method, 
 		       COALESCE(deployment_user, ''), COALESCE(deployment_env_hash, ''), deployment_status, 
 		       created_at, updated_at
@@ -190,6 +214,25 @@ func GetContainerDeploymentInfo(ctx context.Context, containerID string) (*Deplo
 func generateDeploymentHash(config []byte) string {
 	sum := sha256.Sum256(config)
 	return hex.EncodeToString(sum[:])
+}
+
+// generateDeploymentHashWithScope creates a unique hash including the stack's scope context
+// This ensures the same compose file deployed to different hosts/groups creates different stamps
+func generateDeploymentHashWithScope(config []byte, scopeKind, scopeName, stackName string) string {
+	h := sha256.New()
+	
+	// Include scope information in hash
+	h.Write([]byte(scopeKind))
+	h.Write([]byte(":"))
+	h.Write([]byte(scopeName))
+	h.Write([]byte(":"))
+	h.Write([]byte(stackName))
+	h.Write([]byte(":"))
+	
+	// Include the actual config content
+	h.Write(config)
+	
+	return hex.EncodeToString(h.Sum(nil))
 }
 
 func generateEnvHash(envVars map[string]string) string {

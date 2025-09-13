@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
-	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -390,7 +389,7 @@ func stageStackForCompose(ctx context.Context, stackID int64) (stageStackDir str
 				if filepath.IsAbs(ref) {
 					// Can't safely redirect absolute paths without editing compose; log and skip.
 					// The original absolute path will be used by docker compose.
-					log.Printf("deploy: warning: absolute env_file path %q in %s cannot be staged transparently", ref, srcCompose)
+					warnLog("deploy: absolute env_file path %q in %s cannot be staged transparently", ref, srcCompose)
 					continue
 				}
 				origEnv := filepath.Join(origBase, ref)

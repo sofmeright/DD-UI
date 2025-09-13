@@ -4,6 +4,7 @@ package main
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -421,4 +422,66 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 		out = append(out, e)
 	}
 	return out, nil
+}
+
+/* ---------- Stack-specific GitOps Configuration ---------- */
+
+// getStackDevopsOverride gets the GitOps auto-deployment setting for a specific stack
+func getStackDevopsOverride(ctx context.Context, scopeKind, scopeName, stackName string) (*bool, error) {
+	var autoDeploy *bool
+	var result sql.NullString
+	err := db.QueryRow(ctx, `
+		SELECT auto_devops_override 
+		FROM iac_stacks 
+		WHERE scope_kind=$1 AND scope_name=$2 AND stack_name=$3
+	`, scopeKind, scopeName, stackName).Scan(&result)
+	
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("stack not found: %s/%s/%s", scopeKind, scopeName, stackName)
+	}
+	if err != nil {
+		return nil, err
+	}
+	
+	if result.Valid {
+		if result.String == "true" {
+			val := true
+			autoDeploy = &val
+		} else if result.String == "false" {
+			val := false
+			autoDeploy = &val
+		}
+		// null/empty string means no override
+	}
+	
+	return autoDeploy, nil
+}
+
+// setStackDevopsOverride sets the GitOps auto-deployment setting for a specific stack
+func setStackDevopsOverride(ctx context.Context, scopeKind, scopeName, stackName string, autoDeploy *bool) error {
+	var updateField interface{}
+	if autoDeploy == nil {
+		updateField = nil
+	} else if *autoDeploy {
+		updateField = "true"
+	} else {
+		updateField = "false"
+	}
+	
+	result, err := db.Exec(ctx, `
+		UPDATE iac_stacks 
+		SET auto_devops_override = $4
+		WHERE scope_kind=$1 AND scope_name=$2 AND stack_name=$3
+	`, scopeKind, scopeName, stackName, updateField)
+	
+	if err != nil {
+		return err
+	}
+	
+	rowsAffected := result.RowsAffected()
+	if rowsAffected == 0 {
+		return fmt.Errorf("stack not found: %s/%s/%s", scopeKind, scopeName, stackName)
+	}
+	
+	return nil
 }

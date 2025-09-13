@@ -111,6 +111,12 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 		envFiles := listEnvFiles(p)
 		sopsStatus := summarizeSops(envFiles)
 
+		// Check if this directory actually has any IaC content before creating a stack record
+		if !directoryHasIacContent(p, composeFile, envFiles) {
+			debugLog("iac: skipping empty directory %s/%s (no IaC content found)", scopeName, stackName)
+			return fs.SkipDir
+		}
+
 		stackID, err := upsertIacStack(ctx, repoID, scopeKind, scopeName, stackName,
 			filepath.ToSlash(filepath.Join(dirname, scopeName, stackName)),
 			composeFile, deployKind, "", sopsStatus, true)
@@ -465,4 +471,25 @@ func splitVolString(s string) (src, dst, mode string) { /* unchanged */
 		return parts[0], parts[1], ""
 	}
 	return "", s, ""
+}
+
+// directoryHasIacContent checks if a directory contains actual IaC files
+func directoryHasIacContent(dir, composeFile string, envFiles []envFileMeta) bool {
+	// Has compose file
+	if composeFile != "" {
+		return true
+	}
+	
+	// Has environment files
+	if len(envFiles) > 0 {
+		return true
+	}
+	
+	// Has deployment scripts
+	if existsAny(dir, []string{"deploy.sh", "pre.sh", "post.sh"}) {
+		return true
+	}
+	
+	// Directory is empty or contains no IaC-relevant files
+	return false
 }

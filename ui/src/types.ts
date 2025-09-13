@@ -113,6 +113,7 @@ export type MergedStack = {
     name: string;
     drift: "in_sync" | "drift" | "unknown";
     iacEnabled: boolean;
+    autoDevOps?: boolean;  // Separate property for Auto DevOps toggle (effective_auto_devops from API)
     pullPolicy?: string;
     sops?: boolean;
     deployKind: string;

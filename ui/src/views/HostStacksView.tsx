@@ -11,16 +11,18 @@ import {
   ChevronRight,
   FileText,
   Activity,
-  Bug,
+  Search,
   Pause,
   Play,
   PlayCircle,
+  Square,
   RefreshCw,
   RotateCw,
   Terminal,
   Trash2,
   ZapOff,
   Eye,
+  Loader2,
 } from "lucide-react";
 import StatePill from "@/components/StatePill";
 import DriftBadge from "@/components/DriftBadge";
@@ -73,6 +75,7 @@ export default function HostStacksView({
   const [err, setErr] = useState<string | null>(null);
   const [stacks, setStacks] = useState<MergedStack[]>([]);
   const [hostQuery, setHostQuery] = useState("");
+  const [deletingStacks, setDeletingStacks] = useState<Set<number>>(new Set());
 
   // Live logs & console wiring
   const [streamLogs, setStreamLogs] = useState<{ ctr: string } | null>(null);
@@ -407,7 +410,8 @@ export default function HostStacksView({
         const mergedRow: MergedStack = {
           name: sname,
           drift: stackDrift,
-          iacEnabled: effectiveAuto,
+          iacEnabled: hasIac ? (is as any)?.iac_enabled || false : false,  // Keep original iacEnabled
+          autoDevOps: effectiveAuto,  // Separate Auto DevOps property
           pullPolicy: hasIac ? is?.pull_policy : undefined,
           sops: hasIac ? is?.sops_status === "all" : false,
           deployKind: hasIac ? is?.deploy_kind || "compose" : sname === "(none)" ? "unmanaged" : "unmanaged",
@@ -502,11 +506,11 @@ export default function HostStacksView({
       }
       return;
     }
-    setStacks((prev) => prev.map((row, i) => (i === sIndex ? { ...row, iacEnabled: enabled } : row)));
+    setStacks((prev) => prev.map((row, i) => (i === sIndex ? { ...row, autoDevOps: enabled } : row)));
     setAutoDevOps(s.name, enabled).catch((err) => {
       alert(`Failed to update Auto DevOps: ${err?.message || err}`);
       setStacks((prev) =>
-        prev.map((row, i) => (i === sIndex ? { ...row, iacEnabled: !enabled } : row))
+        prev.map((row, i) => (i === sIndex ? { ...row, autoDevOps: !enabled } : row))
       );
     });
   }
@@ -516,11 +520,12 @@ export default function HostStacksView({
     if (!s.iacId) return;
     if (!confirm(`Delete IaC for stack "${s.name}"? This removes IaC files/metadata but not runtime containers.`))
       return;
-    const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(s.name)}`, { method: "DELETE", credentials: "include" });
-    if (!r.ok) {
-      alert(`Failed to delete: ${r.status} ${r.statusText}`);
-      return;
-    }
+
+    // Add to deleting set to show loading state
+    setDeletingStacks(prev => new Set(prev).add(index));
+    
+    // Optimistically update UI immediately
+    const originalStack = { ...s };
     setStacks((prev) =>
       prev.map((row, i) =>
         i === index
@@ -529,14 +534,49 @@ export default function HostStacksView({
               iacId: undefined,
               hasIac: false,
               iacEnabled: false,
+              autoDevOps: false,  // Clear autoDevOps when deleting stack
               pullPolicy: undefined,
               sops: false,
-              drift: "unknown",
+              drift: "unknown" as const,
               hasContent: false,
             }
           : row
       )
     );
+
+    try {
+      const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(s.name)}`, { 
+        method: "DELETE", 
+        credentials: "include" 
+      });
+      
+      if (!r.ok) {
+        // Revert optimistic update on failure
+        setStacks((prev) =>
+          prev.map((row, i) => i === index ? originalStack : row)
+        );
+        
+        // Show error notification (you might want to replace with a toast system)
+        const errorMsg = r.status === 404 ? "Stack not found" : `Failed to delete: ${r.status} ${r.statusText}`;
+        console.error("Stack deletion failed:", errorMsg);
+        alert(errorMsg);
+      }
+    } catch (error) {
+      // Revert optimistic update on network error
+      setStacks((prev) =>
+        prev.map((row, i) => i === index ? originalStack : row)
+      );
+      
+      console.error("Network error during stack deletion:", error);
+      alert("Network error: Failed to delete stack. Please check your connection and try again.");
+    } finally {
+      // Remove from deleting set
+      setDeletingStacks(prev => {
+        const next = new Set(prev);
+        next.delete(index);
+        return next;
+      });
+    }
   }
 
   useEffect(() => {
@@ -657,13 +697,24 @@ export default function HostStacksView({
               </label>
               <Switch
                 id={`auto-${idx}`}
-                checked={!!s.iacEnabled}
+                checked={!!s.autoDevOps}
                 onCheckedChange={(v) => handleToggleAuto(idx, !!v)}
                 disabled={!s.iacId || !s.hasContent}
               />
               {s.iacId && (
-                <Button size="icon" variant="ghost" title="Delete IaC for this stack" onClick={() => deleteStackAt(idx)}>
-                  <Trash2 className="h-4 w-4 text-rose-300" />
+                <Button 
+                  size="icon" 
+                  variant="ghost" 
+                  title="Delete IaC for this stack" 
+                  onClick={() => deleteStackAt(idx)}
+                  disabled={deletingStacks.has(idx)}
+                  className={deletingStacks.has(idx) ? "opacity-50" : ""}
+                >
+                  {deletingStacks.has(idx) ? (
+                    <Loader2 className="h-4 w-4 text-rose-300 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4 text-rose-300" />
+                  )}
                 </Button>
               )}
             </div>
@@ -723,40 +774,54 @@ export default function HostStacksView({
                               {r.state === "missing" ? (
                                 // For missing services, only show inspect action
                                 <>
-                                  <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name)} />
+                                  <ActionBtn title="Inspect" icon={Search} onClick={() => onOpenStack(s.name)} />
                                   <span className="text-slate-500 text-xs ml-2">Service not running</span>
                                 </>
                               ) : (
-                                // Normal container actions for running/stopped containers
+                                // Container actions organized into logical groups
                                 <>
+                                  {/* Group 1: Container Lifecycle (stop/start, restart, pause/resume) */}
                                   {!isRunning && !isPaused && (
-                                    <ActionBtn title="Start" icon={Play} onClick={() => doCtrAction(r.name, "start")} />
+                                    <ActionBtn title="Start" icon={Play} color="green" onClick={() => doCtrAction(r.name, "start")} />
                                   )}
                                   {isRunning && (
-                                    <ActionBtn title="Stop" icon={Pause} onClick={() => doCtrAction(r.name, "stop")} />
+                                    <ActionBtn title="Stop" icon={Square} color="yellow" onClick={() => doCtrAction(r.name, "stop")} />
                                   )}
                                   {(isRunning || isPaused) && (
                                     <ActionBtn
                                       title="Restart"
                                       icon={RotateCw}
+                                      color="blue"
                                       onClick={() => doCtrAction(r.name, "restart")}
                                     />
                                   )}
                                   {isRunning && !isPaused && (
-                                    <ActionBtn title="Pause" icon={Pause} onClick={() => doCtrAction(r.name, "pause")} />
+                                    <ActionBtn title="Pause" icon={Pause} color="yellow" onClick={() => doCtrAction(r.name, "pause")} />
                                   )}
                                   {isPaused && (
                                     <ActionBtn
                                       title="Resume"
                                       icon={PlayCircle}
+                                      color="green"
                                       onClick={() => doCtrAction(r.name, "unpause")}
                                     />
                                   )}
 
+                                  
+                                  {/* Group 2: Destructive Actions (kill, remove) */}
+                                  <ActionBtn title="Kill" icon={ZapOff} color="red" onClick={() => doCtrAction(r.name, "kill")} />
+                                  <ActionBtn title="Remove" icon={Trash2} color="red" onClick={() => doCtrAction(r.name, "remove")} />
+
                                   <span className="mx-1 h-4 w-px bg-slate-700/60" />
 
-                                  <ActionBtn title="Live logs" icon={FileText} onClick={() => openLiveLogs(r.name)} />
-                                  <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name)} />
+                                  {/* Group 3: Information/Monitoring (logs, console, stats, inspect) */}
+                                  <ActionBtn title="Logs" icon={FileText} onClick={() => openLiveLogs(r.name)} />
+                                  <ActionBtn
+                                    title="Console"
+                                    icon={Terminal}
+                                    onClick={() => setConsoleTarget({ ctr: r.name })}
+                                    disabled={!isRunning}
+                                  />
                                   <ActionBtn
                                     title="Stats"
                                     icon={Activity}
@@ -773,17 +838,7 @@ export default function HostStacksView({
                                       }
                                     }}
                                   />
-
-                                  <span className="mx-1 h-4 w-px bg-slate-700/60" />
-
-                                  <ActionBtn title="Kill" icon={ZapOff} onClick={() => doCtrAction(r.name, "kill")} />
-                                  <ActionBtn title="Remove" icon={Trash2} onClick={() => doCtrAction(r.name, "remove")} />
-                                  <ActionBtn
-                                    title="Console"
-                                    icon={Terminal}
-                                    onClick={() => setConsoleTarget({ ctr: r.name })}
-                                    disabled={!isRunning}
-                                  />
+                                  <ActionBtn title="Inspect" icon={Search} onClick={() => onOpenStack(s.name)} />
                                 </>
                               )}
                             </div>

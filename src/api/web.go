@@ -1154,7 +1154,8 @@ func makeRouter() http.Handler {
 
 				var body struct {
 					IacEnabled *bool `json:"iac_enabled"`
-					AutoDevOps *bool `json:"auto_deploy"`
+					AutoDevOps *bool `json:"auto_devops"`
+					ClearAutoDevOps *bool `json:"clear_auto_devops,omitempty"`  // To clear the override (set NULL)
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					http.Error(w, "invalid JSON", http.StatusBadRequest)
@@ -1168,13 +1169,19 @@ func makeRouter() http.Handler {
 					}
 				}
 
-				if body.AutoDevOps == nil {
-					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_apply_override=NULL WHERE id=$1`, id); err != nil {
+				if body.ClearAutoDevOps != nil && *body.ClearAutoDevOps {
+					// Clear the override (set to NULL to inherit from parent)
+					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_devops_override=NULL WHERE id=$1`, id); err != nil {
 						http.Error(w, err.Error(), http.StatusInternalServerError)
 						return
 					}
-				} else {
-					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_apply_override=$1 WHERE id=$2`, *body.AutoDevOps, id); err != nil {
+				} else if body.AutoDevOps != nil {
+					// Convert bool to string for auto_devops_override column
+					overrideValue := "disable"
+					if *body.AutoDevOps {
+						overrideValue = "enable"
+					}
+					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_devops_override=$1 WHERE id=$2`, overrideValue, id); err != nil {
 						http.Error(w, err.Error(), http.StatusInternalServerError)
 						return
 					}
@@ -1265,6 +1272,7 @@ func makeRouter() http.Handler {
 
 				var body struct {
 					AutoDevops *bool   `json:"auto_devops,omitempty"`
+					ClearAutoDevOps *bool `json:"clear_auto_devops,omitempty"`
 					Schedule   *string `json:"schedule,omitempty"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -1272,8 +1280,19 @@ func makeRouter() http.Handler {
 					return
 				}
 
-				if body.AutoDevops != nil {
-					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_devops=$1 WHERE id=$2`, *body.AutoDevops, id); err != nil {
+				if body.ClearAutoDevOps != nil && *body.ClearAutoDevOps {
+					// Clear the override (set to NULL to inherit from parent)
+					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_devops_override=NULL WHERE id=$1`, id); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+				} else if body.AutoDevops != nil {
+					// Convert bool to string for auto_devops_override column
+					overrideValue := "disable"
+					if *body.AutoDevops {
+						overrideValue = "enable"
+					}
+					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_devops_override=$1 WHERE id=$2`, overrideValue, id); err != nil {
 						http.Error(w, err.Error(), http.StatusInternalServerError)
 						return
 					}
@@ -1513,6 +1532,15 @@ func makeRouter() http.Handler {
 				}
 				_ = os.Remove(full) // best effort
 				_ = deleteIacFileRow(r.Context(), id, rel)
+				
+				// Clean up empty directories and remove empty stack if no content remains
+				if err := cleanupEmptyDirs(full, root); err != nil {
+					debugLog("cleanupEmptyDirs failed for %s: %v", full, err)
+				}
+				if err := cleanupEmptyStackAfterFileDeletion(r.Context(), id, root); err != nil {
+					debugLog("cleanupEmptyStackAfterFileDeletion failed for stack id=%d: %v", id, err)
+				}
+				
 				writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
 			})
 
@@ -1716,6 +1744,15 @@ func makeRouter() http.Handler {
 				}
 				_ = os.Remove(full) // best effort
 				_ = deleteIacFileRow(r.Context(), id, rel)
+				
+				// Clean up empty directories and remove empty stack if no content remains
+				if err := cleanupEmptyDirs(full, root); err != nil {
+					debugLog("cleanupEmptyDirs failed for %s: %v", full, err)
+				}
+				if err := cleanupEmptyStackAfterFileDeletion(r.Context(), id, root); err != nil {
+					debugLog("cleanupEmptyStackAfterFileDeletion failed for stack id=%d: %v", id, err)
+				}
+				
 				writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
 			})
 
@@ -3120,6 +3157,15 @@ func makeRouter() http.Handler {
 				}
 				_ = os.Remove(full) // best effort
 				_ = deleteIacFileRow(r.Context(), id, rel)
+				
+				// Clean up empty directories and remove empty stack if no content remains
+				if err := cleanupEmptyDirs(full, root); err != nil {
+					debugLog("cleanupEmptyDirs failed for %s: %v", full, err)
+				}
+				if err := cleanupEmptyStackAfterFileDeletion(r.Context(), id, root); err != nil {
+					debugLog("cleanupEmptyStackAfterFileDeletion failed for stack id=%d: %v", id, err)
+				}
+				
 				writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
 			})
 
@@ -4060,4 +4106,62 @@ func handleRemoteConsole(conn *websocket.Conn, h HostRow, host, ctr string, r *h
 
 	// Wait for the SSH command to finish
 	cmd.Wait()
+}
+
+// cleanupEmptyDirs removes empty directories recursively up to but not including root
+func cleanupEmptyDirs(path, root string) error {
+	if path == root || path == "" || path == "/" {
+		return nil
+	}
+	
+	dir := filepath.Dir(path)
+	if dir == path || dir == root {
+		return nil
+	}
+	
+	// Check if directory is empty
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil // Directory might not exist, ignore
+	}
+	
+	if len(entries) == 0 {
+		debugLog("cleanupEmptyDirs: removing empty dir %s", dir)
+		if err := os.Remove(dir); err != nil {
+			return err
+		}
+		// Recursively check parent directories
+		return cleanupEmptyDirs(dir, root)
+	}
+	
+	return nil
+}
+
+// cleanupEmptyStackAfterFileDeletion removes a stack from database if it has no content after file deletion
+func cleanupEmptyStackAfterFileDeletion(ctx context.Context, stackID int64, root string) error {
+	hasContent, err := stackHasContent(ctx, stackID)
+	if err != nil {
+		return err
+	}
+	
+	if !hasContent {
+		debugLog("cleanupEmptyStackAfterFileDeletion: removing empty stack id=%d", stackID)
+		// Get stack path for directory cleanup
+		var relPath string
+		_ = db.QueryRow(ctx, `SELECT rel_path FROM iac_stacks WHERE id=$1`, stackID).Scan(&relPath)
+		
+		// Delete the stack from database
+		_, err := db.Exec(ctx, `DELETE FROM iac_stacks WHERE id=$1`, stackID)
+		if err != nil {
+			return err
+		}
+		
+		// Clean up empty directories
+		if relPath != "" {
+			stackDir := filepath.Join(root, relPath)
+			return cleanupEmptyDirs(stackDir, root)
+		}
+	}
+	
+	return nil
 }

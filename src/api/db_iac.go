@@ -333,6 +333,7 @@ type EnhancedIacStackOut struct {
 	Containers        []ContainerBrief  `json:"containers"`
 	RenderedServices  []RenderedService `json:"rendered_services,omitempty"`
 	RenderedConfigSha string            `json:"rendered_config_hash,omitempty"`
+	EffectiveAutoDevops bool            `json:"effective_auto_devops"`
 }
 
 func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]EnhancedIacStackOut, error) {
@@ -427,6 +428,9 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 		} else {
 			debugLog("Stack %s staging failed: %v", s.Name, derr)
 		}
+
+		// Calculate effective auto devops for this stack
+		e.EffectiveAutoDevops, _ = shouldAutoApply(ctx, s.ID)
 
 		out = append(out, e)
 	}

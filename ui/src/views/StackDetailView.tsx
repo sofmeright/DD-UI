@@ -529,15 +529,20 @@ export default function StackDetailView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host.name, stackName]);
 
-  // Load EFFECTIVE Auto DevOps using new hierarchical endpoint
+  // Load EFFECTIVE Auto DevOps using enhanced endpoint (same as Host Stacks view)
   useEffect(() => {
     let cancel = false;
     (async () => {
       try {
-        const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}`, { credentials: "include" });
+        const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/enhanced`, { credentials: "include" });
         if (!r.ok) { setAutoDevOps(false); return; }
         const j = await r.json();
-        if (!cancel) setAutoDevOps(!!j?.stack?.effective_auto_devops);
+        
+        // Find our specific stack in the enhanced response (same logic as Host Stacks view)
+        const stacks = j?.stacks || [];
+        const myStack = stacks.find((s: any) => s.name === stackName);
+        
+        if (!cancel) setAutoDevOps(!!myStack?.effective_auto_devops);
       } catch { 
         if (!cancel) setAutoDevOps(false);
       }
@@ -567,27 +572,32 @@ export default function StackDetailView({
     setEditPath(null);
   }
 
-  // Toggle stack Auto DevOps OVERRIDE
-  async function toggleAutoDevOps(checked: boolean) {
-    // Ensure stack exists if we don't have files yet
-    if (files.length === 0) {
-      try {
-        await ensureStack();
-      } catch (e: any) {
-        alert(e?.message || "Unable to create stack for Auto DevOps");
-        return;
-      }
-    }
+  // API function to set Auto DevOps (matches Host Stacks view)
+  async function setAutoDevOpsAPI(enabled: boolean) {
+    const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}`, {
+      method: "PATCH",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auto_devops: enabled }),
+    });
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  }
+
+  // Toggle stack Auto DevOps with proper error handling (matches Host Stacks view)
+  function toggleAutoDevOps(checked: boolean) {
     if (checked && files.length === 0) {
       alert("This stack needs compose files or services before Auto DevOps can be enabled. Add content first.");
       return;
     }
+    
+    // Optimistic update
     setAutoDevOps(checked);
-    await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}`, {
-      method: "PATCH",
-      credentials: "include",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ auto_devops: checked }),
+    
+    // API call with rollback on error
+    setAutoDevOpsAPI(checked).catch((err) => {
+      alert(`Failed to update Auto DevOps: ${err?.message || err}`);
+      // Rollback the optimistic update
+      setAutoDevOps(!checked);
     });
   }
 

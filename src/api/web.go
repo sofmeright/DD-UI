@@ -912,8 +912,10 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"results": out})
 			})
 
-			// Trigger on-demand scan for a single host
-			priv.Post("/scan/host/{name}", func(w http.ResponseWriter, r *http.Request) {
+
+
+			// NEW API: Scan endpoints (resource-centric)
+			priv.Post("/scan/hosts/{name}", func(w http.ResponseWriter, r *http.Request) {
 				name := chi.URLParam(r, "name")
 				to := parseDurationDefault(r.URL.Query().Get("timeout"), 45*time.Second)
 				ctx, cancel := context.WithTimeout(r.Context(), to)
@@ -939,8 +941,7 @@ func makeRouter() http.Handler {
 				})
 			})
 
-			// Trigger scan for all known hosts (inventory only)
-			priv.Post("/scan/all", func(w http.ResponseWriter, r *http.Request) {
+			priv.Post("/scan/global", func(w http.ResponseWriter, r *http.Request) {
 				// IaC scan (non-fatal)
 				if _, _, err := ScanIacLocal(r.Context()); err != nil {
 					errorLog("iac: sync scan failed: %v", err)
@@ -957,9 +958,9 @@ func makeRouter() http.Handler {
 				type result struct {
 					Host    string `json:"host"`
 					Saved   int    `json:"saved,omitempty"`
-					Err     string `json:"err,omitempty"`
 					Skipped bool   `json:"skipped,omitempty"`
 					Reason  string `json:"reason,omitempty"`
+					Err     string `json:"error,omitempty"`
 				}
 
 				var (
@@ -988,28 +989,35 @@ func makeRouter() http.Handler {
 
 					if err != nil {
 						if errors.Is(err, ErrSkipScan) {
-							results = append(results, result{Host: h.Name, Skipped: true})
+							results = append(results, result{
+								Host:    h.Name,
+								Skipped: true,
+								Reason:  err.Error(),
+							})
 							skipped++
 							continue
 						}
-						results = append(results, result{Host: h.Name, Err: err.Error()})
+						results = append(results, result{
+							Host: h.Name,
+							Err:  err.Error(),
+						})
 						failed++
 						continue
 					}
-
-					total += n
+					results = append(results, result{
+						Host:  h.Name,
+						Saved: n,
+					})
 					scanned++
-					results = append(results, result{Host: h.Name, Saved: n})
+					total += n
 				}
 
 				writeJSON(w, http.StatusOK, map[string]any{
-					"hosts_total": len(hostRows),
-					"scanned":     scanned,
-					"skipped":     skipped,
-					"errors":      failed,
-					"saved":       total,
-					"results":     results,
-					"status":      "ok",
+					"total":    total,
+					"scanned":  scanned,
+					"skipped":  skipped,
+					"failed":   failed,
+					"results":  results,
 				})
 			})
 
@@ -1031,7 +1039,1165 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]string{"status": "reloaded"})
 			})
 
+			// NEW API: SSH endpoint (resource-centric)
+			priv.Post("/ssh/hosts/{name}", func(w http.ResponseWriter, r *http.Request) {
+				hostName := chi.URLParam(r, "name")
+				var body struct {
+					Command string   `json:"command"`
+					Args    []string `json:"args,omitempty"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "invalid JSON", http.StatusBadRequest)
+					return
+				}
+				if strings.TrimSpace(body.Command) == "" {
+					http.Error(w, "command is required", http.StatusBadRequest)
+					return
+				}
+
+				op := SSHDirectOperation{
+					HostName: hostName,
+					Command:  body.Command,
+					Args:     body.Args,
+				}
+
+				output, err := ExecuteSSHDirectOperation(r.Context(), op)
+				if err != nil {
+					writeJSON(w, http.StatusBadRequest, map[string]any{
+						"success": false,
+						"error":   err.Error(),
+					})
+					return
+				}
+
+				writeJSON(w, http.StatusOK, map[string]any{
+					"success": true,
+					"output":  output,
+				})
+			})
+
 			/* ---------- IaC ---------- */
+
+			// NEW API: Hierarchical IAC endpoints (resource-centric)
+			
+			// Host-scoped IAC endpoints
+			priv.Get("/iac/hosts/{hostname}", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				stacks, err := listIacStacksForHost(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"stacks": stacks})
+			})
+
+			priv.Get("/iac/hosts/{hostname}/enhanced", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				stacks, err := listEnhancedIacStacksForHost(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"stacks": stacks})
+			})
+
+			// Host-scoped Stack CRUD operations
+			priv.Get("/iac/hosts/{hostname}/stacks/{stackname}", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "host", hostname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				var stack struct {
+					ID            int64  `json:"id"`
+					RepoID        int64  `json:"repo_id"`
+					ScopeKind     string `json:"scope_kind"`
+					ScopeName     string `json:"scope_name"`
+					StackName     string `json:"stack_name"`
+					RelPath       string `json:"rel_path"`
+					Compose       string `json:"compose_file"`
+					DeployKind    string `json:"deploy_kind"`
+					PullPolicy    string `json:"pull_policy"`
+					SopsStatus    string `json:"sops_status"`
+					IacEnabled    bool   `json:"iac_enabled"`
+					AutoApplyOverride *bool `json:"auto_apply_override"`
+				}
+
+				err = db.QueryRow(r.Context(),
+					`SELECT id, repo_id, scope_kind, scope_name, stack_name, rel_path, compose_file, 
+					 deploy_kind, pull_policy, sops_status, iac_enabled, auto_apply_override
+					 FROM iac_stacks WHERE id=$1`, id).Scan(
+					&stack.ID, &stack.RepoID, &stack.ScopeKind, &stack.ScopeName, &stack.StackName,
+					&stack.RelPath, &stack.Compose, &stack.DeployKind, &stack.PullPolicy,
+					&stack.SopsStatus, &stack.IacEnabled, &stack.AutoApplyOverride)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+
+				writeJSON(w, http.StatusOK, stack)
+			})
+
+			priv.Patch("/iac/hosts/{hostname}/stacks/{stackname}", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "host", hostname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				var body struct {
+					IacEnabled *bool `json:"iac_enabled"`
+					AutoDevOps *bool `json:"auto_deploy"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "invalid JSON", http.StatusBadRequest)
+					return
+				}
+
+				if body.IacEnabled != nil {
+					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET iac_enabled=$1 WHERE id=$2`, *body.IacEnabled, id); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+				}
+
+				if body.AutoDevOps == nil {
+					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_apply_override=NULL WHERE id=$1`, id); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+				} else {
+					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_apply_override=$1 WHERE id=$2`, *body.AutoDevOps, id); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+				}
+
+				writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+			})
+
+			priv.Delete("/iac/hosts/{hostname}/stacks/{stackname}", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "host", hostname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				var rel string
+				_ = db.QueryRow(r.Context(), `SELECT rel_path FROM iac_stacks WHERE id=$1`, id).Scan(&rel)
+
+				if _, err := db.Exec(r.Context(), `DELETE FROM iac_stacks WHERE id=$1`, id); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+
+				writeJSON(w, http.StatusOK, map[string]any{
+					"status": "deleted",
+					"path":   rel,
+				})
+			})
+
+			// Group-scoped Stack CRUD operations
+			priv.Get("/iac/groups/{groupname}/stacks/{stackname}", func(w http.ResponseWriter, r *http.Request) {
+				groupname := chi.URLParam(r, "groupname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "group", groupname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				// same retrieval logic as ID-based endpoint
+				var row struct {
+					ID         int64   `json:"id"`
+					RepoID     int64   `json:"repo_id"`
+					ScopeKind  string  `json:"scope_kind"`
+					ScopeName  string  `json:"scope_name"`
+					StackName  string  `json:"stack_name"`
+					RelPath    string  `json:"rel_path"`
+					IacEnabled bool    `json:"iac_enabled"`
+					DeployKind string  `json:"deploy_kind"`
+					SopsStatus string  `json:"sops_status"`
+					Override   *bool   `json:"auto_apply_override"`
+					UpdatedAt  string  `json:"updated_at"`
+					Effective  bool    `json:"effective_auto_devops"`
+				}
+				var updatedAt time.Time
+				err = db.QueryRow(r.Context(), `
+					SELECT id, repo_id, scope_kind::text, scope_name, stack_name, rel_path,
+						iac_enabled, deploy_kind::text, sops_status::text, auto_apply_override, updated_at
+					FROM iac_stacks
+					WHERE id=$1
+				`, id).Scan(
+					&row.ID, &row.RepoID, &row.ScopeKind, &row.ScopeName, &row.StackName, &row.RelPath,
+					&row.IacEnabled, &row.DeployKind, &row.SopsStatus, &row.Override, &updatedAt,
+				)
+				if err != nil {
+					http.Error(w, "not found", http.StatusNotFound)
+					return
+				}
+				row.UpdatedAt = updatedAt.Format(time.RFC3339)
+				eff, _ := shouldAutoApply(r.Context(), id)
+				row.Effective = eff
+				writeJSON(w, http.StatusOK, map[string]any{"stack": row})
+			})
+
+			priv.Patch("/iac/groups/{groupname}/stacks/{stackname}", func(w http.ResponseWriter, r *http.Request) {
+				groupname := chi.URLParam(r, "groupname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "group", groupname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				var body struct {
+					AutoDevops *bool   `json:"auto_devops,omitempty"`
+					Schedule   *string `json:"schedule,omitempty"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+
+				if body.AutoDevops != nil {
+					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET auto_devops=$1 WHERE id=$2`, *body.AutoDevops, id); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+				}
+
+				if body.Schedule != nil {
+					if _, err := db.Exec(r.Context(), `UPDATE iac_stacks SET schedule=$1 WHERE id=$2`, *body.Schedule, id); err != nil {
+						http.Error(w, err.Error(), http.StatusInternalServerError)
+						return
+					}
+				}
+
+				writeJSON(w, http.StatusOK, map[string]any{"status": "ok"})
+			})
+
+			priv.Delete("/iac/groups/{groupname}/stacks/{stackname}", func(w http.ResponseWriter, r *http.Request) {
+				groupname := chi.URLParam(r, "groupname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "group", groupname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				var rel string
+				_ = db.QueryRow(r.Context(), `SELECT rel_path FROM iac_stacks WHERE id=$1`, id).Scan(&rel)
+
+				if _, err := db.Exec(r.Context(), `DELETE FROM iac_stacks WHERE id=$1`, id); err != nil {
+					http.Error(w, err.Error(), http.StatusInternalServerError)
+					return
+				}
+
+				writeJSON(w, http.StatusOK, map[string]any{
+					"status": "deleted",
+					"path":   rel,
+				})
+			})
+
+			// Host-scoped File operations
+			priv.Get("/iac/hosts/{hostname}/stacks/{stackname}/files", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "host", hostname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				items, err := listFilesForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"files": items})
+			})
+
+			priv.Get("/iac/hosts/{hostname}/stacks/{stackname}/file", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "host", hostname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				rel := strings.TrimSpace(r.URL.Query().Get("path"))
+				if rel == "" {
+					http.Error(w, "missing path", http.StatusBadRequest)
+					return
+				}
+				root, err := getRepoRootForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				full, err := joinUnder(root, rel)
+				if err != nil {
+					http.Error(w, "invalid path", http.StatusBadRequest)
+					return
+				}
+				decrypt := r.URL.Query().Get("decrypt") == "1" || r.URL.Query().Get("decrypt") == "true"
+
+				var data []byte
+				if decrypt {
+					if !envBool("DDUI_ALLOW_SOPS_DECRYPT", "false") {
+						http.Error(w, "decrypt disabled on server", http.StatusForbidden)
+						return
+					}
+					if strings.ToLower(r.Header.Get("X-Confirm-Reveal")) != "yes" {
+						http.Error(w, "confirmation required", http.StatusForbidden)
+						return
+					}
+					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+					defer cancel()
+					cmd := exec.CommandContext(ctx, "sops", "-d", full)
+					out, err := cmd.CombinedOutput()
+					if err != nil {
+						http.Error(w, "sops decrypt failed: "+string(out), http.StatusNotImplemented)
+						return
+					}
+					data = out
+				} else {
+					b, err := os.ReadFile(full)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusNotFound)
+						return
+					}
+					data = b
+				}
+
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				w.Header().Set("Cache-Control", "no-store")
+				_, _ = w.Write(data)
+			})
+
+			priv.Post("/iac/hosts/{hostname}/stacks/{stackname}/file", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "host", hostname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				var body struct {
+					Path    string `json:"path"`
+					Content string `json:"content"`
+					Sops    bool   `json:"sops,omitempty"`
+					Role    string `json:"role,omitempty"` // compose|env|script|other
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				if strings.TrimSpace(body.Path) == "" {
+					http.Error(w, "path required", http.StatusBadRequest)
+					return
+				}
+				root, err := getRepoRootForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				full, err := joinUnder(root, body.Path)
+				if err != nil {
+					http.Error(w, "invalid path", http.StatusBadRequest)
+					return
+				}
+				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if err := os.WriteFile(full, []byte(body.Content), 0o644); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+
+				// auto-role
+				if body.Role == "" {
+					low := strings.ToLower(full)
+					switch {
+					case strings.HasSuffix(low, ".yml"), strings.HasSuffix(low, ".yaml"):
+						body.Role = "compose"
+					case strings.HasSuffix(low, ".sh"):
+						body.Role = "script"
+					case strings.Contains(low, ".env") || strings.HasSuffix(low, ".env"):
+						body.Role = "env"
+					default:
+						body.Role = "other"
+					}
+				}
+
+				// Optional SOPS auto-encrypt on save (opt-in)
+				shouldSops := body.Sops || strings.HasSuffix(strings.ToLower(body.Path), "_private.env") || strings.HasSuffix(strings.ToLower(body.Path), "_secret.env")
+				if shouldSops && (os.Getenv("SOPS_AGE_KEY") != "" || os.Getenv("SOPS_AGE_KEY_FILE") != "" || os.Getenv("SOPS_AGE_RECIPIENTS") != "") {
+					args := []string{"-e", "-i"}
+					if strings.HasSuffix(strings.ToLower(body.Path), ".env") {
+						args = []string{"-e", "-i", "--input-type", "dotenv"}
+					}
+					if rec := strings.TrimSpace(os.Getenv("SOPS_AGE_RECIPIENTS")); rec != "" {
+						for _, rcp := range strings.Fields(rec) {
+							if rcp != "" {
+								args = append(args, "--age", rcp)
+							}
+						}
+					}
+					args = append(args, full)
+
+					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+					defer cancel()
+					out, err := exec.CommandContext(ctx, "sops", args...).CombinedOutput()
+					if err != nil {
+						errorLog("sops: encrypt failed: %v out=%s", err, string(out))
+					} else {
+						debugLog("sops: encrypted %s", full)
+						body.Sops = true
+					}
+				}
+
+				sum, sz := sha256File(full)
+				relFromRoot := filepath.ToSlash(strings.TrimPrefix(full, strings.TrimSuffix(root, "/")+"/"))
+				if err := upsertIacFile(r.Context(), id, body.Role, relFromRoot, body.Sops, sum, sz); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "size": sz, "sha256": sum, "sops": body.Sops})
+			})
+
+			priv.Delete("/iac/hosts/{hostname}/stacks/{stackname}/file", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "host", hostname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				rel := strings.TrimSpace(r.URL.Query().Get("path"))
+				if rel == "" {
+					http.Error(w, "missing path", http.StatusBadRequest)
+					return
+				}
+				root, err := getRepoRootForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				full, err := joinUnder(root, rel)
+				if err != nil {
+					http.Error(w, "invalid path", http.StatusBadRequest)
+					return
+				}
+				_ = os.Remove(full) // best effort
+				_ = deleteIacFileRow(r.Context(), id, rel)
+				writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
+			})
+
+			// Group-scoped File operations
+			priv.Get("/iac/groups/{groupname}/stacks/{stackname}/files", func(w http.ResponseWriter, r *http.Request) {
+				groupname := chi.URLParam(r, "groupname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "group", groupname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				items, err := listFilesForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"files": items})
+			})
+
+			priv.Get("/iac/groups/{groupname}/stacks/{stackname}/file", func(w http.ResponseWriter, r *http.Request) {
+				groupname := chi.URLParam(r, "groupname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "group", groupname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				rel := strings.TrimSpace(r.URL.Query().Get("path"))
+				if rel == "" {
+					http.Error(w, "missing path", http.StatusBadRequest)
+					return
+				}
+				root, err := getRepoRootForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				full, err := joinUnder(root, rel)
+				if err != nil {
+					http.Error(w, "invalid path", http.StatusBadRequest)
+					return
+				}
+				decrypt := r.URL.Query().Get("decrypt") == "1" || r.URL.Query().Get("decrypt") == "true"
+
+				var data []byte
+				if decrypt {
+					if !envBool("DDUI_ALLOW_SOPS_DECRYPT", "false") {
+						http.Error(w, "decrypt disabled on server", http.StatusForbidden)
+						return
+					}
+					if strings.ToLower(r.Header.Get("X-Confirm-Reveal")) != "yes" {
+						http.Error(w, "confirmation required", http.StatusForbidden)
+						return
+					}
+					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+					defer cancel()
+					cmd := exec.CommandContext(ctx, "sops", "-d", full)
+					out, err := cmd.CombinedOutput()
+					if err != nil {
+						http.Error(w, "sops decrypt failed: "+string(out), http.StatusNotImplemented)
+						return
+					}
+					data = out
+				} else {
+					b, err := os.ReadFile(full)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusNotFound)
+						return
+					}
+					data = b
+				}
+
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				w.Header().Set("Cache-Control", "no-store")
+				_, _ = w.Write(data)
+			})
+
+			priv.Post("/iac/groups/{groupname}/stacks/{stackname}/file", func(w http.ResponseWriter, r *http.Request) {
+				groupname := chi.URLParam(r, "groupname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "group", groupname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				var body struct {
+					Path    string `json:"path"`
+					Content string `json:"content"`
+					Sops    bool   `json:"sops,omitempty"`
+					Role    string `json:"role,omitempty"` // compose|env|script|other
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				if strings.TrimSpace(body.Path) == "" {
+					http.Error(w, "path required", http.StatusBadRequest)
+					return
+				}
+				root, err := getRepoRootForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				full, err := joinUnder(root, body.Path)
+				if err != nil {
+					http.Error(w, "invalid path", http.StatusBadRequest)
+					return
+				}
+				if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				if err := os.WriteFile(full, []byte(body.Content), 0o644); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+
+				// auto-role
+				if body.Role == "" {
+					low := strings.ToLower(full)
+					switch {
+					case strings.HasSuffix(low, ".yml"), strings.HasSuffix(low, ".yaml"):
+						body.Role = "compose"
+					case strings.HasSuffix(low, ".sh"):
+						body.Role = "script"
+					case strings.Contains(low, ".env") || strings.HasSuffix(low, ".env"):
+						body.Role = "env"
+					default:
+						body.Role = "other"
+					}
+				}
+
+				// Optional SOPS auto-encrypt on save (opt-in)
+				shouldSops := body.Sops || strings.HasSuffix(strings.ToLower(body.Path), "_private.env") || strings.HasSuffix(strings.ToLower(body.Path), "_secret.env")
+				if shouldSops && (os.Getenv("SOPS_AGE_KEY") != "" || os.Getenv("SOPS_AGE_KEY_FILE") != "" || os.Getenv("SOPS_AGE_RECIPIENTS") != "") {
+					args := []string{"-e", "-i"}
+					if strings.HasSuffix(strings.ToLower(body.Path), ".env") {
+						args = []string{"-e", "-i", "--input-type", "dotenv"}
+					}
+					if rec := strings.TrimSpace(os.Getenv("SOPS_AGE_RECIPIENTS")); rec != "" {
+						for _, rcp := range strings.Fields(rec) {
+							if rcp != "" {
+								args = append(args, "--age", rcp)
+							}
+						}
+					}
+					args = append(args, full)
+
+					ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+					defer cancel()
+					out, err := exec.CommandContext(ctx, "sops", args...).CombinedOutput()
+					if err != nil {
+						errorLog("sops: encrypt failed: %v out=%s", err, string(out))
+					} else {
+						debugLog("sops: encrypted %s", full)
+						body.Sops = true
+					}
+				}
+
+				sum, sz := sha256File(full)
+				relFromRoot := filepath.ToSlash(strings.TrimPrefix(full, strings.TrimSuffix(root, "/")+"/"))
+				if err := upsertIacFile(r.Context(), id, body.Role, relFromRoot, body.Sops, sum, sz); err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "size": sz, "sha256": sum, "sops": body.Sops})
+			})
+
+			priv.Delete("/iac/groups/{groupname}/stacks/{stackname}/file", func(w http.ResponseWriter, r *http.Request) {
+				groupname := chi.URLParam(r, "groupname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "group", groupname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				rel := strings.TrimSpace(r.URL.Query().Get("path"))
+				if rel == "" {
+					http.Error(w, "missing path", http.StatusBadRequest)
+					return
+				}
+				root, err := getRepoRootForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				full, err := joinUnder(root, rel)
+				if err != nil {
+					http.Error(w, "invalid path", http.StatusBadRequest)
+					return
+				}
+				_ = os.Remove(full) // best effort
+				_ = deleteIacFileRow(r.Context(), id, rel)
+				writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
+			})
+
+			// Host-scoped Deployment operations
+			priv.Post("/iac/hosts/{hostname}/stacks/{stackname}/deploy", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "host", hostname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				// must have something to deploy
+				ok, derr := stackHasContent(r.Context(), id)
+				if derr != nil {
+					http.Error(w, derr.Error(), http.StatusInternalServerError)
+					return
+				}
+				if !ok {
+					http.Error(w, "stack has no files", http.StatusBadRequest)
+					return
+				}
+
+				// Manual by default (UI-friendly). Auto callers pass ?auto=1 explicitly.
+				manual := !isTrueish(r.URL.Query().Get("auto"))
+
+				// Gate only if NOT manual
+				if !manual {
+					allowed, aerr := shouldAutoApply(r.Context(), id)
+					if aerr != nil {
+						http.Error(w, aerr.Error(), http.StatusBadRequest)
+						return
+					}
+					if !allowed {
+						writeJSON(w, http.StatusAccepted, map[string]any{
+							"status":  "skipped",
+							"reason":  "auto_devops_disabled",
+							"stackID": id,
+						})
+						return
+					}
+				}
+
+				// async deploy with timeout + logging; mark manual flag in context
+				go func(stackID int64, manual bool) {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+					defer cancel()
+					ctx = context.WithValue(ctx, ctxManualKey{}, manual)
+					if err := deployStack(ctx, stackID); err != nil {
+						errorLog("deploy: stack %d failed: %v", stackID, err)
+						return
+					}
+					infoLog("deploy: stack %d ok", stackID)
+				}(id, manual)
+
+				writeJSON(w, http.StatusAccepted, map[string]any{
+					"status":  "queued",
+					"id":      id,
+					"manual":  manual,
+					"allowed": true,
+				})
+			})
+
+			priv.Get("/iac/hosts/{hostname}/stacks/{stackname}/deploy-stream", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "host", hostname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				// Check if stack has content
+				ok, derr := stackHasContent(r.Context(), id)
+				if derr != nil {
+					http.Error(w, derr.Error(), http.StatusInternalServerError)
+					return
+				}
+				if !ok {
+					http.Error(w, "stack has no deployable content", http.StatusBadRequest)
+					return
+				}
+
+				// Set up Server-Sent Events
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				
+				// Create event channel
+				eventChan := make(chan map[string]interface{}, 100)
+				
+				// Start deployment in background
+				ctx := context.WithValue(r.Context(), ctxManualKey{}, true)
+				// Check for force parameter to bypass config unchanged checks
+				if r.URL.Query().Get("force") == "true" {
+					ctx = context.WithValue(ctx, ctxForceKey{}, true)
+				}
+				go func() {
+					if err := deployStackWithStream(ctx, id, eventChan); err != nil {
+						errorLog("deploy-stream: stack %d failed: %v", id, err)
+					}
+				}()
+
+				// Stream events to client
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+					return
+				}
+
+				for event := range eventChan {
+					eventJSON, _ := json.Marshal(event)
+					fmt.Fprintf(w, "data: %s\n\n", eventJSON)
+					flusher.Flush()
+
+					// Break on completion or error
+					if eventType, ok := event["type"].(string); ok && (eventType == "complete" || eventType == "error") {
+						break
+					}
+				}
+			})
+
+			priv.Post("/iac/hosts/{hostname}/stacks/{stackname}/deploy-check", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "host", hostname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				// Get the current configuration
+				_, err = getRepoRootForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, "failed to get repo root", http.StatusInternalServerError)
+					return
+				}
+				var rel string
+				_ = db.QueryRow(r.Context(), `SELECT rel_path FROM iac_stacks WHERE id=$1`, id).Scan(&rel)
+				if strings.TrimSpace(rel) == "" {
+					http.Error(w, "stack has no rel_path", http.StatusBadRequest)
+					return
+				}
+
+				// Stage (SOPS decrypts into tmpfs and is cleaned afterwards)
+				_, stagedComposes, cleanup, derr := stageStackForCompose(r.Context(), id)
+				if derr != nil {
+					http.Error(w, fmt.Sprintf("failed to stage stack: %v", derr), http.StatusInternalServerError)
+					return
+				}
+				defer func() {
+					if cleanup != nil {
+						cleanup()
+					}
+				}()
+
+				if len(stagedComposes) == 0 {
+					respondJSON(w, map[string]interface{}{
+						"config_unchanged": false,
+					})
+					return
+				}
+
+				var allComposeContent []byte
+				for _, f := range stagedComposes {
+					b, rerr := os.ReadFile(f)
+					if rerr != nil {
+						http.Error(w, fmt.Sprintf("failed to read compose file: %v", rerr), http.StatusInternalServerError)
+						return
+					}
+					allComposeContent = append(allComposeContent, b...)
+					allComposeContent = append(allComposeContent, '\n')
+				}
+
+				// Check if this configuration exists
+				existingStamp, checkErr := CheckDeploymentStampExists(r.Context(), id, allComposeContent)
+				if checkErr == nil && existingStamp != nil {
+					respondJSON(w, map[string]interface{}{
+						"config_unchanged":    true,
+						"last_deploy_time":    existingStamp.DeploymentTimestamp.Format("2006-01-02 15:04:05"),
+						"last_deploy_status":  existingStamp.DeploymentStatus,
+						"existing_stamp_id":   existingStamp.ID,
+					})
+					return
+				}
+
+				respondJSON(w, map[string]interface{}{
+					"config_unchanged": false,
+				})
+			})
+
+			priv.Get("/iac/hosts/{hostname}/stacks/{stackname}/deploy-force", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "host", hostname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				// Set up Server-Sent Events
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				
+				// Create event channel
+				eventChan := make(chan map[string]interface{}, 100)
+				
+				// Start deployment in background with force flag
+				ctx := context.WithValue(r.Context(), ctxManualKey{}, true)
+				ctx = context.WithValue(ctx, ctxForceKey{}, true)
+				go func() {
+					if err := deployStackWithStream(ctx, id, eventChan); err != nil {
+						errorLog("deploy-force: stack %d failed: %v", id, err)
+					}
+				}()
+
+				// Stream events to client
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+					return
+				}
+
+				for event := range eventChan {
+					eventJSON, _ := json.Marshal(event)
+					fmt.Fprintf(w, "data: %s\n\n", eventJSON)
+					flusher.Flush()
+
+					// Break on completion or error
+					if eventType, ok := event["type"].(string); ok && (eventType == "complete" || eventType == "error") {
+						break
+					}
+				}
+			})
+
+			// Group-scoped Deployment operations
+			priv.Post("/iac/groups/{groupname}/stacks/{stackname}/deploy", func(w http.ResponseWriter, r *http.Request) {
+				groupname := chi.URLParam(r, "groupname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "group", groupname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				// must have something to deploy
+				ok, derr := stackHasContent(r.Context(), id)
+				if derr != nil {
+					http.Error(w, derr.Error(), http.StatusInternalServerError)
+					return
+				}
+				if !ok {
+					http.Error(w, "stack has no files", http.StatusBadRequest)
+					return
+				}
+
+				// Manual by default (UI-friendly). Auto callers pass ?auto=1 explicitly.
+				manual := !isTrueish(r.URL.Query().Get("auto"))
+
+				// Gate only if NOT manual
+				if !manual {
+					allowed, aerr := shouldAutoApply(r.Context(), id)
+					if aerr != nil {
+						http.Error(w, aerr.Error(), http.StatusBadRequest)
+						return
+					}
+					if !allowed {
+						writeJSON(w, http.StatusAccepted, map[string]any{
+							"status":  "skipped",
+							"reason":  "auto_devops_disabled",
+							"stackID": id,
+						})
+						return
+					}
+				}
+
+				// async deploy with timeout + logging; mark manual flag in context
+				go func(stackID int64, manual bool) {
+					ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+					defer cancel()
+					ctx = context.WithValue(ctx, ctxManualKey{}, manual)
+					if err := deployStack(ctx, stackID); err != nil {
+						errorLog("deploy: stack %d failed: %v", stackID, err)
+						return
+					}
+					infoLog("deploy: stack %d ok", stackID)
+				}(id, manual)
+
+				writeJSON(w, http.StatusAccepted, map[string]any{
+					"status":  "queued",
+					"id":      id,
+					"manual":  manual,
+					"allowed": true,
+				})
+			})
+
+			priv.Get("/iac/groups/{groupname}/stacks/{stackname}/deploy-stream", func(w http.ResponseWriter, r *http.Request) {
+				groupname := chi.URLParam(r, "groupname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "group", groupname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				// Check if stack has content
+				ok, derr := stackHasContent(r.Context(), id)
+				if derr != nil {
+					http.Error(w, derr.Error(), http.StatusInternalServerError)
+					return
+				}
+				if !ok {
+					http.Error(w, "stack has no deployable content", http.StatusBadRequest)
+					return
+				}
+
+				// Set up Server-Sent Events
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				
+				// Create event channel
+				eventChan := make(chan map[string]interface{}, 100)
+				
+				// Start deployment in background
+				ctx := context.WithValue(r.Context(), ctxManualKey{}, true)
+				// Check for force parameter to bypass config unchanged checks
+				if r.URL.Query().Get("force") == "true" {
+					ctx = context.WithValue(ctx, ctxForceKey{}, true)
+				}
+				go func() {
+					if err := deployStackWithStream(ctx, id, eventChan); err != nil {
+						errorLog("deploy-stream: stack %d failed: %v", id, err)
+					}
+				}()
+
+				// Stream events to client
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+					return
+				}
+
+				for event := range eventChan {
+					eventJSON, _ := json.Marshal(event)
+					fmt.Fprintf(w, "data: %s\n\n", eventJSON)
+					flusher.Flush()
+
+					// Break on completion or error
+					if eventType, ok := event["type"].(string); ok && (eventType == "complete" || eventType == "error") {
+						break
+					}
+				}
+			})
+
+			priv.Post("/iac/groups/{groupname}/stacks/{stackname}/deploy-check", func(w http.ResponseWriter, r *http.Request) {
+				groupname := chi.URLParam(r, "groupname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "group", groupname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				// Get the current configuration
+				_, err = getRepoRootForStack(r.Context(), id)
+				if err != nil {
+					http.Error(w, "failed to get repo root", http.StatusInternalServerError)
+					return
+				}
+				var rel string
+				_ = db.QueryRow(r.Context(), `SELECT rel_path FROM iac_stacks WHERE id=$1`, id).Scan(&rel)
+				if strings.TrimSpace(rel) == "" {
+					http.Error(w, "stack has no rel_path", http.StatusBadRequest)
+					return
+				}
+
+				// Stage (SOPS decrypts into tmpfs and is cleaned afterwards)
+				_, stagedComposes, cleanup, derr := stageStackForCompose(r.Context(), id)
+				if derr != nil {
+					http.Error(w, fmt.Sprintf("failed to stage stack: %v", derr), http.StatusInternalServerError)
+					return
+				}
+				defer func() {
+					if cleanup != nil {
+						cleanup()
+					}
+				}()
+
+				if len(stagedComposes) == 0 {
+					respondJSON(w, map[string]interface{}{
+						"config_unchanged": false,
+					})
+					return
+				}
+
+				var allComposeContent []byte
+				for _, f := range stagedComposes {
+					b, rerr := os.ReadFile(f)
+					if rerr != nil {
+						http.Error(w, fmt.Sprintf("failed to read compose file: %v", rerr), http.StatusInternalServerError)
+						return
+					}
+					allComposeContent = append(allComposeContent, b...)
+					allComposeContent = append(allComposeContent, '\n')
+				}
+
+				// Check if this configuration exists
+				existingStamp, checkErr := CheckDeploymentStampExists(r.Context(), id, allComposeContent)
+				if checkErr == nil && existingStamp != nil {
+					respondJSON(w, map[string]interface{}{
+						"config_unchanged":    true,
+						"last_deploy_time":    existingStamp.DeploymentTimestamp.Format("2006-01-02 15:04:05"),
+						"last_deploy_status":  existingStamp.DeploymentStatus,
+						"existing_stamp_id":   existingStamp.ID,
+					})
+					return
+				}
+
+				respondJSON(w, map[string]interface{}{
+					"config_unchanged": false,
+				})
+			})
+
+			priv.Get("/iac/groups/{groupname}/stacks/{stackname}/deploy-force", func(w http.ResponseWriter, r *http.Request) {
+				groupname := chi.URLParam(r, "groupname")
+				stackname := chi.URLParam(r, "stackname")
+				
+				id, err := getStackID(r.Context(), "group", groupname, stackname)
+				if err != nil {
+					http.Error(w, "stack not found", http.StatusNotFound)
+					return
+				}
+
+				// Set up Server-Sent Events
+				w.Header().Set("Content-Type", "text/event-stream")
+				w.Header().Set("Cache-Control", "no-cache")
+				w.Header().Set("Connection", "keep-alive")
+				w.Header().Set("Access-Control-Allow-Origin", "*")
+				
+				// Create event channel
+				eventChan := make(chan map[string]interface{}, 100)
+				
+				// Start deployment in background with force flag
+				ctx := context.WithValue(r.Context(), ctxManualKey{}, true)
+				ctx = context.WithValue(ctx, ctxForceKey{}, true)
+				go func() {
+					if err := deployStackWithStream(ctx, id, eventChan); err != nil {
+						errorLog("deploy-force: stack %d failed: %v", id, err)
+					}
+				}()
+
+				// Stream events to client
+				flusher, ok := w.(http.Flusher)
+				if !ok {
+					http.Error(w, "Streaming not supported", http.StatusInternalServerError)
+					return
+				}
+
+				for event := range eventChan {
+					eventJSON, _ := json.Marshal(event)
+					fmt.Fprintf(w, "data: %s\n\n", eventJSON)
+					flusher.Flush()
+
+					// Break on completion or error
+					if eventType, ok := event["type"].(string); ok && (eventType == "complete" || eventType == "error") {
+						break
+					}
+				}
+			})
 
 			// Force IaC scan (local)
 			priv.Post("/iac/scan", func(w http.ResponseWriter, r *http.Request) {
@@ -1101,42 +2267,489 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"stacks": items})
 			})
 
-			// Direct SSH command execution on hosts
-			priv.Post("/hosts/{name}/ssh", func(w http.ResponseWriter, r *http.Request) {
-				hostName := chi.URLParam(r, "name")
+			// NEW RESOURCE-CENTRIC ENDPOINTS FOR API MIGRATION
+			// Container endpoints
+			priv.Get("/containers/hosts/{hostname}", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				containers, err := listContainersByHost(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, fmt.Sprintf("failed to list containers: %v", err), http.StatusInternalServerError)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"containers": containers})
+			})
+
+			// Container log streaming endpoint (NEW API)
+			priv.Get("/containers/hosts/{hostname}/{ctr}/logs/stream", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				ctr := chi.URLParam(r, "ctr")
+
+				h, err := GetHostByName(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer cli.Close()
+
+				inspect, err := cli.ContainerInspect(r.Context(), ctr)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+
+				opts := container.LogsOptions{
+					ShowStdout: true,
+					ShowStderr: true,
+					Follow:     true,
+					Timestamps: false,
+					Details:    false,
+				}
+				if s := strings.TrimSpace(r.URL.Query().Get("since")); s != "" {
+					opts.Since = s
+				}
+				if t := strings.TrimSpace(r.URL.Query().Get("tail")); t != "" {
+					opts.Tail = t
+				}
+
+				rc, err := cli.ContainerLogs(r.Context(), ctr, opts)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer rc.Close()
+
+				fl, ok := writeSSEHeader(w)
+				if !ok {
+					http.Error(w, "stream unsupported", http.StatusInternalServerError)
+					return
+				}
+
+				stdout := &sseLineWriter{w: w, fl: fl, stream: "stdout"}
+				stderr := &sseLineWriter{w: w, fl: fl, stream: "stderr"}
+
+				// Keep-alive tick
+				tick := time.NewTicker(15 * time.Second)
+				defer tick.Stop()
+
+				done := make(chan struct{})
+				go func() {
+					defer close(done)
+					if inspect.Config != nil && inspect.Config.Tty {
+						// No multiplexing when TTY true
+						sc := bufio.NewScanner(rc)
+						for sc.Scan() {
+							_, _ = stdout.Write(append(sc.Bytes(), '\n'))
+						}
+					} else {
+						// Demux Docker log multiplexing
+						_, _ = stdcopy.StdCopy(stdout, stderr, rc)
+					}
+				}()
+
+				// pump until client disconnects
+				for {
+					select {
+					case <-done:
+						return
+					case <-tick.C:
+						_, _ = stdout.Write([]byte{})
+					case <-r.Context().Done():
+						return
+					}
+				}
+			})
+
+			// Container regular logs endpoint (NEW API)
+			priv.Get("/containers/hosts/{hostname}/{ctr}/logs", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				ctr := chi.URLParam(r, "ctr")
+				h, err := GetHostByName(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer cli.Close()
+
+				tail := strings.TrimSpace(r.URL.Query().Get("tail"))
+				opts := container.LogsOptions{
+					ShowStdout: true,
+					ShowStderr: true,
+					Timestamps: false,
+					Follow:     false,
+					Details:    false,
+				}
+				if tail != "" {
+					opts.Tail = tail
+				}
+				rc, err := cli.ContainerLogs(r.Context(), ctr, opts)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer rc.Close()
+
+				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+				w.Header().Set("Cache-Control", "no-store")
+				_, _ = io.Copy(w, rc)
+			})
+
+			// Container inspect endpoint (NEW API)
+			priv.Get("/containers/hosts/{hostname}/{ctr}/inspect", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				ctr := chi.URLParam(r, "ctr")
+				out, err := inspectContainerByHost(r.Context(), hostname, ctr)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, out)
+			})
+
+			// Container actions endpoint (NEW API)
+			priv.Post("/containers/hosts/{hostname}/{ctr}/action", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				ctr := chi.URLParam(r, "ctr")
 				var body struct {
-					Command string   `json:"command"`
-					Args    []string `json:"args,omitempty"`
+					Action string `json:"action"`
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 					http.Error(w, "invalid JSON", http.StatusBadRequest)
 					return
 				}
-				if strings.TrimSpace(body.Command) == "" {
-					http.Error(w, "command is required", http.StatusBadRequest)
+
+				h, err := GetHostByName(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer cli.Close()
+
+				switch body.Action {
+				case "start":
+					err = cli.ContainerStart(r.Context(), ctr, container.StartOptions{})
+				case "stop":
+					timeout := 10
+					err = cli.ContainerStop(r.Context(), ctr, container.StopOptions{Timeout: &timeout})
+				case "restart":
+					timeout := 10
+					err = cli.ContainerRestart(r.Context(), ctr, container.StopOptions{Timeout: &timeout})
+				case "pause":
+					err = cli.ContainerPause(r.Context(), ctr)
+				case "unpause":
+					err = cli.ContainerUnpause(r.Context(), ctr)
+				case "remove":
+					err = cli.ContainerRemove(r.Context(), ctr, container.RemoveOptions{Force: true})
+				default:
+					http.Error(w, "unsupported action", http.StatusBadRequest)
 					return
 				}
 
-				op := SSHDirectOperation{
-					HostName: hostName,
-					Command:  body.Command,
-					Args:     body.Args,
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"success": true})
+			})
+
+			// Container stats endpoint (NEW API)
+			priv.Get("/containers/hosts/{hostname}/{ctr}/stats", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				ctr := chi.URLParam(r, "ctr")
+				h, err := GetHostByName(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer cli.Close()
+
+				stats, err := cli.ContainerStats(r.Context(), ctr, false)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer stats.Body.Close()
+
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("Cache-Control", "no-store")
+				_, _ = io.Copy(w, stats.Body)
+			})
+
+			// Container enhanced actions endpoint (NEW API)
+			priv.Post("/containers/hosts/{hostname}/{ctr}/enhanced-action", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				containerID := chi.URLParam(r, "ctr")
+				var body struct {
+					Action string `json:"action"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "invalid JSON", http.StatusBadRequest)
+					return
 				}
 
-				output, err := ExecuteSSHDirectOperation(r.Context(), op)
+				// Find the host and get deployment stamps
+				h, err := GetHostByName(r.Context(), hostname)
 				if err != nil {
-					writeJSON(w, http.StatusBadRequest, map[string]any{
-						"success": false,
-						"error":   err.Error(),
-					})
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer cli.Close()
+
+				// Get container details to find the stack
+				inspect, err := cli.ContainerInspect(r.Context(), containerID)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+
+				// Look for deployment stamp in labels
+				var stampID int64
+				if stampLabel, ok := inspect.Config.Labels["ddui.deployment.stamp"]; ok {
+					stampID, _ = strconv.ParseInt(stampLabel, 10, 64)
+				}
+
+				// Execute the action with deployment awareness
+				switch body.Action {
+				case "start":
+					err = cli.ContainerStart(r.Context(), containerID, container.StartOptions{})
+				case "stop":
+					timeout := 10
+					err = cli.ContainerStop(r.Context(), containerID, container.StopOptions{Timeout: &timeout})
+				case "restart":
+					timeout := 10
+					err = cli.ContainerRestart(r.Context(), containerID, container.StopOptions{Timeout: &timeout})
+				default:
+					http.Error(w, "unsupported enhanced action", http.StatusBadRequest)
+					return
+				}
+
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
 
 				writeJSON(w, http.StatusOK, map[string]any{
-					"success": true,
-					"output":  output,
+					"success":       true,
+					"container_id":  containerID,
+					"action":        body.Action,
+					"stamp_id":      stampID,
+					"enhanced":      true,
 				})
 			})
+
+			// IAC endpoints  
+			priv.Get("/iac/hosts/{hostname}", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				stacks, err := listIacStacksForHost(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, fmt.Sprintf("failed to list IAC stacks: %v", err), http.StatusInternalServerError)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"stacks": stacks})
+			})
+
+			priv.Get("/iac/hosts/{hostname}/enhanced", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				stacks, err := listEnhancedIacStacksForHost(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, fmt.Sprintf("failed to list enhanced IAC stacks: %v", err), http.StatusInternalServerError)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"stacks": stacks})
+			})
+
+			// Images endpoints
+			priv.Get("/images/hosts/{hostname}", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				h, err := GetHostByName(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer cli.Close()
+
+				list, err := cli.ImageList(r.Context(), image.ListOptions{All: true})
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+
+				stored, _ := getImageTagMap(r.Context(), hostname)
+
+				type row struct {
+					Repo    string `json:"repo"`
+					Tag     string `json:"tag"`
+					ID      string `json:"id"`
+					Size    string `json:"size"`
+					Created string `json:"created"`
+				}
+				var items []row
+				seen := make(map[string]struct{}, len(list))
+
+				for _, im := range list {
+					id := im.ID
+					seen[id] = struct{}{}
+					repo := "<none>"
+					tag := "none"
+
+					if len(im.RepoTags) > 0 && im.RepoTags[0] != "<none>:<none>" {
+						parts := strings.SplitN(im.RepoTags[0], ":", 2)
+						repo = parts[0]
+						if len(parts) == 2 {
+							tag = parts[1]
+						}
+					} else if prev, ok := stored[id]; ok {
+						if strings.TrimSpace(prev[0]) != "" {
+							repo = prev[0]
+						}
+						if strings.TrimSpace(prev[1]) != "" {
+							tag = prev[1]
+						}
+					}
+
+					_ = upsertImageTag(r.Context(), hostname, id, repo, tag)
+
+					items = append(items, row{
+						Repo:    repo,
+						Tag:     tag,
+						ID:      id,
+						Size:    humanSize(im.Size),
+						Created: time.Unix(im.Created, 0).Format(time.RFC3339),
+					})
+				}
+
+				_ = cleanupImageTags(r.Context(), hostname, seen)
+
+				writeJSON(w, http.StatusOK, map[string]any{"images": items})
+			})
+
+			// Networks endpoints
+			priv.Get("/networks/hosts/{hostname}", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				h, err := GetHostByName(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer cli.Close()
+
+				nets, err := cli.NetworkList(r.Context(), types.NetworkListOptions{Filters: filters.NewArgs()})
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				type row struct {
+					ID     string `json:"id"`
+					Name   string `json:"name"`
+					Driver string `json:"driver"`
+					Scope  string `json:"scope"`
+				}
+				var items []row
+				for _, n := range nets {
+					items = append(items, row{ID: n.ID, Name: n.Name, Driver: n.Driver, Scope: n.Scope})
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"networks": items})
+			})
+
+			// Volumes endpoints
+			priv.Get("/volumes/hosts/{hostname}", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				h, err := GetHostByName(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer cli.Close()
+
+				vl, err := cli.VolumeList(r.Context(), volume.ListOptions{Filters: filters.NewArgs()})
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				type row struct {
+					Name       string `json:"name"`
+					Driver     string `json:"driver"`
+					Mountpoint string `json:"mountpoint"`
+					Created    string `json:"created"`
+				}
+				var items []row
+				for _, v := range vl.Volumes {
+					created := v.CreatedAt
+					items = append(items, row{v.Name, v.Driver, v.Mountpoint, created})
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"volumes": items})
+			})
+
+
+			// Batch endpoint for stack details (frontend compatibility)
+			priv.Get("/iac/stacks/batch", func(w http.ResponseWriter, r *http.Request) {
+				idsParam := r.URL.Query().Get("ids")
+				if idsParam == "" {
+					http.Error(w, "ids parameter is required", http.StatusBadRequest)
+					return
+				}
+				
+				idStrings := strings.Split(idsParam, ",")
+				var stackIds []int64
+				for _, idStr := range idStrings {
+					id, err := strconv.ParseInt(strings.TrimSpace(idStr), 10, 64)
+					if err != nil {
+						http.Error(w, fmt.Sprintf("invalid id: %s", idStr), http.StatusBadRequest)
+						return
+					}
+					stackIds = append(stackIds, id)
+				}
+				
+				stacks, err := getStacksBatch(r.Context(), stackIds)
+				if err != nil {
+					http.Error(w, fmt.Sprintf("failed to get stacks: %v", err), http.StatusInternalServerError)
+					return
+				}
+				
+				writeJSON(w, http.StatusOK, map[string]any{"stacks": stacks})
+			})
+
+			// Direct SSH command execution on hosts
 
 			// Enhanced container operations with deployment stamp awareness
 			priv.Post("/hosts/{name}/containers/{ctr}/enhanced-action", func(w http.ResponseWriter, r *http.Request) {

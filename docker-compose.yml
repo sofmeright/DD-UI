@@ -55,7 +55,7 @@ services:
       - DDUI_DB_USER=prplanit
       - DDUI_DB_PASS_FILE=/run/secrets/postgres_pass
       - DDUI_DB_SSLMODE=disable
-      - DDUI_DB_MIGRATE=true
+      - DDUI_DB_MIGRATE=false
         # or provide a single DSN:
         # - DDUI_DB_DSN=postgres://ddui:...@db:5432/ddui?sslmode=disable
 

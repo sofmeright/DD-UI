@@ -49,7 +49,7 @@ export default function LiveLogsModal({
       return;
     }
 
-    const url = `/api/hosts/${encodeURIComponent(host)}/containers/${encodeURIComponent(
+    const url = `/api/containers/hosts/${encodeURIComponent(host)}/${encodeURIComponent(
       container
     )}/logs/stream?tail=200`;
     const es = new EventSource(url, { withCredentials: true });

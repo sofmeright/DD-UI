@@ -117,7 +117,6 @@ export type MergedStack = {
     sops?: boolean;
     deployKind: string;
     rows: MergedRow[];
-    iacId?: number;
     hasIac: boolean;
     hasContent?: boolean;
 };

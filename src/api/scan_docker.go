@@ -48,6 +48,13 @@ func dockerURLFor(h HostRow) (string, string) {
 	if v := h.Vars["docker_host"]; v != "" {
 		return v, h.Vars["docker_ssh_cmd"]
 	}
+	
+	// Check if this host matches DDUI_LOCAL_HOST - if so, use local socket for performance
+	if lh := strings.TrimSpace(env("DDUI_LOCAL_HOST", "")); lh != "" && strings.EqualFold(lh, h.Name) {
+		sock := env("DOCKER_SOCK_PATH", "/var/run/docker.sock")
+		return "unix://" + sock, ""
+	}
+	
 	kind := env("DOCKER_CONNECTION_METHOD", "ssh") // ssh|tcp|local
 	switch kind {
 	case "local":

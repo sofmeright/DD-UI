@@ -99,13 +99,13 @@ export default function App() {
         const name = hostNames[i];
         try {
           const [rc, ri] = await Promise.all([
-            fetch(`/api/hosts/${encodeURIComponent(name)}/containers`, { credentials: "include" }),
-            fetch(`/api/hosts/${encodeURIComponent(name)}/iac`, { credentials: "include" }),
+            fetch(`/api/containers/hosts/${encodeURIComponent(name)}`, { credentials: "include" }),
+            fetch(`/api/iac/hosts/${encodeURIComponent(name)}`, { credentials: "include" }),
           ]);
           if (rc.status === 401 || ri.status === 401) { window.location.replace("/auth/login"); return; }
           const contJson = await rc.json();
           const iacJson = await ri.json();
-          const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
+          const runtime: ApiContainer[] = (contJson.containers || []) as ApiContainer[];
           const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
           const m = computeHostMetrics(runtime, iacStacks);
           setMetricsCache(prev => ({ ...prev, [name]: m }));
@@ -149,8 +149,22 @@ export default function App() {
   // Stacks list WITH DROPDOWN (wrap HostStacksView and remount on :hostName to avoid stale data)
   const HostStacksPage = () => {
     const { hostName } = useParams<{ hostName: string }>();
-    const host = hosts.find(h => h.name === decodeURIComponent(hostName || ""));
+    const decodedHostName = hostName ? decodeURIComponent(hostName) : "";
+    const host = hosts.find(h => h.name === decodedHostName);
     
+    // Show loading if hosts are still loading
+    if (loading) {
+      return (
+        <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center">
+          <div className="text-center">
+            <div className="animate-spin rounded-full h-32 w-32 border-b-2 border-white"></div>
+            <p className="mt-4">Loading hosts...</p>
+          </div>
+        </div>
+      );
+    }
+    
+    // If hosts are loaded but host not found, redirect to hosts page
     if (!host) {
       navigate("/hosts");
       return null;
@@ -160,10 +174,12 @@ export default function App() {
       <HostStacksView
         key={hostName || "all"}
         host={host}
+        hosts={hosts}
         onSync={() => refreshMetricsForHosts([host.name])}
-        onOpenStack={(stackName, iacId) =>
-          navigate(`/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}${iacId ? `?iacId=${iacId}` : ""}`)
+        onOpenStack={(stackName) =>
+          navigate(`/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}`)
         }
+        onHostChange={(newHostName) => navigate(`/hosts/${encodeURIComponent(newHostName)}/stacks`)}
       />
     );
   };
@@ -171,9 +187,6 @@ export default function App() {
   // Stack details
   const StackDetailPage = () => {
     const { hostName, stackName } = useParams<{ hostName: string; stackName: string }>();
-    const searchParams = new URLSearchParams(location.search);
-    const iacId = searchParams.get("iacId") ? parseInt(searchParams.get("iacId")!) : undefined;
-
     const host = hosts.find(h => h.name === hostName);
     if (!host || !stackName) {
       navigate("/hosts");
@@ -184,7 +197,6 @@ export default function App() {
       <StackDetailView
         host={host}
         stackName={stackName}
-        iacId={iacId}
         onBack={() => navigate(`/hosts/${encodeURIComponent(host.name)}/stacks`)}
       />
     );
@@ -255,6 +267,21 @@ export default function App() {
             <Route path="/hosts/:hostName/images" element={<HostImagesPage />} />
             <Route path="/hosts/:hostName/networks" element={<HostNetworksPage />} />
             <Route path="/hosts/:hostName/volumes" element={<HostVolumesPage />} />
+            {/* Catch-all fallback - redirect to /hosts */}
+            <Route path="*" element={
+              <div className="min-h-screen bg-slate-950 text-white flex items-center justify-center">
+                <div className="text-center">
+                  <h1 className="text-2xl mb-4 text-white">Page Not Found</h1>
+                  <p className="text-slate-300 mb-6">The page you're looking for doesn't exist.</p>
+                  <button 
+                    onClick={() => navigate('/hosts')} 
+                    className="px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded transition-colors"
+                  >
+                    Go to Dashboard
+                  </button>
+                </div>
+              </div>
+            } />
           </Routes>
         </main>
 

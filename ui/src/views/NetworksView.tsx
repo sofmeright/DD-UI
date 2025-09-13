@@ -21,9 +21,9 @@ export default function NetworksView({ hosts }: { hosts: Host[] }) {
     (async () => {
       setLoading(true);
       try {
-        const r = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/networks`, { credentials: "include" });
+        const r = await fetch(`/api/networks/hosts/${encodeURIComponent(hostName)}`, { credentials: "include" });
         const j = await r.json();
-        setRows((j.items || []) as NetRow[]);
+        setRows((j.networks || []) as NetRow[]);
         setSelected([]); setLastIndex(null);
       } finally {
         setLoading(false);
@@ -77,7 +77,7 @@ export default function NetworksView({ hosts }: { hosts: Host[] }) {
   async function handleDeleteSelected() {
     if (!selected.length) return;
     const body = JSON.stringify({ names: selected });
-    const r = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/networks/delete`, {
+    const r = await fetch(`/api/networks/hosts/${encodeURIComponent(hostName)}/delete`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
@@ -88,16 +88,19 @@ export default function NetworksView({ hosts }: { hosts: Host[] }) {
       alert(typeof j === "string" ? j : "Delete failed");
     }
     // refresh
-    const rr = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/networks`, { credentials: "include" });
+    const rr = await fetch(`/api/networks/hosts/${encodeURIComponent(hostName)}`, { credentials: "include" });
     const jj = await rr.json();
-    setRows((jj.items || []) as NetRow[]);
+    setRows((jj.networks || []) as NetRow[]);
     setSelected([]); setLastIndex(null);
   }
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-lg font-semibold text-white">Networks</div>
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <div className="text-lg font-semibold text-white">Networks</div>
+          <HostPicker hosts={hosts} activeHost={hostName} setActiveHost={setHostName} />
+        </div>
         <div className="flex items-center gap-3">
           <button
             onClick={handleDeleteSelected}
@@ -109,7 +112,6 @@ export default function NetworksView({ hosts }: { hosts: Host[] }) {
           >
             Delete selected{selected.length ? ` (${selected.length})` : ""}
           </button>
-          <HostPicker hosts={hosts} activeHost={hostName} setActiveHost={setHostName} />
         </div>
       </div>
 

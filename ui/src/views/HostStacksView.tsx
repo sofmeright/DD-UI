@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
+import HostPicker from "@/components/HostPicker";
 import {
   ChevronRight,
   FileText,
@@ -55,12 +56,16 @@ function guessServiceFromContainerName(containerName: string, projectLabel: stri
 
 export default function HostStacksView({
   host,
+  hosts,
   onSync,
   onOpenStack,
+  onHostChange,
 }: {
   host: Host;
+  hosts: Host[];
   onSync: () => void;
-  onOpenStack: (stackName: string, iacId?: number) => void;
+  onOpenStack: (stackName: string) => void;
+  onHostChange: (hostName: string) => void;
 }) {
   debugLog('[DDUI] HostStacksView component mounted for host:', host.name);
   const [loading, setLoading] = useState(true);
@@ -87,7 +92,7 @@ export default function HostStacksView({
   async function doCtrAction(ctr: string, action: string) {
     try {
       await fetch(
-        `/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(ctr)}/action`,
+        `/api/containers/hosts/${encodeURIComponent(host.name)}/${encodeURIComponent(ctr)}/action`,
         {
           method: "POST",
           credentials: "include",
@@ -141,8 +146,8 @@ export default function HostStacksView({
       setErr(null);
       try {
         const [rc, ri] = await Promise.all([
-          fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`, { credentials: "include" }),
-          fetch(`/api/hosts/${encodeURIComponent(host.name)}/iac`, { credentials: "include" }),
+          fetch(`/api/containers/hosts/${encodeURIComponent(host.name)}`, { credentials: "include" }),
+          fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}`, { credentials: "include" }),
         ]);
         if (rc.status === 401 || ri.status === 401) {
           window.location.replace("/auth/login");
@@ -150,7 +155,7 @@ export default function HostStacksView({
         }
         const contJson = await rc.json();
         const iacJson = await ri.json();
-        const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
+        const runtime: ApiContainer[] = (contJson.containers || []) as ApiContainer[];
         const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
 
         // Enhanced drift/runtime (source drift, rendered services, & config-hash from backend)
@@ -159,13 +164,14 @@ export default function HostStacksView({
         {
           drift_detected: boolean;
           drift_reason?: string;
+          effective_auto_devops?: boolean;
           containers?: Array<{ name: string; config_hash?: string }>;
           rendered_services?: Array<{ service_name: string; container_name?: string; image?: string }>;
         }
         >();
         try {
         debugLog('[DDUI] Fetching enhanced-iac data for host:', host.name);
-        const re = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/enhanced-iac`, {
+        const re = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/enhanced`, {
           credentials: "include",
         });
         debugLog('[DDUI] Enhanced-iac response status:', re.status, re.statusText);
@@ -182,6 +188,7 @@ export default function HostStacksView({
             enhancedByName.set(nm, {
               drift_detected: !!s?.drift_detected,
               drift_reason: s?.drift_reason || "",
+              effective_auto_devops: !!s?.effective_auto_devops,
               containers: ctrs.map((c: any) => ({
                 name: (c?.name || "").toString(),
                 config_hash: (c?.config_hash || "").toString(),
@@ -201,24 +208,7 @@ export default function HostStacksView({
         errorLog('[DDUI] Enhanced-iac API error:', error);
         }
 
-        // Per-stack effective Auto DevOps (unchanged)
-        const effMap: Record<number, boolean> = {};
-        await Promise.all(
-        (iacStacks || [])
-          .filter((s) => typeof (s as any)?.id === "number")
-          .map(async (s) => {
-            try {
-              const r = await fetch(`/api/iac/stacks/${(s as any).id}`, { credentials: "include" });
-              if (!r.ok) return;
-              const j = await r.json();
-              if (j?.stack?.id) {
-                effMap[j.stack.id] = !!j.stack.effective_auto_devops;
-              }
-            } catch {
-              /* ignore */
-            }
-          })
-        );
+        // Auto DevOps information is now included in the enhanced-iac endpoint response
 
         // Build IaC maps (RAW names)
         const iacByStack = new Map<string, IacStack>();
@@ -411,8 +401,7 @@ export default function HostStacksView({
           stackDrift = "unknown";
         }
 
-        const effectiveAuto =
-          is && typeof (is as any).id === "number" && effMap[(is as any).id] ? true : false;
+        const effectiveAuto = enh?.effective_auto_devops ? true : false;
 
         const mergedRow: MergedStack = {
           name: sname,
@@ -477,13 +466,11 @@ export default function HostStacksView({
     }
 
     try {
-      const r = await fetch(`/api/iac/stacks`, {
+      const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          scope_kind: "host",
-          scope_name: host.name,
           stack_name: name, // store EXACT name as entered; Compose sanitizes at deploy
           iac_enabled: false,
         }),
@@ -496,8 +483,8 @@ export default function HostStacksView({
     }
   }
 
-  async function setAutoDevOps(id: number, enabled: boolean) {
-    const r = await fetch(`/api/iac/stacks/${id}`, {
+  async function setAutoDevOps(stackName: string, enabled: boolean) {
+    const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}`, {
       method: "PATCH",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
@@ -515,7 +502,7 @@ export default function HostStacksView({
       return;
     }
     setStacks((prev) => prev.map((row, i) => (i === sIndex ? { ...row, iacEnabled: enabled } : row)));
-    setAutoDevOps(s.iacId!, enabled).catch((err) => {
+    setAutoDevOps(s.name, enabled).catch((err) => {
       alert(`Failed to update Auto DevOps: ${err?.message || err}`);
       setStacks((prev) =>
         prev.map((row, i) => (i === sIndex ? { ...row, iacEnabled: !enabled } : row))
@@ -528,7 +515,7 @@ export default function HostStacksView({
     if (!s.iacId) return;
     if (!confirm(`Delete IaC for stack "${s.name}"? This removes IaC files/metadata but not runtime containers.`))
       return;
-    const r = await fetch(`/api/iac/stacks/${s.iacId}`, { method: "DELETE", credentials: "include" });
+    const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(s.name)}`, { method: "DELETE", credentials: "include" });
     if (!r.ok) {
       alert(`Failed to delete: ${r.status} ${r.statusText}`);
       return;
@@ -600,11 +587,12 @@ export default function HostStacksView({
         </div>
       )}
 
-      <div className="flex items-center gap-2">
-        <div className="text-lg font-semibold text-white">
-          {host.name} <span className="text-slate-400 text-sm">{host.address || ""}</span>
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <div className="text-lg font-semibold text-white">Stacks</div>
+          <HostPicker hosts={hosts} activeHost={host.name} setActiveHost={onHostChange} />
         </div>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="flex items-center gap-2">
           <Button onClick={onSync} className="bg-[#310937] hover:bg-[#2a0830] text-white">
             <RefreshCw className="h-4 w-4 mr-1" /> Sync
           </Button>
@@ -634,12 +622,19 @@ export default function HostStacksView({
         </div>
       )}
 
-      {stacks.map((s, idx) => (
+      {stacks
+        .filter((s) => {
+          // Hide stack cards if search is active and no containers match
+          if (!hostQuery.trim()) return true;
+          const matchingRows = s.rows.filter((r) => matchRow(r, hostQuery));
+          return matchingRows.length > 0;
+        })
+        .map((s, idx) => (
         <Card key={`${host.name}:${s.name}`} className="bg-slate-900/50 border-slate-800 rounded-xl">
           <CardHeader className="pb-2 flex flex-row items-center justify-between">
             <div className="space-y-1">
               <CardTitle className="text-xl text-white">
-                <button className="hover:underline" onClick={() => onOpenStack(s.name, s.iacId)}>
+                <button className="hover:underline" onClick={() => onOpenStack(s.name)}>
                   {s.name}
                 </button>
               </CardTitle>
@@ -734,7 +729,7 @@ export default function HostStacksView({
                               {r.state === "missing" ? (
                                 // For missing services, only show inspect action
                                 <>
-                                  <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
+                                  <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name)} />
                                   <span className="text-slate-500 text-xs ml-2">Service not running</span>
                                 </>
                               ) : (
@@ -767,14 +762,14 @@ export default function HostStacksView({
                                   <span className="mx-1 h-4 w-px bg-slate-700/60" />
 
                                   <ActionBtn title="Live logs" icon={FileText} onClick={() => openLiveLogs(r.name)} />
-                                  <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name, s.iacId)} />
+                                  <ActionBtn title="Inspect" icon={Bug} onClick={() => onOpenStack(s.name)} />
                                   <ActionBtn
                                     title="Stats"
                                     icon={Activity}
                                     onClick={async () => {
                                       try {
                                         const r2 = await fetch(
-                                          `/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(r.name)}/stats`,
+                                          `/api/containers/hosts/${encodeURIComponent(host.name)}/${encodeURIComponent(r.name)}/stats`,
                                           { credentials: "include" }
                                         );
                                         const txt = await r2.text();

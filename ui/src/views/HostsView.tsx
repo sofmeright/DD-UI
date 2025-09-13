@@ -25,6 +25,7 @@ export default function HostsView({
 
   return (
     <div className="space-y-4">
+      <div className="text-lg font-semibold text-white">Hosts</div>
       <div className="grid md:grid-cols-5 gap-4">
         <MetricCard title="Hosts" value={metrics.hosts} icon={Boxes} />
         <MetricCard title="Stacks" value={metrics.stacks} icon={Boxes} />

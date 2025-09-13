@@ -18,14 +18,16 @@ import { errorLog } from "@/utils/logging";
 export default function MiniEditor({
   id,
   initialPath,
-  stackId,
+  hostName,
+  stackName,
   ensureStack,
   refresh,
   fileMeta, // optional metadata for the active file (includes .sops flag)
 }: {
   id: string;
   initialPath: string;
-  stackId?: number;
+  hostName: string; // Required - hierarchical approach only
+  stackName: string; // Required - hierarchical approach only
   ensureStack: () => Promise<number>;
   refresh: () => void;
   fileMeta?: IacFileMeta;
@@ -80,18 +82,14 @@ export default function MiniEditor({
     return "plaintext";
   }, [path]);
 
-  // Fetch file (optionally decrypted)
+  // Fetch file (optionally decrypted) - PURE HIERARCHICAL ONLY
   async function loadFile(opts?: { decrypt?: boolean }) {
-    if (!stackId) {
-      setContent("");
-      return;
-    }
     setLoading(true);
     try {
       const params = new URLSearchParams({ path });
       if (opts?.decrypt) params.set("decrypt", "1");
 
-      const r = await fetch(`/api/iac/stacks/${stackId}/file?${params.toString()}`, {
+      const r = await fetch(`/api/iac/hosts/${encodeURIComponent(hostName)}/stacks/${encodeURIComponent(stackName)}/file?${params.toString()}`, {
         credentials: "include",
         headers: opts?.decrypt ? { "X-Confirm-Reveal": "yes" } : undefined,
       });
@@ -116,21 +114,19 @@ export default function MiniEditor({
   useEffect(() => {
     loadFile({ decrypt: decryptedView && (isSopsPersisted || sopsOnSave) });
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [stackId, path, decryptedView]);
+  }, [hostName, stackName, path, decryptedView]);
 
-  // Save file with current sopsOnSave preference.
+  // Save file with current sopsOnSave preference - PURE HIERARCHICAL ONLY
   async function saveFile() {
     setLoading(true);
     try {
-      const idToUse = stackId ?? (await ensureStack());
-
       // If the file is currently SOPS on disk, but the user turned SOPS OFF for save,
       // and they're NOT in decrypted view, fetch decrypted content so we save plaintext.
       let bodyContent = content;
       if (!sopsOnSave && isSopsPersisted && !decryptedView) {
         try {
           const params = new URLSearchParams({ path, decrypt: "1" });
-          const rDec = await fetch(`/api/iac/stacks/${idToUse}/file?${params.toString()}`, {
+          const rDec = await fetch(`/api/iac/hosts/${encodeURIComponent(hostName)}/stacks/${encodeURIComponent(stackName)}/file?${params.toString()}`, {
             credentials: "include",
             headers: { "X-Confirm-Reveal": "yes" },
           });
@@ -143,7 +139,7 @@ export default function MiniEditor({
         }
       }
 
-      const resp = await fetch(`/api/iac/stacks/${idToUse}/file`, {
+      const resp = await fetch(`/api/iac/hosts/${encodeURIComponent(hostName)}/stacks/${encodeURIComponent(stackName)}/file`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
@@ -225,7 +221,7 @@ export default function MiniEditor({
                 variant="outline"
                 className="h-8 px-2 border-indigo-700 text-indigo-200"
                 onClick={toggleDecryptedView}
-                disabled={loading || !stackId}
+                disabled={loading}
                 title={decryptedView ? "Hide decrypted view" : "Show decrypted view"}
               >
                 {decryptedView ? <EyeOff className="h-4 w-4 mr-1" /> : <Eye className="h-4 w-4 mr-1" />}

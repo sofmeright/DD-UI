@@ -362,15 +362,15 @@ function ContainerCard({
 /* ---------- Page ---------- */
 
 export default function StackDetailView({
-  host, stackName, iacId, onBack,
-}: { host: Host; stackName: string; iacId?: number; onBack: ()=>void }) {
+  host, stackName, onBack,
+}: { host: Host; stackName: string; onBack: ()=>void }) {
   const [runtime, setRuntime] = useState<ApiContainer[]>([]);
   const [containers, setContainers] = useState<InspectOut[]>([]);
   const [files, setFiles] = useState<IacFileMeta[]>([]);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [editPath, setEditPath] = useState<string | null>(null);
-  const [stackIacId, setStackIacId] = useState<number | undefined>(iacId);
+  // Remove stackIacId dependency - use stable host.name + stackName instead
   const [autoDevOps, setAutoDevOps] = useState<boolean>(false);
 
   const [deploying, setDeploying] = useState<boolean>(false);
@@ -383,8 +383,8 @@ export default function StackDetailView({
   useEffect(() => { setAutoDevOps(false); }, [stackName]);
 
   async function refreshFiles() {
-    if (!stackIacId) return;
-    const r = await fetch(`/api/iac/stacks/${stackIacId}/files`, { credentials: "include" });
+    // Use new hierarchical endpoint instead of ID-based
+    const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}/files`, { credentials: "include" });
     if (!r.ok) return;
     const j = await r.json();
     setFiles(j.files || []);
@@ -393,16 +393,57 @@ export default function StackDetailView({
   // Dedicated runtime refresh (containers + inspect) - optimized to reduce API spam
   async function refreshRuntime(skipInspect = false) {
     try {
-      const rc = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers`, { credentials: "include" });
+      const rc = await fetch(`/api/containers/hosts/${encodeURIComponent(host.name)}`, { credentials: "include" });
       if (rc.status === 401) { window.location.replace("/auth/login"); return; }
       const contJson = await rc.json();
-      const runtimeAll: ApiContainer[] = (contJson.items || []) as ApiContainer[];
+      const runtimeAll: ApiContainer[] = (contJson.containers || []) as ApiContainer[];
+      debugLog(`=== CONTAINER API DEBUG ===`);
+      debugLog(`Container API response for host ${host.name}:`, { 
+        status: rc.status, 
+        totalContainers: runtimeAll.length, 
+        rawResponse: contJson,
+        containers: runtimeAll.map(c => ({ 
+          name: c.name, 
+          compose_project: c.compose_project, 
+          stack: c.stack,
+          hasComposeProject: !!c.compose_project,
+          hasStack: !!c.stack
+        }))
+      });
+      
       // Use sanitized stack name to match Docker Compose project labels (same logic as backend)
       const sanitizedStackName = stackName.toLowerCase().replace(/[^a-z0-9_-]/g, '_').replace(/^[_-]+|[_-]+$/g, '') || 'default';
+      debugLog(`Filtering containers for stack "${stackName}":`, { stackName, sanitizedStackName });
+      
       const my = runtimeAll.filter(c => {
         const project = c.compose_project || c.stack || "(none)";
-        return project === stackName || project === sanitizedStackName;
+        
+        // Primary matching: exact stack name or sanitized stack name
+        const projectMatches = project === stackName || project === sanitizedStackName;
+        
+        // Secondary matching: for unmanaged stacks, check if container name suggests it belongs to this stack
+        // This handles cases where containers exist but don't have compose_project set
+        const nameMatches = !c.compose_project && (
+          c.name.startsWith(stackName + '-') || 
+          c.name.startsWith(stackName + '_') ||
+          c.name.includes(stackName)
+        );
+        
+        const matches = projectMatches || nameMatches;
+        
+        debugLog(`Container "${c.name}": compose_project="${c.compose_project}", stack="${c.stack}", project="${project}", projectMatches=${projectMatches}, nameMatches=${nameMatches}, matches=${matches}`);
+        
+        return matches;
       });
+      
+      debugLog(`=== FILTERING RESULT ===`);
+      debugLog(`Found ${my.length} containers for stack "${stackName}":`, my.map(c => ({ 
+        name: c.name, 
+        project: c.compose_project || c.stack || "(none)",
+        compose_project: c.compose_project,
+        stack: c.stack 
+      })));
+      debugLog(`=== END CONTAINER DEBUG ===`);
       setRuntime(my);
 
       // Check for deployment completion (if we're watching after a deploy)
@@ -442,13 +483,27 @@ export default function StackDetailView({
 
       // Skip detailed inspection during rapid polling to reduce API load
       if (!skipInspect) {
+        debugLog(`=== INSPECTION DEBUG ===`);
+        debugLog(`Starting inspection for ${my.length} filtered containers`, my.map(c => c.name));
         const ins: InspectOut[] = [];
         for (const c of my) {
-          const r = await fetch(`/api/hosts/${encodeURIComponent(host.name)}/containers/${encodeURIComponent(c.name)}/inspect`, { credentials: "include" });
-          if (!r.ok) continue;
-          ins.push(await r.json());
+          const inspectUrl = `/api/containers/hosts/${encodeURIComponent(host.name)}/${encodeURIComponent(c.name)}/inspect`;
+          debugLog(`Fetching inspection data for container "${c.name}" from ${inspectUrl}`);
+          const r = await fetch(inspectUrl, { credentials: "include" });
+          debugLog(`Inspection response for "${c.name}": status ${r.status} ${r.statusText}`);
+          if (!r.ok) {
+            debugLog(`Inspection failed for "${c.name}": ${r.status} ${r.statusText}`);
+            continue;
+          }
+          const inspectData = await r.json();
+          debugLog(`Inspection data for "${c.name}":`, inspectData);
+          ins.push(inspectData);
         }
+        debugLog(`=== INSPECTION RESULT ===`);
+        debugLog(`Successfully fetched inspection data for ${ins.length}/${my.length} containers`);
+        debugLog(`Setting containers state with:`, ins.map(i => ({ name: i.name, id: i.id })));
         setContainers(ins);
+        debugLog(`=== END INSPECTION DEBUG ===`);
       }
     } catch (e) {
       // soft-fail
@@ -463,7 +518,7 @@ export default function StackDetailView({
       setLoading(true); setErr(null);
       try {
         await refreshRuntime();
-        if (stackIacId) await refreshFiles();
+        await refreshFiles(); // Always try to load files with new hierarchical endpoint
       } catch (e: any) {
         if (!cancel) setErr(e?.message || "Failed to load stack");
       } finally {
@@ -472,54 +527,52 @@ export default function StackDetailView({
     })();
     return () => { cancel = true; };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [host.name, stackName, stackIacId]);
+  }, [host.name, stackName]);
 
-  // Load EFFECTIVE Auto DevOps
+  // Load EFFECTIVE Auto DevOps using new hierarchical endpoint
   useEffect(() => {
     let cancel = false;
     (async () => {
-      if (!stackIacId) { setAutoDevOps(false); return; }
       try {
-        const r = await fetch(`/api/iac/stacks/${stackIacId}`, { credentials: "include" });
-        if (!r.ok) return;
+        const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}`, { credentials: "include" });
+        if (!r.ok) { setAutoDevOps(false); return; }
         const j = await r.json();
         if (!cancel) setAutoDevOps(!!j?.stack?.effective_auto_devops);
-      } catch { /* ignore */ }
+      } catch { 
+        if (!cancel) setAutoDevOps(false);
+      }
     })();
     return () => { cancel = true; };
-  }, [stackIacId]);
+  }, [host.name, stackName]);
 
   async function ensureStack() {
-    if (stackIacId) return stackIacId;
-    const r = await fetch(`/api/iac/stacks`, {
+    // With hierarchical endpoints, we don't need to track stack ID anymore
+    // The stack is identified by host.name + stackName combination
+    const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks`, {
       method: "POST",
-      credentials: "include",
+      credentials: "include", 
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ scope_kind: "host", scope_name: host.name, stack_name: stackName, iac_enabled: false }),
+      body: JSON.stringify({ stack_name: stackName, iac_enabled: false }),
     });
     if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
     const j = await r.json();
-    if (j.id) setStackIacId(j.id);
-    return j.id;
+    return j.id; // Return for compatibility, but we don't store it
   }
 
   async function deleteStack() {
-    if (!stackIacId) return;
     if (!confirm(`Delete IaC stack "${stackName}"? This only deletes IaC metadata/files, not runtime containers.`)) return;
-    const r = await fetch(`/api/iac/stacks/${stackIacId}`, { method: "DELETE", credentials: "include" });
+    const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}`, { method: "DELETE", credentials: "include" });
     if (!r.ok) { alert(`Failed to delete: ${r.status} ${r.statusText}`); return; }
-    setStackIacId(undefined);
     setFiles([]);
     setEditPath(null);
   }
 
   // Toggle stack Auto DevOps OVERRIDE
   async function toggleAutoDevOps(checked: boolean) {
-    let id = stackIacId;
-    if (!id) {
+    // Ensure stack exists if we don't have files yet
+    if (files.length === 0) {
       try {
-        id = await ensureStack();
-        setStackIacId(id);
+        await ensureStack();
       } catch (e: any) {
         alert(e?.message || "Unable to create stack for Auto DevOps");
         return;
@@ -530,7 +583,7 @@ export default function StackDetailView({
       return;
     }
     setAutoDevOps(checked);
-    await fetch(`/api/iac/stacks/${id}`, {
+    await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}`, {
       method: "PATCH",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
@@ -587,7 +640,6 @@ export default function StackDetailView({
   }, []);
 
   async function deployNow() {
-    if (!stackIacId) { alert("Create the stack (save a file) before deploying."); return; }
     if (files.length === 0) { alert("This stack has no files to deploy. Add a compose file or scripts first."); return; }
     
     setDeploying(true);
@@ -595,10 +647,10 @@ export default function StackDetailView({
     
     try {
       // First check if configuration has changed
-      debugLog('Checking if configuration has changed for stack ID:', stackIacId);
+      debugLog(`Checking if configuration has changed for stack: ${host.name}/${stackName}`);
       let forceDeployment = false;
       
-      const checkResponse = await fetch(`/api/iac/stacks/${stackIacId}/deploy-check`, {
+      const checkResponse = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}/deploy-check`, {
         method: "POST",
         credentials: "include"
       });
@@ -626,7 +678,7 @@ export default function StackDetailView({
       setDeployResult({ success: true, message: "⏳ Starting deployment..." });
       
       // Build the deployment URL with force parameter if needed
-      let deployUrl = `/api/iac/stacks/${stackIacId}/deploy-stream`;
+      let deployUrl = `/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}/deploy-stream`;
       if (forceDeployment) {
         deployUrl += "?force=true";
       }
@@ -740,7 +792,7 @@ export default function StackDetailView({
         <div className="ml-auto flex items-center gap-3">
           <span className="text-sm text-slate-300">Auto DevOps</span>
           <Switch checked={autoDevOps} onCheckedChange={(v) => toggleAutoDevOps(!!v)} />
-          {stackIacId ? (
+          {files.length > 0 ? (
             <Button
               onClick={async () => { await refreshRuntime(); await refreshFiles(); }}
               variant="outline"
@@ -824,7 +876,7 @@ export default function StackDetailView({
               {/* (Deploy button removed from header earlier to avoid redundancy) */}
             </CardHeader>
             <CardContent className="flex-1 min-h-0 flex flex-col gap-3">
-              {!stackIacId && (
+              {files.length === 0 && (
                 <div className="text-sm text-amber-300 shrink-0">
                   No IaC yet. Use the buttons below — the <b>first Save</b> will create the IaC stack automatically.
                 </div>
@@ -856,7 +908,7 @@ export default function StackDetailView({
                   </Button>
 
                   {/* Delete IaC sits left of Deploy */}
-                  {stackIacId ? (
+                  {files.length > 0 ? (
                     <Button onClick={deleteStack} variant="outline" className="border-rose-700 text-rose-200">
                       <Trash2 className="h-4 w-4 mr-1" /> Delete IaC
                     </Button>
@@ -905,8 +957,7 @@ export default function StackDetailView({
                               size="icon"
                               variant="ghost"
                               onClick={async () => {
-                                if (!stackIacId) return;
-                                const r = await fetch(`/api/iac/stacks/${stackIacId}/file?path=${encodeURIComponent(f.rel_path)}`, { method: "DELETE", credentials: "include" });
+                                const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}/file?path=${encodeURIComponent(f.rel_path)}`, { method: "DELETE", credentials: "include" });
                                 if (r.ok) refreshFiles();
                               }}
                               title="Delete"
@@ -930,7 +981,8 @@ export default function StackDetailView({
                     key={editPath}
                     id="stack-editor"
                     initialPath={editPath}
-                    stackId={stackIacId}
+                    hostName={host.name}
+                    stackName={stackName}
                     ensureStack={ensureStack}
                     refresh={() => { setEditPath(null); refreshFiles(); }}
                     fileMeta={files.find(f => f.rel_path === editPath)}
@@ -942,7 +994,7 @@ export default function StackDetailView({
         </div>
       </div>
 
-      {!loading && containers.length === 0 && !stackIacId && (
+      {!loading && containers.length === 0 && files.length === 0 && (
         <Card className="bg-slate-900/40 border-slate-800">
           <CardContent className="py-4 text-sm text-slate-300">
             This stack has no running containers on <b>{host.name}</b> and is not declared in IaC yet.

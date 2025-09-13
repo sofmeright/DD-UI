@@ -298,6 +298,16 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func CallbackHandler(w http.ResponseWriter, r *http.Request) {
+	debugLog("CallbackHandler: Starting OAuth callback processing")
+	
+	// Add panic recovery to prevent 502 errors
+	defer func() {
+		if r := recover(); r != nil {
+			debugLog("CallbackHandler: PANIC recovered: %v", r)
+			http.Error(w, "Internal server error during authentication", http.StatusInternalServerError)
+		}
+	}()
+	
 	// Read and immediately expire the temporary oauth cookie
 	tmp, _ := store.Get(r, oauthTmpName)
 	wantState, _ := tmp.Values["state"].(string)
@@ -305,31 +315,61 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	tmp.Options.MaxAge = -1
 	_ = tmp.Save(r, w)
 
+	debugLog("CallbackHandler: Retrieved state=%s, nonce=%s", wantState, nonce)
+
 	// CSRF protection: state must match
 	if r.URL.Query().Get("state") != wantState || wantState == "" {
+		debugLog("CallbackHandler: State mismatch - got=%s, want=%s", r.URL.Query().Get("state"), wantState)
 		http.Error(w, "state mismatch", http.StatusBadRequest)
 		return
 	}
 
-	ctx := r.Context()
+	debugLog("CallbackHandler: State validation passed, exchanging code for token")
+	
+	// Check if oauthCfg is properly initialized
+	if oauthCfg == nil {
+		debugLog("CallbackHandler: oauthCfg is nil - auth not properly initialized")
+		http.Error(w, "Authentication not properly configured", http.StatusInternalServerError)
+		return
+	}
+	
+	// Add timeout context for token exchange to prevent hanging
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+	
+	debugLog("CallbackHandler: Calling oauthCfg.Exchange with code")
 	tok, err := oauthCfg.Exchange(ctx, r.URL.Query().Get("code"))
 	if err != nil {
+		debugLog("CallbackHandler: Token exchange failed: %v", err)
 		http.Error(w, "code exchange failed", http.StatusBadGateway)
 		return
 	}
+	debugLog("CallbackHandler: Token exchange successful")
 
 	// --- raw id_token for verification + server-side storage only ---
 	rawID, ok := tok.Extra("id_token").(string)
 	if !ok {
+		debugLog("CallbackHandler: No id_token found in token response")
 		http.Error(w, "no id_token", http.StatusBadGateway)
 		return
 	}
+	debugLog("CallbackHandler: Got id_token, verifying...")
 
+	// Check if oidcVerifier is properly initialized
+	if oidcVerifier == nil {
+		debugLog("CallbackHandler: oidcVerifier is nil - auth not properly initialized")
+		http.Error(w, "Authentication verifier not configured", http.StatusInternalServerError)
+		return
+	}
+
+	debugLog("CallbackHandler: Calling oidcVerifier.Verify")
 	idt, err := oidcVerifier.Verify(ctx, rawID)
 	if err != nil {
+		debugLog("CallbackHandler: ID token verification failed: %v", err)
 		http.Error(w, "id token verify failed", http.StatusUnauthorized)
 		return
 	}
+	debugLog("CallbackHandler: ID token verification successful")
 	if idt.Nonce != nonce {
 		http.Error(w, "nonce mismatch", http.StatusBadRequest)
 		return

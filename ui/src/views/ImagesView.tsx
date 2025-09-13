@@ -28,9 +28,9 @@ export default function ImagesView({ hosts }: { hosts: Host[] }) {
     (async () => {
       setLoading(true);
       try {
-        const r = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/images`, { credentials: "include" });
+        const r = await fetch(`/api/images/hosts/${encodeURIComponent(hostName)}`, { credentials: "include" });
         const j = await r.json();
-        setRows((j.items || []) as ImageRow[]);
+        setRows((j.images || []) as ImageRow[]);
         setSelected([]); setLastIndex(null);
       } finally {
         setLoading(false);
@@ -87,7 +87,7 @@ export default function ImagesView({ hosts }: { hosts: Host[] }) {
   async function handleDeleteSelected() {
     if (!selected.length) return;
     const body = JSON.stringify({ ids: selected, force });
-    const r = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/images/delete`, {
+    const r = await fetch(`/api/images/hosts/${encodeURIComponent(hostName)}/delete`, {
       method: "POST",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
@@ -99,16 +99,19 @@ export default function ImagesView({ hosts }: { hosts: Host[] }) {
       alert(typeof j === "string" ? j : "Delete failed");
     }
     // refresh
-    const rr = await fetch(`/api/hosts/${encodeURIComponent(hostName)}/images`, { credentials: "include" });
+    const rr = await fetch(`/api/images/hosts/${encodeURIComponent(hostName)}`, { credentials: "include" });
     const jj = await rr.json();
-    setRows((jj.items || []) as ImageRow[]);
+    setRows((jj.images || []) as ImageRow[]);
     setSelected([]); setLastIndex(null);
   }
 
   return (
     <div className="space-y-3">
-      <div className="flex items-center justify-between gap-3">
-        <div className="text-lg font-semibold text-white">Images</div>
+      <div className="flex items-center justify-between gap-4">
+        <div className="flex items-center gap-4">
+          <div className="text-lg font-semibold text-white">Images</div>
+          <HostPicker hosts={hosts} activeHost={hostName} setActiveHost={setHostName} />
+        </div>
         <div className="flex items-center gap-3">
           <label className="flex items-center gap-2 text-slate-300 text-sm">
             <input
@@ -129,7 +132,6 @@ export default function ImagesView({ hosts }: { hosts: Host[] }) {
           >
             Delete selected{selected.length ? ` (${selected.length})` : ""}
           </button>
-          <HostPicker hosts={hosts} activeHost={hostName} setActiveHost={setHostName} />
         </div>
       </div>
 

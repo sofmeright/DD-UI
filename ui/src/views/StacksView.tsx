@@ -33,7 +33,7 @@ export default function StacksView({
   onOpenStack,
 }: {
   hosts: Host[];
-  onOpenStack: (host: Host, stackName: string, iacId?: number) => void;
+  onOpenStack: (host: Host, stackName: string) => void;
 }) {
   const [selectedHost, setSelectedHost] = useState<Host | null>(null);
   const [loading, setLoading] = useState(false);
@@ -68,7 +68,7 @@ export default function StacksView({
     if (!selectedHost) return;
     try {
       await fetch(
-        `/api/hosts/${encodeURIComponent(selectedHost.name)}/containers/${encodeURIComponent(ctr)}/action`,
+        `/api/containers/hosts/${encodeURIComponent(selectedHost.name)}/${encodeURIComponent(ctr)}/action`,
         {
           method: "POST",
           credentials: "include",
@@ -120,8 +120,8 @@ export default function StacksView({
     setErr(null);
     try {
       const [rc, ri] = await Promise.all([
-        fetch(`/api/hosts/${encodeURIComponent(hostName)}/containers`, { credentials: "include" }),
-        fetch(`/api/hosts/${encodeURIComponent(hostName)}/iac`, { credentials: "include" }),
+        fetch(`/api/containers/hosts/${encodeURIComponent(hostName)}`, { credentials: "include" }),
+        fetch(`/api/iac/hosts/${encodeURIComponent(hostName)}`, { credentials: "include" }),
       ]);
       if (rc.status === 401 || ri.status === 401) {
         window.location.replace("/auth/login");
@@ -129,21 +129,20 @@ export default function StacksView({
       }
       const contJson = await rc.json();
       const iacJson = await ri.json();
-      const runtime: ApiContainer[] = (contJson.items || []) as ApiContainer[];
+      const runtime: ApiContainer[] = (contJson.containers || []) as ApiContainer[];
       const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
 
-      // Fetch per-stack effective Auto DevOps
-      const effMap: Record<number, boolean> = {};
+      // Fetch per-stack effective Auto DevOps using hierarchical endpoints
+      const effMap: Record<string, boolean> = {};
       await Promise.all(
         (iacStacks || [])
-          .filter((s) => typeof (s as any)?.id === "number")
           .map(async (s) => {
             try {
-              const r = await fetch(`/api/iac/stacks/${(s as any).id}`, { credentials: "include" });
+              const r = await fetch(`/api/iac/hosts/${encodeURIComponent(hostName)}/stacks/${encodeURIComponent(s.name)}`, { credentials: "include" });
               if (!r.ok) return;
               const j = await r.json();
-              if (j?.stack?.id) {
-                effMap[j.stack.id] = !!j.stack.effective_auto_devops;
+              if (j?.stack?.name) {
+                effMap[j.stack.name] = !!j.stack.effective_auto_devops;
               }
             } catch {
               /* ignore per-stack errors */
@@ -227,8 +226,7 @@ export default function StacksView({
           stackDrift = rows.some((r) => r.drift) ? "drift" : "in_sync";
         }
 
-        const effectiveAuto =
-          is && typeof (is as any).id === "number" && effMap[(is as any).id] ? true : false;
+        const effectiveAuto = is && effMap[is.name] ? true : false;
 
         merged.push({
           name: sname,
@@ -238,7 +236,6 @@ export default function StacksView({
           sops: hasIac ? is?.sops_status === "all" : false,
           deployKind: hasIac ? is?.deploy_kind || "compose" : sname === "(none)" ? "unmanaged" : "unmanaged",
           rows,
-          iacId: (is as any)?.id,
           hasIac,
           hasContent,
         });
@@ -270,28 +267,25 @@ export default function StacksView({
       return;
     }
     try {
-      const r = await fetch(`/api/iac/stacks`, {
+      const r = await fetch(`/api/iac/hosts/${encodeURIComponent(selectedHost.name)}/stacks`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          scope_kind: "host",
-          scope_name: selectedHost.name,
           stack_name: name,
           iac_enabled: false,
         }),
       });
       if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
-      const j = await r.json();
-      onOpenStack(selectedHost, name, j.id);
+      onOpenStack(selectedHost, name);
     } catch (e: any) {
       alert(e?.message || "Failed to create stack");
     }
   }
 
-  // PATCH the stack Auto DevOps OVERRIDE (decoupled from iac_enabled)
-  async function setAutoDevOps(id: number, enabled: boolean) {
-    const r = await fetch(`/api/iac/stacks/${id}`, {
+  // PATCH the stack Auto DevOps OVERRIDE (decoupled from iac_enabled) using hierarchical endpoint
+  async function setAutoDevOps(hostName: string, stackName: string, enabled: boolean) {
+    const r = await fetch(`/api/iac/hosts/${encodeURIComponent(hostName)}/stacks/${encodeURIComponent(stackName)}`, {
       method: "PATCH",
       credentials: "include",
       headers: { "Content-Type": "application/json" },
@@ -302,7 +296,7 @@ export default function StacksView({
 
   function handleToggleAuto(sIndex: number, enabled: boolean) {
     const s = stacks[sIndex];
-    if (!s.iacId || !s.hasContent) {
+    if (!selectedHost || !s.hasIac || !s.hasContent) {
       if (enabled) {
         alert(
           "This stack needs compose files or services before Auto DevOps can be enabled. Add content first."
@@ -311,7 +305,7 @@ export default function StacksView({
       return;
     }
     setStacks((prev) => prev.map((row, i) => (i === sIndex ? { ...row, iacEnabled: enabled } : row)));
-    setAutoDevOps(s.iacId!, enabled).catch((err) => {
+    setAutoDevOps(selectedHost.name, s.name, enabled).catch((err) => {
       alert(`Failed to update Auto DevOps: ${err?.message || err}`);
       setStacks((prev) =>
         prev.map((row, i) => (i === sIndex ? { ...row, iacEnabled: !enabled } : row))
@@ -321,14 +315,14 @@ export default function StacksView({
 
   async function deleteStackAt(index: number) {
     const s = stacks[index];
-    if (!s.iacId) return;
+    if (!selectedHost || !s.hasIac) return;
     if (
       !confirm(
         `Delete IaC for stack "${s.name}"? This removes IaC files/metadata but not runtime containers.`
       )
     )
       return;
-    const r = await fetch(`/api/iac/stacks/${s.iacId}`, { method: "DELETE", credentials: "include" });
+    const r = await fetch(`/api/iac/hosts/${encodeURIComponent(selectedHost.name)}/stacks/${encodeURIComponent(s.name)}`, { method: "DELETE", credentials: "include" });
     if (!r.ok) {
       alert(`Failed to delete: ${r.status} ${r.statusText}`);
       return;
@@ -338,7 +332,6 @@ export default function StacksView({
         i === index
           ? {
               ...row,
-              iacId: undefined,
               hasIac: false,
               iacEnabled: false,
               pullPolicy: undefined,
@@ -480,7 +473,7 @@ export default function StacksView({
               <CardHeader className="pb-2 flex flex-row items-center justify-between">
                 <div className="space-y-1">
                   <CardTitle className="text-xl text-white">
-                    <button className="hover:underline" onClick={() => onOpenStack(selectedHost, s.name, s.iacId)}>
+                    <button className="hover:underline" onClick={() => onOpenStack(selectedHost, s.name)}>
                       {s.name}
                     </button>
                   </CardTitle>
@@ -513,9 +506,9 @@ export default function StacksView({
                     id={`auto-${idx}`}
                     checked={!!s.iacEnabled}
                     onCheckedChange={(v) => handleToggleAuto(idx, !!v)}
-                    disabled={!s.iacId || !s.hasContent}
+                    disabled={!s.hasIac || !s.hasContent}
                   />
-                  {s.iacId && (
+                  {s.hasIac && (
                     <Button
                       size="icon"
                       variant="ghost"
@@ -638,7 +631,7 @@ export default function StacksView({
                                   <ActionBtn
                                     title="Inspect"
                                     icon={Bug}
-                                    onClick={() => onOpenStack(selectedHost, s.name, s.iacId)}
+                                    onClick={() => onOpenStack(selectedHost, s.name)}
                                   />
                                   <ActionBtn
                                     title="Stats"
@@ -646,7 +639,7 @@ export default function StacksView({
                                     onClick={async () => {
                                       try {
                                         const r2 = await fetch(
-                                          `/api/hosts/${encodeURIComponent(selectedHost.name)}/containers/${encodeURIComponent(r.name)}/stats`,
+                                          `/api/containers/hosts/${encodeURIComponent(selectedHost.name)}/${encodeURIComponent(r.name)}/stats`,
                                           { credentials: "include" }
                                         );
                                         const txt = await r2.text();

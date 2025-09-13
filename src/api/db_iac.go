@@ -147,6 +147,15 @@ type IacStackOut struct {
 	Services   []IacServiceRow `json:"services"`
 }
 
+// Helper function for hierarchical API name-to-ID resolution
+func getStackID(ctx context.Context, scopeKind, scopeName, stackName string) (int64, error) {
+	var id int64
+	err := db.QueryRow(ctx, 
+		`SELECT id FROM iac_stacks WHERE scope_kind=$1 AND scope_name=$2 AND stack_name=$3`,
+		scopeKind, scopeName, stackName).Scan(&id)
+	return id, err
+}
+
 func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, error) {
 	debugLog("listIacStacksForHost called for host: %s", hostName)
 	h, err := GetHostByName(ctx, hostName)
@@ -484,4 +493,70 @@ func setStackDevopsOverride(ctx context.Context, scopeKind, scopeName, stackName
 	}
 	
 	return nil
+}
+
+// getStacksBatch retrieves multiple stacks by their IDs for the batch endpoint
+func getStacksBatch(ctx context.Context, stackIds []int64) ([]map[string]any, error) {
+	if len(stackIds) == 0 {
+		return []map[string]any{}, nil
+	}
+	
+	var result []map[string]any
+	
+	for _, id := range stackIds {
+		var stack struct {
+			ID         int64   `json:"id"`
+			RepoID     int64   `json:"repo_id"`
+			ScopeKind  string  `json:"scope_kind"`
+			ScopeName  string  `json:"scope_name"`
+			StackName  string  `json:"stack_name"`
+			RelPath    string  `json:"rel_path"`
+			IacEnabled bool    `json:"iac_enabled"`
+			DeployKind string  `json:"deploy_kind"`
+			SopsStatus string  `json:"sops_status"`
+			Override   *bool   `json:"auto_apply_override"`
+			UpdatedAt  string  `json:"updated_at"`
+		}
+		
+		var updatedAt time.Time
+		err := db.QueryRow(ctx, `
+			SELECT id, repo_id, scope_kind::text, scope_name, stack_name, rel_path,
+				iac_enabled, deploy_kind::text, sops_status::text, auto_apply_override, updated_at
+			FROM iac_stacks
+			WHERE id=$1
+		`, id).Scan(
+			&stack.ID, &stack.RepoID, &stack.ScopeKind, &stack.ScopeName, &stack.StackName, &stack.RelPath,
+			&stack.IacEnabled, &stack.DeployKind, &stack.SopsStatus, &stack.Override, &updatedAt,
+		)
+		
+		if err != nil {
+			if err == sql.ErrNoRows {
+				// Skip missing stacks
+				continue
+			}
+			return nil, fmt.Errorf("failed to get stack %d: %v", id, err)
+		}
+		
+		stack.UpdatedAt = updatedAt.Format(time.RFC3339)
+		effectiveAutoDevops, _ := shouldAutoApply(ctx, id)
+		
+		stackMap := map[string]any{
+			"id":                    stack.ID,
+			"repo_id":               stack.RepoID,
+			"scope_kind":            stack.ScopeKind,
+			"scope_name":            stack.ScopeName,
+			"stack_name":            stack.StackName,
+			"rel_path":              stack.RelPath,
+			"iac_enabled":           stack.IacEnabled,
+			"deploy_kind":           stack.DeployKind,
+			"sops_status":           stack.SopsStatus,
+			"auto_apply_override":   stack.Override,
+			"updated_at":            stack.UpdatedAt,
+			"effective_auto_devops": effectiveAutoDevops,
+		}
+		
+		result = append(result, stackMap)
+	}
+	
+	return result, nil
 }

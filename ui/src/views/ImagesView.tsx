@@ -12,6 +12,8 @@ type ImageRow = {
   id: string;       // full sha256:...
   size: string;
   created: string;
+  orphaned: boolean;
+  usage: string;    // "Live" or "Unused"
 };
 
 export default function ImagesView({ hosts }: { hosts: Host[] }) {
@@ -85,9 +87,22 @@ export default function ImagesView({ hosts }: { hosts: Host[] }) {
     // Apply sorting
     const copy = [...filtered];
     copy.sort((a, b) => {
-      const aVal = (a[sort.key] || '') as string;
-      const bVal = (b[sort.key] || '') as string;
-      const result = aVal.localeCompare(bVal);
+      const aVal = a[sort.key];
+      const bVal = b[sort.key];
+      
+      let result: number;
+      
+      // Handle boolean values (orphaned)
+      if (typeof aVal === 'boolean' && typeof bVal === 'boolean') {
+        result = aVal === bVal ? 0 : aVal ? 1 : -1;
+      }
+      // Handle string values
+      else {
+        const aStr = (aVal || '') as string;
+        const bStr = (bVal || '') as string;
+        result = aStr.localeCompare(bStr);
+      }
+      
       return sort.direction === 'asc' ? result : -result;
     });
     return copy;
@@ -137,11 +152,30 @@ export default function ImagesView({ hosts }: { hosts: Host[] }) {
       headers: { "Content-Type": "application/json" },
       body,
     });
-    const j = await r.json().catch(() => ({}));
-    // naive feedback; you can replace with a toast
+    
     if (!r.ok) {
-      alert(typeof j === "string" ? j : "Delete failed");
+      const errorText = await r.text().catch(() => "Delete failed");
+      alert(errorText);
+      return;
     }
+
+    const j = await r.json().catch(() => ({}));
+    
+    // Check individual results and show feedback
+    if (j.results) {
+      const failed = j.results.filter((result: any) => !result.ok);
+      const succeeded = j.results.filter((result: any) => result.ok);
+      
+      if (failed.length > 0) {
+        const errorMessages = failed.map((result: any) => 
+          `${result.id.slice(7, 19)}: ${result.err}`
+        ).join('\n');
+        alert(`${succeeded.length} images deleted successfully.\n\nFailed to delete ${failed.length} images:\n${errorMessages}`);
+      } else {
+        // All succeeded - no need for alert, just refresh
+      }
+    }
+    
     // refresh
     const rr = await fetch(`/api/images/hosts/${encodeURIComponent(hostName)}`, { credentials: "include" });
     const jj = await rr.json();
@@ -196,14 +230,16 @@ export default function ImagesView({ hosts }: { hosts: Host[] }) {
               </th>
               <SortableHeader sortKey="repo" currentSort={sort} onSort={(k)=>handleSort(k as keyof ImageRow)}>Repository</SortableHeader>
               <SortableHeader sortKey="tag" currentSort={sort} onSort={(k)=>handleSort(k as keyof ImageRow)}>Tag</SortableHeader>
+              <SortableHeader sortKey="usage" currentSort={sort} onSort={(k)=>handleSort(k as keyof ImageRow)}>Usage</SortableHeader>
+              <SortableHeader sortKey="orphaned" currentSort={sort} onSort={(k)=>handleSort(k as keyof ImageRow)}>Orphaned</SortableHeader>
               <SortableHeader sortKey="id" currentSort={sort} onSort={(k)=>handleSort(k as keyof ImageRow)}>ID</SortableHeader>
               <SortableHeader sortKey="size" currentSort={sort} onSort={(k)=>handleSort(k as keyof ImageRow)}>Size</SortableHeader>
               <SortableHeader sortKey="created" currentSort={sort} onSort={(k)=>handleSort(k as keyof ImageRow)}>Created</SortableHeader>
             </tr>
           </thead>
           <tbody>
-            {loading && <tr><td className="p-3 text-slate-500" colSpan={6}>Loading…</td></tr>}
-            {(!loading && sortedRows.length === 0) && <tr><td className="p-3 text-slate-500" colSpan={6}>No images.</td></tr>}
+            {loading && <tr><td className="p-3 text-slate-500" colSpan={8}>Loading…</td></tr>}
+            {(!loading && sortedRows.length === 0) && <tr><td className="p-3 text-slate-500" colSpan={8}>No images.</td></tr>}
             {sortedRows.map((im, i) => {
               const sel = isSelected(im.id);
               return (
@@ -220,8 +256,24 @@ export default function ImagesView({ hosts }: { hosts: Host[] }) {
                       onChange={() => toggleOne(im.id)}
                     />
                   </td>
-                  <td className="p-2 text-slate-300">{im.repo || "—"}</td>
-                  <td className="p-2 text-slate-300">{im.tag || "—"}</td>
+                  <td className="p-2 text-slate-300">
+                    {im.repo || "—"}
+                  </td>
+                  <td className="p-2 text-slate-300">
+                    {im.tag || "—"}
+                  </td>
+                  <td className="p-2 text-slate-300">
+                    <span className={im.usage === "Live" ? "text-green-400" : "text-gray-400"}>
+                      {im.usage}
+                    </span>
+                  </td>
+                  <td className="p-2 text-slate-300">
+                    {im.orphaned ? (
+                      <span className="text-orange-400">Outdated</span>
+                    ) : (
+                      "—"
+                    )}
+                  </td>
                   <td className="p-2 text-slate-300 font-mono">{im.id?.slice(7, 19) || "—"}</td>
                   <td className="p-2 text-slate-300">{im.size || "—"}</td>
                   <td className="p-2 text-slate-300">{im.created || "—"}</td>
@@ -233,7 +285,8 @@ export default function ImagesView({ hosts }: { hosts: Host[] }) {
       </div>
 
       <p className="text-xs text-slate-500">
-        Tip: Click to select one, Ctrl/Cmd-click to toggle, Shift-click to select a range.
+        Tip: Click to select one, Ctrl/Cmd-click to toggle, Shift-click to select a range. 
+        "Outdated" indicates images that no longer match the current repository tag - this includes manually built images or when newer versions have been pulled.
       </p>
     </div>
   );

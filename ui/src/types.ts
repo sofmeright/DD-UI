@@ -103,7 +103,8 @@ export type MergedRow = {
     imageIac?: string;
     created?: string;
     ip?: string;
-    portsText?: string;
+    portsText?: string; // Keep for backward compatibility
+    ports?: any; // Raw ports data for PortLinks component
     owner?: string;
     drift?: boolean;
 };

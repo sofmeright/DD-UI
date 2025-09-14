@@ -412,174 +412,6 @@ func makeRouter() http.Handler {
 				})
 			})
 
-			// List containers by host
-			priv.Get("/hosts/{name}/containers", func(w http.ResponseWriter, r *http.Request) {
-				name := chi.URLParam(r, "name")
-				items, err := listContainersByHost(r.Context(), name)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"items": items})
-			})
-
-			// Inspect a single container by host (for the stack compare page)
-			priv.Get("/hosts/{name}/containers/{ctr}/inspect", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				ctr := chi.URLParam(r, "ctr")
-				out, err := inspectContainerByHost(r.Context(), host, ctr)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				writeJSON(w, http.StatusOK, out)
-			})
-
-			// Container quick actions: play/stop/kill/restart/pause/unpause/remove
-			priv.Post("/hosts/{name}/containers/{ctr}/action", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				ctr := chi.URLParam(r, "ctr")
-				var body struct {
-					Action  string `json:"action"`
-					Timeout string `json:"timeout,omitempty"`
-				}
-				_ = json.NewDecoder(r.Body).Decode(&body)
-				if strings.TrimSpace(body.Action) == "" {
-					http.Error(w, "missing action", http.StatusBadRequest)
-					return
-				}
-				if err := performContainerAction(r.Context(), host, ctr, strings.ToLower(body.Action)); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				writeJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-			})
-
-			// Logs (simple, non-follow)
-			priv.Get("/hosts/{name}/containers/{ctr}/logs", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				ctr := chi.URLParam(r, "ctr")
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				tail := strings.TrimSpace(r.URL.Query().Get("tail"))
-				opts := container.LogsOptions{
-					ShowStdout: true,
-					ShowStderr: true,
-					Timestamps: false,
-					Follow:     false,
-					Details:    false,
-				}
-				if tail != "" {
-					opts.Tail = tail
-				}
-				rc, err := cli.ContainerLogs(r.Context(), ctr, opts)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer rc.Close()
-
-				w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-				w.Header().Set("Cache-Control", "no-store")
-				_, _ = io.Copy(w, rc)
-			})
-
-			// -------- Live logs (SSE) --------
-			priv.Get("/hosts/{name}/containers/{ctr}/logs/stream", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				ctr := chi.URLParam(r, "ctr")
-
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				inspect, err := cli.ContainerInspect(r.Context(), ctr)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-
-				opts := container.LogsOptions{
-					ShowStdout: true,
-					ShowStderr: true,
-					Follow:     true,
-					Timestamps: false,
-					Details:    false,
-				}
-				if s := strings.TrimSpace(r.URL.Query().Get("since")); s != "" {
-					opts.Since = s
-				}
-				if t := strings.TrimSpace(r.URL.Query().Get("tail")); t != "" {
-					opts.Tail = t
-				}
-
-				rc, err := cli.ContainerLogs(r.Context(), ctr, opts)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer rc.Close()
-
-				fl, ok := writeSSEHeader(w)
-				if !ok {
-					http.Error(w, "stream unsupported", http.StatusInternalServerError)
-					return
-				}
-
-				stdout := &sseLineWriter{w: w, fl: fl, stream: "stdout"}
-				stderr := &sseLineWriter{w: w, fl: fl, stream: "stderr"}
-
-				// Keep-alive tick
-				tick := time.NewTicker(15 * time.Second)
-				defer tick.Stop()
-
-				done := make(chan struct{})
-				go func() {
-					defer close(done)
-					if inspect.Config != nil && inspect.Config.Tty {
-						// No multiplexing when TTY true
-						sc := bufio.NewScanner(rc)
-						for sc.Scan() {
-							_, _ = stdout.Write(append(sc.Bytes(), '\n'))
-						}
-					} else {
-						// Demux Docker log multiplexing
-						_, _ = stdcopy.StdCopy(stdout, stderr, rc)
-					}
-				}()
-
-				// pump until client disconnects
-				notify := r.Context().Done()
-				for {
-					select {
-					case <-notify:
-						return
-					case <-done:
-						return
-					case <-tick.C:
-						_, _ = w.Write([]byte(": keep-alive\n\n"))
-						fl.Flush()
-					}
-				}
-			})
 
 			// -------- Interactive console (WebSocket) --------
 			priv.Get("/ws/hosts/{name}/containers/{ctr}/exec", func(w http.ResponseWriter, r *http.Request) {
@@ -624,293 +456,6 @@ func makeRouter() http.Handler {
 
 			})
 
-			// Stats (one-shot JSON passthrough)
-			priv.Get("/hosts/{name}/containers/{ctr}/stats", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				ctr := chi.URLParam(r, "ctr")
-				txt, err := oneShotStats(r.Context(), host, ctr)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				w.Header().Set("Content-Type", "application/json")
-				w.Header().Set("Cache-Control", "no-store")
-				_, _ = w.Write([]byte(txt))
-			})
-
-			// Images
-			priv.Get("/hosts/{name}/images", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				list, err := cli.ImageList(r.Context(), image.ListOptions{All: true})
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-
-				stored, _ := getImageTagMap(r.Context(), host)
-
-				type row struct {
-					Repo    string `json:"repo"`
-					Tag     string `json:"tag"`
-					ID      string `json:"id"`
-					Size    string `json:"size"`
-					Created string `json:"created"`
-				}
-				var items []row
-				seen := make(map[string]struct{}, len(list))
-
-				for _, im := range list {
-					id := im.ID
-					seen[id] = struct{}{}
-					repo := "<none>"
-					tag := "none"
-
-					if len(im.RepoTags) > 0 && im.RepoTags[0] != "<none>:<none>" {
-						parts := strings.SplitN(im.RepoTags[0], ":", 2)
-						repo = parts[0]
-						if len(parts) == 2 {
-							tag = parts[1]
-						}
-					} else if prev, ok := stored[id]; ok {
-						if strings.TrimSpace(prev[0]) != "" {
-							repo = prev[0]
-						}
-						if strings.TrimSpace(prev[1]) != "" {
-							tag = prev[1]
-						}
-					}
-
-					_ = upsertImageTag(r.Context(), host, id, repo, tag)
-
-					items = append(items, row{
-						Repo:    repo,
-						Tag:     tag,
-						ID:      id,
-						Size:    humanSize(im.Size),
-						Created: time.Unix(im.Created, 0).Format(time.RFC3339),
-					})
-				}
-
-				_ = cleanupImageTags(r.Context(), host, seen)
-
-				writeJSON(w, http.StatusOK, map[string]any{"items": items})
-			})
-
-			// Bulk delete images
-			priv.Post("/hosts/{name}/images/delete", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				var body struct {
-					IDs   []string `json:"ids"`
-					Force bool     `json:"force"`
-				}
-				_ = json.NewDecoder(r.Body).Decode(&body)
-				if len(body.IDs) == 0 {
-					http.Error(w, "ids required", http.StatusBadRequest)
-					return
-				}
-
-				type res struct {
-					ID  string `json:"id"`
-					Ok  bool   `json:"ok"`
-					Err string `json:"err,omitempty"`
-				}
-				out := make([]res, 0, len(body.IDs))
-
-				for _, id := range body.IDs {
-					_, err := cli.ImageRemove(r.Context(), id, image.RemoveOptions{
-						Force:         body.Force,
-						PruneChildren: true,
-					})
-					if err != nil {
-						out = append(out, res{ID: id, Ok: false, Err: err.Error()})
-						continue
-					}
-					out = append(out, res{ID: id, Ok: true})
-				}
-
-				_, _ = db.Exec(r.Context(),
-					`DELETE FROM image_tags WHERE host_name=$1 AND image_id = ANY($2::text[])`,
-					host, body.IDs,
-				)
-
-				writeJSON(w, http.StatusOK, map[string]any{"results": out})
-			})
-
-			// Networks
-			priv.Get("/hosts/{name}/networks", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				nets, err := cli.NetworkList(r.Context(), types.NetworkListOptions{Filters: filters.NewArgs()})
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				type row struct {
-					ID     string `json:"id"`
-					Name   string `json:"name"`
-					Driver string `json:"driver"`
-					Scope  string `json:"scope"`
-				}
-				var items []row
-				for _, n := range nets {
-					items = append(items, row{ID: n.ID, Name: n.Name, Driver: n.Driver, Scope: n.Scope})
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"items": items})
-			})
-
-			// Delete networks
-			priv.Post("/hosts/{name}/networks/delete", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				var body struct {
-					Names []string `json:"names"`
-				}
-				_ = json.NewDecoder(r.Body).Decode(&body)
-				if len(body.Names) == 0 {
-					http.Error(w, "names required", http.StatusBadRequest)
-					return
-				}
-
-				type res struct {
-					Name string `json:"name"`
-					Ok   bool   `json:"ok"`
-					Err  string `json:"err,omitempty"`
-				}
-				out := make([]res, 0, len(body.Names))
-
-				for _, n := range body.Names {
-					if err := cli.NetworkRemove(r.Context(), n); err != nil {
-						out = append(out, res{Name: n, Ok: false, Err: err.Error()})
-						continue
-					}
-					out = append(out, res{Name: n, Ok: true})
-				}
-
-				writeJSON(w, http.StatusOK, map[string]any{"results": out})
-			})
-
-			// Volumes
-			priv.Get("/hosts/{name}/volumes", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				vl, err := cli.VolumeList(r.Context(), volume.ListOptions{Filters: filters.NewArgs()})
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				type row struct {
-					Name       string `json:"name"`
-					Driver     string `json:"driver"`
-					Mountpoint string `json:"mountpoint"`
-					Created    string `json:"created"`
-				}
-				var items []row
-				for _, v := range vl.Volumes {
-					created := v.CreatedAt
-					items = append(items, row{v.Name, v.Driver, v.Mountpoint, created})
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"items": items})
-			})
-
-			// Delete volumes
-			priv.Post("/hosts/{name}/volumes/delete", func(w http.ResponseWriter, r *http.Request) {
-				host := chi.URLParam(r, "name")
-				h, err := GetHostByName(r.Context(), host)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				cli, err := dockerClientForHost(h)
-				if err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer cli.Close()
-
-				var body struct {
-					Names []string `json:"names"`
-					Force bool     `json:"force"`
-				}
-				_ = json.NewDecoder(r.Body).Decode(&body)
-				if len(body.Names) == 0 {
-					http.Error(w, "names required", http.StatusBadRequest)
-					return
-				}
-
-				type res struct {
-					Name string `json:"name"`
-					Ok   bool   `json:"ok"`
-					Err  string `json:"err,omitempty"`
-				}
-				out := make([]res, 0, len(body.Names))
-
-				for _, v := range body.Names {
-					if err := cli.VolumeRemove(r.Context(), v, body.Force); err != nil {
-						out = append(out, res{Name: v, Ok: false, Err: err.Error()})
-						continue
-					}
-					out = append(out, res{Name: v, Ok: true})
-				}
-
-				writeJSON(w, http.StatusOK, map[string]any{"results": out})
-			})
 
 
 
@@ -2252,57 +1797,6 @@ func makeRouter() http.Handler {
 				})
 			})
 
-			// Desired stacks/services for a host (host + groups) - now using enhanced logic for drift detection
-			priv.Get("/hosts/{name}/iac", func(w http.ResponseWriter, r *http.Request) {
-				name := chi.URLParam(r, "name")
-				debugLog("Basic-IAC request for host: %s (using enhanced logic)", name)
-				items, err := listEnhancedIacStacksForHost(r.Context(), name)
-				if err != nil {
-					debugLog("Basic-IAC (enhanced) failed for host %s: %v", name, err)
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				debugLog("Basic-IAC (enhanced) returning %d stacks for host %s", len(items), name)
-				for i, stack := range items {
-					debugLog("Response stack[%d]: %s has %d services, %d rendered_services, compose=%v", i, stack.Name, len(stack.Services), len(stack.RenderedServices), stack.Compose != "")
-					if len(stack.RenderedServices) > 0 {
-						debugLog("  Stack %s using RENDERED services (decrypted):", stack.Name)
-						for j, rs := range stack.RenderedServices {
-							debugLog("    RenderedService[%d]: %s -> image=%s, container=%s", j, rs.ServiceName, rs.Image, rs.ContainerName)
-						}
-					}
-					if len(stack.Services) > 0 {
-						debugLog("  Stack %s raw services (may be encrypted):", stack.Name)
-						for j, svc := range stack.Services {
-							debugLog("    RawService[%d]: %s -> image=%s, container=%s", j, svc.ServiceName, svc.Image, svc.ContainerName)
-						}
-					}
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"stacks": items})
-			})
-
-			// Enhanced stacks/services with deployment stamp-based drift detection
-			priv.Get("/hosts/{name}/enhanced-iac", func(w http.ResponseWriter, r *http.Request) {
-				name := chi.URLParam(r, "name")
-				debugLog("Enhanced-IAC request for host: %s", name)
-				items, err := listEnhancedIacStacksForHost(r.Context(), name)
-				if err != nil {
-					debugLog("Enhanced-IAC failed for host %s: %v", name, err)
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				debugLog("Enhanced-IAC returning %d stacks for host %s", len(items), name)
-				for i, stack := range items {
-					debugLog("Enhanced stack[%d]: %s has %d services, %d rendered_services", i, stack.Name, len(stack.Services), len(stack.RenderedServices))
-					for j, rs := range stack.RenderedServices {
-						debugLog("  Enhanced RenderedService[%d]: %s -> image=%s, container=%s", j, rs.ServiceName, rs.Image, rs.ContainerName)
-					}
-					for j, svc := range stack.Services {
-						debugLog("  Enhanced RawService[%d]: %s -> image=%s, container=%s", j, svc.ServiceName, svc.Image, svc.ContainerName)
-					}
-				}
-				writeJSON(w, http.StatusOK, map[string]any{"stacks": items})
-			})
 
 			// NEW RESOURCE-CENTRIC ENDPOINTS FOR API MIGRATION
 			// Container endpoints
@@ -2643,12 +2137,22 @@ func makeRouter() http.Handler {
 
 				stored, _ := getImageTagMap(r.Context(), hostname)
 
+				// Get containers to determine image usage
+				containers, _ := cli.ContainerList(r.Context(), container.ListOptions{All: true})
+				usedImages := make(map[string]bool)
+				for _, c := range containers {
+					usedImages[c.ImageID] = true
+					// Only track by actual image SHA, not by tag name
+				}
+
 				type row struct {
-					Repo    string `json:"repo"`
-					Tag     string `json:"tag"`
-					ID      string `json:"id"`
-					Size    string `json:"size"`
-					Created string `json:"created"`
+					Repo     string `json:"repo"`
+					Tag      string `json:"tag"`
+					ID       string `json:"id"`
+					Size     string `json:"size"`
+					Created  string `json:"created"`
+					Orphaned bool   `json:"orphaned"`
+					Usage    string `json:"usage"`
 				}
 				var items []row
 				seen := make(map[string]struct{}, len(list))
@@ -2658,6 +2162,7 @@ func makeRouter() http.Handler {
 					seen[id] = struct{}{}
 					repo := "<none>"
 					tag := "none"
+					orphaned := false
 
 					if len(im.RepoTags) > 0 && im.RepoTags[0] != "<none>:<none>" {
 						parts := strings.SplitN(im.RepoTags[0], ":", 2)
@@ -2668,17 +2173,28 @@ func makeRouter() http.Handler {
 					} else if prev, ok := stored[id]; ok {
 						if strings.TrimSpace(prev[0]) != "" {
 							repo = prev[0]
+							orphaned = true // Mark as orphaned since we're using cached data
 						}
 						if strings.TrimSpace(prev[1]) != "" {
 							tag = prev[1]
+							orphaned = true // Mark as orphaned since we're using cached data
 						}
 					}
 
 					_ = upsertImageTag(r.Context(), hostname, id, repo, tag)
 
+					// Determine usage status
+					usage := "Unused"
+					if usedImages[id] {
+						usage = "Live"
+					}
+					// Only check by image SHA, not by tag name
+
 					items = append(items, row{
-						Repo:    repo,
-						Tag:     tag,
+						Repo:     repo,
+						Tag:      tag,
+						Orphaned: orphaned,
+						Usage:    usage,
 						ID:      id,
 						Size:    humanSize(im.Size),
 						Created: time.Unix(im.Created, 0).Format(time.RFC3339),
@@ -2688,6 +2204,53 @@ func makeRouter() http.Handler {
 				_ = cleanupImageTags(r.Context(), hostname, seen)
 
 				writeJSON(w, http.StatusOK, map[string]any{"images": items})
+			})
+
+			// Delete images endpoint (modern API pattern)
+			priv.Post("/images/hosts/{hostname}/delete", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				h, err := GetHostByName(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer cli.Close()
+				var body struct {
+					IDs   []string `json:"ids"`
+					Force bool     `json:"force"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				if len(body.IDs) == 0 {
+					http.Error(w, "ids required", http.StatusBadRequest)
+					return
+				}
+				type res struct {
+					ID  string `json:"id"`
+					Ok  bool   `json:"ok"`
+					Err string `json:"err,omitempty"`
+				}
+				out := make([]res, 0, len(body.IDs))
+				for _, id := range body.IDs {
+					_, err := cli.ImageRemove(r.Context(), id, image.RemoveOptions{
+						Force:         body.Force,
+						PruneChildren: true,
+					})
+					if err != nil {
+						out = append(out, res{ID: id, Ok: false, Err: err.Error()})
+						continue
+					}
+					out = append(out, res{ID: id, Ok: true})
+				}
+				_, _ = db.Exec(r.Context(),
+					`DELETE FROM image_tags WHERE host_name=$1 AND image_id = ANY($2::text[])`,
+					hostname, body.IDs,
+				)
+				writeJSON(w, http.StatusOK, map[string]any{"results": out})
 			})
 
 			// Networks endpoints
@@ -2757,6 +2320,90 @@ func makeRouter() http.Handler {
 				writeJSON(w, http.StatusOK, map[string]any{"volumes": items})
 			})
 
+			// Delete networks endpoint (modern API pattern)
+			priv.Post("/networks/hosts/{hostname}/delete", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				h, err := GetHostByName(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer cli.Close()
+
+				var body struct {
+					Names []string `json:"names"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				if len(body.Names) == 0 {
+					http.Error(w, "names required", http.StatusBadRequest)
+					return
+				}
+
+				type res struct {
+					Name string `json:"name"`
+					Ok   bool   `json:"ok"`
+					Err  string `json:"err,omitempty"`
+				}
+				out := make([]res, 0, len(body.Names))
+
+				for _, n := range body.Names {
+					err := cli.NetworkRemove(r.Context(), n)
+					if err != nil {
+						out = append(out, res{Name: n, Ok: false, Err: err.Error()})
+						continue
+					}
+					out = append(out, res{Name: n, Ok: true})
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"results": out})
+			})
+
+			// Delete volumes endpoint (modern API pattern)
+			priv.Post("/volumes/hosts/{hostname}/delete", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				h, err := GetHostByName(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				cli, err := dockerClientForHost(h)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				defer cli.Close()
+
+				var body struct {
+					Names []string `json:"names"`
+					Force bool     `json:"force"`
+				}
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				if len(body.Names) == 0 {
+					http.Error(w, "names required", http.StatusBadRequest)
+					return
+				}
+
+				type res struct {
+					Name string `json:"name"`
+					Ok   bool   `json:"ok"`
+					Err  string `json:"err,omitempty"`
+				}
+				out := make([]res, 0, len(body.Names))
+
+				for _, n := range body.Names {
+					err := cli.VolumeRemove(r.Context(), n, body.Force)
+					if err != nil {
+						out = append(out, res{Name: n, Ok: false, Err: err.Error()})
+						continue
+					}
+					out = append(out, res{Name: n, Ok: true})
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"results": out})
+			})
 
 			// Batch endpoint for stack details (frontend compatibility)
 			priv.Get("/iac/stacks/batch", func(w http.ResponseWriter, r *http.Request) {
@@ -2788,39 +2435,6 @@ func makeRouter() http.Handler {
 
 			// Direct SSH command execution on hosts
 
-			// Enhanced container operations with deployment stamp awareness
-			priv.Post("/hosts/{name}/containers/{ctr}/enhanced-action", func(w http.ResponseWriter, r *http.Request) {
-				hostName := chi.URLParam(r, "name")
-				containerID := chi.URLParam(r, "ctr")
-				var body struct {
-					Action string `json:"action"`
-				}
-				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-					http.Error(w, "invalid JSON", http.StatusBadRequest)
-					return
-				}
-
-				var result *ContainerOpResult
-				switch strings.ToLower(body.Action) {
-				case "start":
-					result = StartContainer(r.Context(), hostName, containerID)
-				case "stop":
-					result = StopContainer(r.Context(), hostName, containerID)
-				case "restart":
-					result = RestartContainer(r.Context(), hostName, containerID)
-				case "logs":
-					result = GetContainerLogs(r.Context(), hostName, containerID)
-				default:
-					http.Error(w, "unsupported action", http.StatusBadRequest)
-					return
-				}
-
-				if result.Success {
-					writeJSON(w, http.StatusOK, result)
-				} else {
-					writeJSON(w, http.StatusBadRequest, result)
-				}
-			})
 
 			// Create a new stack in the local IaC repo
 			priv.Post("/iac/stacks", func(w http.ResponseWriter, r *http.Request) {

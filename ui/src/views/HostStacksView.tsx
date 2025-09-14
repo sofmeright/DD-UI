@@ -30,6 +30,7 @@ import ActionBtn from "@/components/ActionBtn";
 import LiveLogsModal from "@/components/LiveLogsModal";
 import ConsoleModal from "@/components/ConsoleModal";
 import SearchBar from "@/components/SearchBar";
+import PortLinks from "@/components/PortLinks";
 import { ApiContainer, Host, IacService, IacStack, MergedRow, MergedStack } from "@/types";
 import { formatDT, formatPortsLines } from "@/utils/format";
 import { debugLog, warnLog } from "@/utils/logging";
@@ -351,6 +352,7 @@ export default function HostStacksView({
             created: formatDT(c.created_ts),
             ip: c.ip_addr,
             portsText,
+            ports: (c as any).ports, // Include raw ports data for PortLinks component
             owner: c.owner || "—",
             // @ts-ignore
             _desiredImage: _desired,
@@ -393,6 +395,7 @@ export default function HostStacksView({
               created: "—",
               ip: "—",
               portsText: "—",
+              ports: [], // No ports for missing services
               owner: "—",
             });
           }
@@ -766,7 +769,13 @@ export default function HostStacksView({
                           <td className="px-2 py-1.5 text-slate-300">{r.created || "—"}</td>
                           <td className="px-2 py-1.5 text-slate-300">{r.ip || "—"}</td>
                           <td className="px-2 py-1.5 text-slate-300 align-top">
-                            <div className="max-w-56 whitespace-pre-line leading-tight">{r.portsText || "—"}</div>
+                            <div className="max-w-56">
+                              <PortLinks 
+                                ports={r.ports || []} 
+                                hostAddress={host.address || host.name}
+                                className="leading-tight"
+                              />
+                            </div>
                           </td>
                           <td className="px-2 py-1.5 text-slate-300">{r.owner || "—"}</td>
                           <td className="px-2 py-1">

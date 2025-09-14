@@ -1689,7 +1689,9 @@ func makeRouter() http.Handler {
 				for event := range eventChan {
 					eventJSON, _ := json.Marshal(event)
 					fmt.Fprintf(w, "data: %s\n\n", eventJSON)
-					flusher.Flush()
+					if flusher != nil {
+						flusher.Flush()
+					}
 
 					// Break on completion or error
 					if eventType, ok := event["type"].(string); ok && (eventType == "complete" || eventType == "error") {
@@ -1806,7 +1808,9 @@ func makeRouter() http.Handler {
 				for event := range eventChan {
 					eventJSON, _ := json.Marshal(event)
 					fmt.Fprintf(w, "data: %s\n\n", eventJSON)
-					flusher.Flush()
+					if flusher != nil {
+						flusher.Flush()
+					}
 
 					// Break on completion or error
 					if eventType, ok := event["type"].(string); ok && (eventType == "complete" || eventType == "error") {
@@ -1929,7 +1933,9 @@ func makeRouter() http.Handler {
 				for event := range eventChan {
 					eventJSON, _ := json.Marshal(event)
 					fmt.Fprintf(w, "data: %s\n\n", eventJSON)
-					flusher.Flush()
+					if flusher != nil {
+						flusher.Flush()
+					}
 
 					// Break on completion or error
 					if eventType, ok := event["type"].(string); ok && (eventType == "complete" || eventType == "error") {
@@ -2046,7 +2052,9 @@ func makeRouter() http.Handler {
 				for event := range eventChan {
 					eventJSON, _ := json.Marshal(event)
 					fmt.Fprintf(w, "data: %s\n\n", eventJSON)
-					flusher.Flush()
+					if flusher != nil {
+						flusher.Flush()
+					}
 
 					// Break on completion or error
 					if eventType, ok := event["type"].(string); ok && (eventType == "complete" || eventType == "error") {
@@ -3184,7 +3192,9 @@ func makeRouter() http.Handler {
 				for event := range eventChan {
 					eventJSON, _ := json.Marshal(event)
 					fmt.Fprintf(w, "data: %s\n\n", eventJSON)
-					flusher.Flush()
+					if flusher != nil {
+						flusher.Flush()
+					}
 
 					// Break on completion or error
 					if eventType, ok := event["type"].(string); ok && (eventType == "complete" || eventType == "error") {
@@ -3251,7 +3261,9 @@ func makeRouter() http.Handler {
 				for event := range eventChan {
 					eventJSON, _ := json.Marshal(event)
 					fmt.Fprintf(w, "data: %s\n\n", eventJSON)
-					flusher.Flush()
+					if flusher != nil {
+						flusher.Flush()
+					}
 
 					// Break on completion
 					if eventType, ok := event["type"].(string); ok && eventType == "complete" {
@@ -3365,7 +3377,9 @@ func makeRouter() http.Handler {
 				for event := range eventChan {
 					eventJSON, _ := json.Marshal(event)
 					fmt.Fprintf(w, "data: %s\n\n", eventJSON)
-					flusher.Flush()
+					if flusher != nil {
+						flusher.Flush()
+					}
 
 					// Break on completion
 					if eventType, ok := event["type"].(string); ok && eventType == "complete" {
@@ -3653,7 +3667,9 @@ func (s *sseLineWriter) Write(p []byte) (int, error) {
 		s.buf = s.buf[i+1:]
 		_, _ = s.w.Write([]byte("event: " + s.stream + "\n"))
 		_, _ = s.w.Write([]byte("data: " + line + "\n\n"))
-		s.fl.Flush()
+		if s.fl != nil {
+			s.fl.Flush()
+		}
 	}
 	return len(p), nil
 }

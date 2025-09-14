@@ -274,7 +274,9 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 		var portsOut []map[string]any
 		ip := ""
 		if ci.NetworkSettings != nil {
-			portsOut = flattenPorts(ci.NetworkSettings.Ports)
+			if ci.NetworkSettings.Ports != nil {
+				portsOut = flattenPorts(ci.NetworkSettings.Ports)
+			}
 			if ci.NetworkSettings.IPAddress != "" {
 				ip = ci.NetworkSettings.IPAddress
 			} else if ci.NetworkSettings.Networks != nil {

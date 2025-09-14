@@ -98,6 +98,7 @@ export type SessionResp = {
 export type MergedRow = {
     name: string;
     state: string;
+    status?: string; // Docker status with detailed info (e.g., "Up 2 hours", "Exited (0) 5 minutes ago")
     stack: string;
     imageRun?: string;
     imageIac?: string;

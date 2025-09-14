@@ -35,6 +35,21 @@ import { ApiContainer, Host, IacService, IacStack, MergedRow, MergedStack } from
 import { formatDT, formatPortsLines } from "@/utils/format";
 import { debugLog, warnLog } from "@/utils/logging";
 
+// Debounce helper to prevent excessive API calls
+function useDebounce<T extends (...args: any[]) => any>(func: T, delay: number): T {
+  const [timeoutId, setTimeoutId] = useState<NodeJS.Timeout | null>(null);
+  
+  return ((...args: Parameters<T>) => {
+    if (timeoutId) clearTimeout(timeoutId);
+    
+    const id = setTimeout(() => {
+      func(...args);
+    }, delay);
+    
+    setTimeoutId(id);
+  }) as T;
+}
+
 function sanitizeLabel(s: string): string {
   // match compose label semantics: lowercase, spaces -> _, only [a-z0-9_-]
   const lowered = (s || "").trim().toLowerCase().replaceAll(" ", "_");
@@ -77,6 +92,20 @@ export default function HostStacksView({
   const [stacks, setStacks] = useState<MergedStack[]>([]);
   const [hostQuery, setHostQuery] = useState("");
   const [deletingStacks, setDeletingStacks] = useState<Set<number>>(new Set());
+  
+  // Performance optimization: debounced sync to prevent excessive API calls
+  const debouncedSync = useDebounce(onSync, 300);
+  
+  // Performance optimizations
+  const [lastSyncTime, setLastSyncTime] = useState(0);
+  const [pendingContainerUpdates, setPendingContainerUpdates] = useState<Set<string>>(new Set());
+
+  // Container action loading states
+  const [actionLoading, setActionLoading] = useState<Set<string>>(new Set());
+  const [notification, setNotification] = useState<{
+    type: 'success' | 'error';
+    message: string;
+  } | null>(null);
 
   // Live logs & console wiring
   const [streamLogs, setStreamLogs] = useState<{ ctr: string } | null>(null);
@@ -84,6 +113,14 @@ export default function HostStacksView({
 
   // Lightweight info modal
   const [infoModal, setInfoModal] = useState<{ title: string; text: string } | null>(null);
+
+  // Auto-dismiss notifications
+  useEffect(() => {
+    if (notification) {
+      const timeout = setTimeout(() => setNotification(null), 4000);
+      return () => clearTimeout(timeout);
+    }
+  }, [notification]);
 
   function matchRow(r: MergedRow, q: string) {
     if (!q) return true;
@@ -95,8 +132,13 @@ export default function HostStacksView({
   }
 
   async function doCtrAction(ctr: string, action: string) {
+    const actionKey = `${ctr}-${action}`;
+    
+    // Set loading state
+    setActionLoading(prev => new Set(prev).add(actionKey));
+    
     try {
-      await fetch(
+      const response = await fetch(
         `/api/containers/hosts/${encodeURIComponent(host.name)}/${encodeURIComponent(ctr)}/action`,
         {
           method: "POST",
@@ -105,62 +147,261 @@ export default function HostStacksView({
           body: JSON.stringify({ action }),
         }
       );
-      onSync();
-      setStacks((prev) =>
-        prev.map((s) => ({
-          ...s,
-          rows: s.rows.map((r) =>
-            r.name === ctr
-              ? {
-                  ...r,
-                  state:
-                    action === "pause"
-                      ? "paused"
-                      : action === "unpause"
-                      ? "running"
-                      : action === "stop"
-                      ? "exited"
-                      : action === "kill"
-                      ? "dead"
-                      : action === "remove"
-                      ? "removed"
-                      : action === "start"
-                      ? "running"
-                      : action === "restart"
-                      ? "restarting"
-                      : r.state,
-                }
-              : r
-          ),
-        }))
-      );
+      
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => "Action failed");
+        throw new Error(errorText);
+      }
+
+      // Show success notification
+      setNotification({
+        type: 'success',
+        message: `Container ${ctr} ${action}ed successfully`
+      });
+
+      // Smart update: Only refresh container data, not full page sync
+      await updateContainerStatus(ctr);
+      
     } catch (e) {
-      alert("Action failed");
+      // Show error notification
+      setNotification({
+        type: 'error',
+        message: `Failed to ${action} ${ctr}: ${e instanceof Error ? e.message : String(e)}`
+      });
+    } finally {
+      // Clear loading state
+      setActionLoading(prev => {
+        const next = new Set(prev);
+        next.delete(actionKey);
+        return next;
+      });
     }
   }
 
   function openLiveLogs(ctr: string) {
     setStreamLogs({ ctr });
   }
+  
+  // Helper function to create basic stacks from containers only (fast initial render)
+  function createBasicStacksFromContainers(runtime: ApiContainer[]): MergedStack[] {
+    const rtByStack = new Map<string, ApiContainer[]>();
+    
+    for (const c of runtime) {
+      const label = (c.compose_project || c.stack || "(none)").trim() || "(none)";
+      if (!rtByStack.has(label)) rtByStack.set(label, []);
+      rtByStack.get(label)!.push(c);
+    }
+    
+    return Array.from(rtByStack.entries()).map(([stackName, containers]) => {
+      const rows: MergedRow[] = containers.map(c => {
+        const portsLines = formatPortsLines((c as any).ports);
+        const portsText = portsLines.join("\n");
+        return {
+          name: c.name,
+          state: c.state,
+          status: c.status,
+          stack: stackName,
+          imageRun: c.image,
+          imageIac: undefined,
+          created: formatDT(c.created_ts),
+          ip: c.ip_addr,
+          portsText,
+          ports: (c as any).ports,
+          owner: c.owner || "—",
+        };
+      });
+      
+      return {
+        name: stackName,
+        drift: "unknown" as const,
+        iacEnabled: false,
+        autoDevOps: false,
+        pullPolicy: undefined,
+        sops: false,
+        deployKind: stackName === "(none)" ? "unmanaged" as const : "unknown" as const,
+        rows,
+        iacId: undefined,
+        hasIac: false,
+        hasContent: false,
+      };
+    });
+  }
+
+  // Enhanced container status update with reliable polling for state transitions
+  async function updateContainerStatus(containerName: string) {
+    // Prevent duplicate updates for the same container
+    if (pendingContainerUpdates.has(containerName)) {
+      debugLog(`[DDUI] Skipping duplicate update for ${containerName}`);
+      return;
+    }
+    
+    setPendingContainerUpdates(prev => new Set(prev).add(containerName));
+    
+    try {
+      const maxAttempts = 20;
+      let attempts = 0;
+      let lastState = '';
+      
+      while (attempts < maxAttempts) {
+        attempts++;
+        
+        // Progressive delay: fast at first, then slower
+        const delay = attempts <= 5 ? 400 : attempts <= 10 ? 1000 : 2000;
+        await new Promise(resolve => setTimeout(resolve, delay));
+        
+        // Fetch container data
+        const response = await fetch(`/api/containers/hosts/${encodeURIComponent(host.name)}`, { 
+          credentials: "include" 
+        });
+        
+        if (!response.ok) {
+          debugLog(`[DDUI] Failed to fetch container data for ${containerName} (attempt ${attempts})`);
+          continue;
+        }
+        
+        const data = await response.json();
+        const updatedContainers: ApiContainer[] = data.containers || [];
+        const updatedContainer = updatedContainers.find(c => c.name === containerName);
+        
+        if (!updatedContainer) {
+          debugLog(`[DDUI] Container ${containerName} not found (attempt ${attempts})`);
+          continue;
+        }
+        
+        const currentState = updatedContainer.state;
+        const currentStatus = updatedContainer.status || '';
+        
+        debugLog(`[DDUI] Container ${containerName} polling (${attempts}/${maxAttempts}): ${currentState} | ${currentStatus}`);
+        
+        // Always update the UI with current data
+        setStacks(prevStacks => 
+          prevStacks.map(stack => ({
+            ...stack,
+            rows: stack.rows.map(row => {
+              if (row.name === containerName) {
+                const portsLines = formatPortsLines((updatedContainer as any).ports);
+                const portsText = portsLines.join("\n");
+                return {
+                  ...row,
+                  state: currentState,
+                  status: currentStatus,
+                  imageRun: updatedContainer.image,
+                  created: formatDT(updatedContainer.created_ts),
+                  ip: updatedContainer.ip_addr,
+                  portsText,
+                  ports: (updatedContainer as any).ports,
+                  owner: updatedContainer.owner || "—"
+                };
+              }
+              return row;
+            })
+          }))
+        );
+        
+        // Stop polling conditions:
+        
+        // 1. Final/stable states - stop immediately
+        if (currentState === 'running' || currentState === 'exited' || 
+            currentState === 'dead' || currentState === 'paused') {
+          debugLog(`[DDUI] Container ${containerName} reached stable state: ${currentState}`);
+          break;
+        }
+        
+        // 2. No state change for 3+ consecutive checks - probably stable
+        if (currentState === lastState && attempts >= 8) {
+          debugLog(`[DDUI] Container ${containerName} state unchanged for multiple checks: ${currentState}`);
+          break;
+        }
+        
+        // 3. Clear transitioning states - keep polling
+        if (currentState === 'restarting' || currentState === 'removing' || 
+            currentStatus.toLowerCase().includes('starting')) {
+          debugLog(`[DDUI] Container ${containerName} still transitioning, continue polling...`);
+        }
+        
+        lastState = currentState;
+      }
+      
+      if (attempts >= maxAttempts) {
+        debugLog(`[DDUI] Container ${containerName} polling completed after max attempts`);
+      }
+      
+    } catch (error) {
+      debugLog(`[DDUI] Container status update failed for ${containerName}:`, error);
+    } finally {
+      // Clean up immediately - the smart polling system will handle regular updates
+      setPendingContainerUpdates(prev => {
+        const next = new Set(prev);
+        next.delete(containerName);
+        return next;
+      });
+    }
+  }
 
   useEffect(() => {
     debugLog('[DDUI] HostStacksView useEffect starting for host:', host.name);
     let cancel = false;
+    
+    // Register view for polling boost
+    const registerView = async () => {
+      try {
+        await fetch(`/api/view/hosts/${encodeURIComponent(host.name)}/start`, {
+          method: 'POST',
+          credentials: 'include'
+        });
+        debugLog('[DDUI] Registered view boost for host:', host.name);
+      } catch (e) {
+        debugLog('[DDUI] Failed to register view boost:', e);
+      }
+    };
+    
+    // Unregister view for polling boost
+    const unregisterView = async () => {
+      try {
+        await fetch(`/api/view/hosts/${encodeURIComponent(host.name)}/end`, {
+          method: 'POST',
+          credentials: 'include'
+        });
+        debugLog('[DDUI] Unregistered view boost for host:', host.name);
+      } catch (e) {
+        debugLog('[DDUI] Failed to unregister view boost:', e);
+      }
+    };
+    
+    registerView(); // Start view boost
+    
     (async () => {
       setLoading(true);
       setErr(null);
       try {
-        const [rc, ri] = await Promise.all([
-          fetch(`/api/containers/hosts/${encodeURIComponent(host.name)}`, { credentials: "include" }),
-          fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}`, { credentials: "include" }),
-        ]);
-        if (rc.status === 401 || ri.status === 401) {
+        // Progressive loading: Start with container data (fastest)
+        debugLog('[DDUI] Phase 1: Loading containers for host:', host.name);
+        const rc = await fetch(`/api/containers/hosts/${encodeURIComponent(host.name)}`, { credentials: "include" });
+        
+        if (rc.status === 401) {
           window.location.replace("/auth/login");
           return;
         }
+        
         const contJson = await rc.json();
-        const iacJson = await ri.json();
         const runtime: ApiContainer[] = (contJson.containers || []) as ApiContainer[];
+        
+        // Show basic container data immediately (before expensive IaC calls)
+        if (!cancel && runtime.length > 0) {
+          const basicStacks = createBasicStacksFromContainers(runtime);
+          setStacks(basicStacks);
+          debugLog('[DDUI] Phase 1 complete: Showing', basicStacks.length, 'basic stacks');
+        }
+        
+        // Phase 2: Load IaC data
+        debugLog('[DDUI] Phase 2: Loading IaC data for host:', host.name);
+        const ri = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}`, { credentials: "include" });
+        if (ri.status === 401) {
+          window.location.replace("/auth/login");
+          return;
+        }
+        
+        const iacJson = await ri.json();
         const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
 
         // Enhanced drift/runtime (source drift, rendered services, & config-hash from backend)
@@ -179,12 +420,9 @@ export default function HostStacksView({
         const re = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/enhanced`, {
           credentials: "include",
         });
-        debugLog('[DDUI] Enhanced-iac response status:', re.status, re.statusText);
         if (re.ok) {
           const ej = await re.json();
-          debugLog('[DDUI] Enhanced-iac response data:', ej);
           const items = Array.isArray(ej?.stacks) ? ej.stacks : [];
-          debugLog('[DDUI] Enhanced-iac found', items.length, 'stacks');
           for (const s of items) {
             const nm = (s?.name || s?.stack_name || "").toString();
             if (!nm) continue;
@@ -205,12 +443,12 @@ export default function HostStacksView({
               })),
             });
           }
-          debugLog('[DDUI] Enhanced-iac enhancedByName map populated with', enhancedByName.size, 'entries');
+          debugLog('[DDUI] Phase 3: Enhanced data loaded for', items.length, 'stacks');
         } else {
-          warnLog('[DDUI] Enhanced-iac API failed:', re.status, re.statusText);
+          warnLog('[DDUI] Enhanced-iac API failed - using basic data:', re.status, re.statusText);
         }
         } catch (error) {
-        errorLog('[DDUI] Enhanced-iac API error:', error);
+        warnLog('[DDUI] Enhanced-iac API error - using basic data:', error);
         }
 
         // Auto DevOps information is now included in the enhanced-iac endpoint response
@@ -246,7 +484,7 @@ export default function HostStacksView({
         const names = new Set<string>([...rtByStack.keys(), ...iacByStack.keys()]);
         const merged: MergedStack[] = [];
 
-        debugLog('Processing stacks:', Array.from(names));
+        debugLog('[DDUI] Processing', names.size, 'stacks for host:', host.name);
 
         for (const sname of Array.from(names).sort()) {
         const rcs = rtByStack.get(sname) || [];
@@ -346,6 +584,7 @@ export default function HostStacksView({
           rows.push({
             name: c.name,
             state: c.state,
+            status: c.status,
             stack: sname,
             imageRun: c.image,
             imageIac: undefined, // we do NOT compare images for drift on existing rows
@@ -430,17 +669,72 @@ export default function HostStacksView({
         merged.push(mergedRow);
         }
 
-        if (!cancel) setStacks(merged);
+        if (!cancel) {
+          setStacks(merged);
+          debugLog('[DDUI] Loaded data for host:', host.name, 'stacks:', merged.length);
+        }
       } catch (e: any) {
         if (!cancel) setErr(e?.message || "Failed to load host stacks");
       } finally {
         if (!cancel) setLoading(false);
       }
     })();
+    
     return () => {
       cancel = true;
+      unregisterView(); // End view boost
     };
-  }, [host.name, onSync]);
+  }, [host.name]);
+
+  // Periodic polling to refresh container states
+  useEffect(() => {
+    // Only poll if we have loaded initial data
+    if (loading || !stacks.length) return;
+    
+    let pollInterval: NodeJS.Timeout;
+    
+    const pollContainerData = async () => {
+      try {
+        debugLog('[DDUI] Polling for container updates...');
+        const response = await fetch(`/api/containers/hosts/${encodeURIComponent(host.name)}`, { 
+          credentials: "include" 
+        });
+        
+        if (response.ok) {
+          const contJson = await response.json();
+          const runtime: ApiContainer[] = (contJson.containers || []) as ApiContainer[];
+          
+          // Update container states in existing stacks
+          setStacks(prevStacks => 
+            prevStacks.map(stack => ({
+              ...stack,
+              rows: stack.rows.map(row => {
+                const updatedContainer = runtime.find(c => c.name === row.name);
+                if (updatedContainer) {
+                  return {
+                    ...row,
+                    state: updatedContainer.state || row.state,
+                    status: updatedContainer.status || row.status,
+                  };
+                }
+                return row;
+              })
+            }))
+          );
+          debugLog('[DDUI] Container states updated from polling');
+        }
+      } catch (error) {
+        debugLog('[DDUI] Polling error:', error);
+      }
+    };
+    
+    // Start polling every 2 seconds (frontend refresh rate)
+    pollInterval = setInterval(pollContainerData, 2000);
+    
+    return () => {
+      if (pollInterval) clearInterval(pollInterval);
+    };
+  }, [host.name, loading, stacks.length]);
 
   // --- Name validation helpers (warn-only; Compose will normalize) ---
   function dockerSanitizePreview(s: string): string {
@@ -631,6 +925,35 @@ export default function HostStacksView({
         </div>
       )}
 
+      {/* Action Notification */}
+      {notification && (
+        <div className="fixed top-4 right-4 z-50 max-w-md">
+          <div className={`rounded-lg border p-4 shadow-lg backdrop-blur-sm ${
+            notification.type === 'success' 
+              ? 'bg-emerald-950/90 border-emerald-800/50 text-emerald-200' 
+              : 'bg-red-950/90 border-red-800/50 text-red-200'
+          }`}>
+            <div className="flex items-center gap-2">
+              {notification.type === 'success' ? (
+                <div className="w-2 h-2 bg-emerald-400 rounded-full"></div>
+              ) : (
+                <div className="w-2 h-2 bg-red-400 rounded-full"></div>
+              )}
+              <span className="text-sm font-medium">{notification.message}</span>
+              <Button
+                variant="ghost"
+                size="sm"
+                className="ml-auto h-6 w-6 p-0 hover:bg-transparent"
+                onClick={() => setNotification(null)}
+              >
+                <span className="sr-only">Close</span>
+                ×
+              </Button>
+            </div>
+          </div>
+        </div>
+      )}
+
       <div className="flex items-center gap-4">
         <div className="text-lg font-semibold text-white">Stacks</div>
         <HostPicker hosts={hosts} activeHost={host.name} setActiveHost={onHostChange} />
@@ -640,8 +963,13 @@ export default function HostStacksView({
           placeholder="Search stacks, services, containers..."
           className="w-96"
         />
-        <Button onClick={onSync} className="bg-[#310937] hover:bg-[#2a0830] text-white">
-          <RefreshCw className="h-4 w-4 mr-1" /> Sync
+        <Button onClick={onSync} className="bg-[#310937] hover:bg-[#2a0830] text-white" disabled={loading}>
+          {loading ? (
+            <Loader2 className="h-4 w-4 mr-1 animate-spin" />
+          ) : (
+            <RefreshCw className="h-4 w-4 mr-1" />
+          )} 
+          {loading ? "Syncing..." : "Sync"}
         </Button>
         <Button onClick={createStackFlow} variant="outline" className="border-slate-700 text-slate-200">
           New Stack
@@ -649,8 +977,31 @@ export default function HostStacksView({
       </div>
 
       {loading && (
-        <div className="text-sm px-3 py-2 rounded-lg border border-slate-800 bg-slate-900/60 text-slate-300">
-          Loading stacks…
+        <div className="space-y-3">
+          <div className="text-sm px-3 py-2 rounded-lg border border-slate-800 bg-slate-900/60 text-slate-300 flex items-center gap-2">
+            <Loader2 className="h-4 w-4 animate-spin" />
+            Loading stacks…
+            {stacks.length > 0 && <span className="text-slate-400">({stacks.length} loaded)</span>}
+          </div>
+          {stacks.length === 0 && (
+            <div className="space-y-3">
+              {/* Skeleton loading cards */}
+              {[1, 2, 3].map(i => (
+                <Card key={i} className="bg-slate-900/50 border-slate-800 rounded-xl animate-pulse">
+                  <CardHeader className="pb-2">
+                    <div className="h-6 bg-slate-700 rounded w-32"></div>
+                    <div className="flex gap-2 mt-2">
+                      <div className="h-4 bg-slate-700 rounded w-16"></div>
+                      <div className="h-4 bg-slate-700 rounded w-20"></div>
+                    </div>
+                  </CardHeader>
+                  <CardContent>
+                    <div className="h-24 bg-slate-800 rounded"></div>
+                  </CardContent>
+                </Card>
+              ))}
+            </div>
+          )}
         </div>
       )}
       {err && (
@@ -749,7 +1100,7 @@ export default function HostStacksView({
                         <tr key={r.name} className="border-t border-slate-800 hover:bg-slate-900/40 align-top">
                           <td className="px-2 py-1.5 font-medium text-slate-200 truncate">{r.name}</td>
                           <td className="px-2 py-1.5 text-slate-300">
-                            <StatePill state={r.state} />
+                            <StatePill state={r.state} status={r.status} />
                           </td>
                           <td className="px-2 py-1.5 text-slate-300">
                             <div className="flex items-center gap-2">
@@ -791,10 +1142,22 @@ export default function HostStacksView({
                                 <>
                                   {/* Group 1: Container Lifecycle (stop/start, restart, pause/resume) */}
                                   {!isRunning && !isPaused && (
-                                    <ActionBtn title="Start" icon={Play} color="green" onClick={() => doCtrAction(r.name, "start")} />
+                                    <ActionBtn 
+                                      title="Start" 
+                                      icon={Play} 
+                                      color="green" 
+                                      onClick={() => doCtrAction(r.name, "start")}
+                                      loading={actionLoading.has(`${r.name}-start`)}
+                                    />
                                   )}
                                   {isRunning && (
-                                    <ActionBtn title="Stop" icon={Square} color="yellow" onClick={() => doCtrAction(r.name, "stop")} />
+                                    <ActionBtn 
+                                      title="Stop" 
+                                      icon={Square} 
+                                      color="yellow" 
+                                      onClick={() => doCtrAction(r.name, "stop")}
+                                      loading={actionLoading.has(`${r.name}-stop`)}
+                                    />
                                   )}
                                   {(isRunning || isPaused) && (
                                     <ActionBtn
@@ -802,10 +1165,17 @@ export default function HostStacksView({
                                       icon={RotateCw}
                                       color="blue"
                                       onClick={() => doCtrAction(r.name, "restart")}
+                                      loading={actionLoading.has(`${r.name}-restart`)}
                                     />
                                   )}
                                   {isRunning && !isPaused && (
-                                    <ActionBtn title="Pause" icon={Pause} color="yellow" onClick={() => doCtrAction(r.name, "pause")} />
+                                    <ActionBtn 
+                                      title="Pause" 
+                                      icon={Pause} 
+                                      color="yellow" 
+                                      onClick={() => doCtrAction(r.name, "pause")}
+                                      loading={actionLoading.has(`${r.name}-pause`)}
+                                    />
                                   )}
                                   {isPaused && (
                                     <ActionBtn
@@ -813,13 +1183,26 @@ export default function HostStacksView({
                                       icon={PlayCircle}
                                       color="green"
                                       onClick={() => doCtrAction(r.name, "unpause")}
+                                      loading={actionLoading.has(`${r.name}-unpause`)}
                                     />
                                   )}
 
                                   
                                   {/* Group 2: Destructive Actions (kill, remove) */}
-                                  <ActionBtn title="Kill" icon={ZapOff} color="red" onClick={() => doCtrAction(r.name, "kill")} />
-                                  <ActionBtn title="Remove" icon={Trash2} color="red" onClick={() => doCtrAction(r.name, "remove")} />
+                                  <ActionBtn 
+                                    title="Kill" 
+                                    icon={ZapOff} 
+                                    color="red" 
+                                    onClick={() => doCtrAction(r.name, "kill")}
+                                    loading={actionLoading.has(`${r.name}-kill`)}
+                                  />
+                                  <ActionBtn 
+                                    title="Remove" 
+                                    icon={Trash2} 
+                                    color="red" 
+                                    onClick={() => doCtrAction(r.name, "remove")}
+                                    loading={actionLoading.has(`${r.name}-remove`)}
+                                  />
 
                                   <span className="mx-1 h-4 w-px bg-slate-700/60" />
 

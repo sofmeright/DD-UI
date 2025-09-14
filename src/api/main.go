@@ -22,6 +22,58 @@ import (
 
 var startedAt = time.Now()
 
+// View-based polling boost system
+type ViewBoostTracker struct {
+	mu           sync.RWMutex
+	activeViews  map[string]int        // host -> count of active viewers
+	boostTimers  map[string]*time.Timer // host -> timer for boost cleanup
+}
+
+var viewBoostTracker = &ViewBoostTracker{
+	activeViews: make(map[string]int),
+	boostTimers: make(map[string]*time.Timer),
+}
+
+// AddView registers a new viewer for a host
+func (vbt *ViewBoostTracker) AddView(hostName string) {
+	vbt.mu.Lock()
+	defer vbt.mu.Unlock()
+	
+	vbt.activeViews[hostName]++
+	debugLog("View boost: Added viewer for host %s (total: %d)", hostName, vbt.activeViews[hostName])
+	
+	// Clear any existing cleanup timer since we have active viewers
+	if timer, exists := vbt.boostTimers[hostName]; exists {
+		timer.Stop()
+		delete(vbt.boostTimers, hostName)
+	}
+}
+
+// RemoveView unregisters a viewer for a host
+func (vbt *ViewBoostTracker) RemoveView(hostName string) {
+	vbt.mu.Lock()
+	defer vbt.mu.Unlock()
+	
+	if vbt.activeViews[hostName] > 0 {
+		vbt.activeViews[hostName]--
+		debugLog("View boost: Removed viewer for host %s (remaining: %d)", hostName, vbt.activeViews[hostName])
+		
+		// If no more active viewers, start cleanup timer
+		if vbt.activeViews[hostName] == 0 {
+			// Clean up immediately
+			delete(vbt.activeViews, hostName)
+			debugLog("View boost: No more viewers for host %s, boost disabled", hostName)
+		}
+	}
+}
+
+// ShouldBoostHost returns true if this host should get boosted polling
+func (vbt *ViewBoostTracker) ShouldBoostHost(hostName string) bool {
+	vbt.mu.RLock()
+	defer vbt.mu.RUnlock()
+	return vbt.activeViews[hostName] > 0
+}
+
 func main() {
 	addr := env("DDUI_BIND", ":443")
 	
@@ -229,30 +281,93 @@ func startAutoScanner(ctx context.Context) {
 		infoLog("scan: auto disabled (DDUI_SCAN_DOCKER_AUTO=false)")
 		return
 	}
-	interval := envDur("DDUI_SCAN_DOCKER_INTERVAL", "1m")       // Portainer-like
-	perHostTO := envDur("DDUI_SCAN_DOCKER_HOST_TIMEOUT", "45s") // per host protection
+	baseInterval := envDur("DDUI_SCAN_DOCKER_INTERVAL", "5s")       // Smart default: 5s
+	boostInterval := 500 * time.Millisecond                         // View-based boost interval
+	perHostTO := envDur("DDUI_SCAN_DOCKER_HOST_TIMEOUT", "45s")     // per host protection
 	conc := envInt("DDUI_SCAN_DOCKER_CONCURRENCY", 3)
 
-	infoLog("scan: auto enabled interval=%s host_timeout=%s conc=%d", interval, perHostTO, conc)
+	infoLog("scan: smart scanner enabled base_interval=%s boost_interval=%s host_timeout=%s conc=%d", 
+		baseInterval, boostInterval, perHostTO, conc)
 
 	// optional boot scan
 	if envBool("DDUI_SCAN_DOCKER_ON_START", "true") {
 		go scanAllOnce(ctx, perHostTO, conc)
 	}
 
-	t := time.NewTicker(interval)
-	go func() {
-		defer t.Stop()
-		for {
-			select {
-			case <-t.C:
-				scanAllOnce(ctx, perHostTO, conc)
-			case <-ctx.Done():
-				infoLog("scan: auto scanner stopping: %v", ctx.Err())
-				return
+	// Start smart scanning loop with view-based boost
+	go startSmartScanLoop(ctx, baseInterval, boostInterval, perHostTO, conc)
+}
+
+// startSmartScanLoop runs separate scan timers for each host with view-based boost
+func startSmartScanLoop(ctx context.Context, baseInterval, boostInterval, perHostTO time.Duration, conc int) {
+	// Track per-host timers
+	hostTimers := make(map[string]*time.Timer)
+	var timersMu sync.Mutex
+	
+	// Function to scan a specific host
+	scanHost := func(hostName string) {
+		// Scan this specific host
+		if saved, err := ScanHostContainers(ctx, hostName); err != nil {
+			if !errors.Is(err, ErrSkipScan) {
+				debugLog("Smart scan failed for host %s: %v", hostName, err)
 			}
+		} else {
+			debugLog("Smart scan completed for host %s: saved=%d containers", hostName, saved)
 		}
-	}()
+	}
+	
+	// Function to schedule next scan for a host
+	var scheduleHostScan func(string)
+	scheduleHostScan = func(hostName string) {
+		timersMu.Lock()
+		defer timersMu.Unlock()
+		
+		// Stop existing timer if any
+		if timer, exists := hostTimers[hostName]; exists {
+			timer.Stop()
+		}
+		
+		// Choose interval based on view boost
+		interval := baseInterval
+		if viewBoostTracker.ShouldBoostHost(hostName) {
+			interval = boostInterval
+		}
+		
+		// Schedule next scan
+		hostTimers[hostName] = time.AfterFunc(interval, func() {
+			select {
+			case <-ctx.Done():
+				return
+			default:
+				scanHost(hostName)
+				scheduleHostScan(hostName) // Reschedule
+			}
+		})
+	}
+	
+	// Initial scan and scheduling for all hosts
+	hosts, err := ListHosts(ctx)
+	if err != nil {
+		debugLog("Smart scan failed to get initial hosts: %v", err)
+		return
+	}
+	
+	debugLog("Smart scan: Starting timers for %d hosts", len(hosts))
+	for _, host := range hosts {
+		scheduleHostScan(host.Name)
+	}
+	
+	// Wait for context cancellation
+	<-ctx.Done()
+	debugLog("Smart scan: Stopping all host timers")
+	
+	// Clean up all timers
+	timersMu.Lock()
+	for hostName, timer := range hostTimers {
+		timer.Stop()
+		debugLog("Smart scan: Stopped timer for host %s", hostName)
+	}
+	timersMu.Unlock()
 }
 
 // ---- IaC auto-scan (local + apply) ----

@@ -566,6 +566,18 @@ func makeRouter() http.Handler {
 				})
 			})
 
+			// View boost tracking endpoints
+			priv.Post("/view/hosts/{name}/start", func(w http.ResponseWriter, r *http.Request) {
+				hostName := chi.URLParam(r, "name")
+				viewBoostTracker.AddView(hostName)
+				writeJSON(w, http.StatusOK, map[string]any{"status": "view_started", "host": hostName})
+			})
+			priv.Post("/view/hosts/{name}/end", func(w http.ResponseWriter, r *http.Request) {
+				hostName := chi.URLParam(r, "name")
+				viewBoostTracker.RemoveView(hostName)
+				writeJSON(w, http.StatusOK, map[string]any{"status": "view_ended", "host": hostName})
+			})
+
 			// POST /api/inventory/reload
 			priv.Post("/inventory/reload", func(w http.ResponseWriter, r *http.Request) {
 				var body struct{ Path string `json:"path"` }

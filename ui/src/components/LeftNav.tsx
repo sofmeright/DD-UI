@@ -36,20 +36,20 @@ export default function LeftNav({
   );
 
   return (
-    <div className="hidden md:flex md:flex-col w-60 shrink-0 border-r border-slate-800 bg-slate-950/60">
+    <div className="hidden md:flex md:flex-col w-52 shrink-0 border-r border-slate-800 bg-slate-950/60">
       <div className="px-4 py-4 border-b border-slate-800">
-        <div className="flex items-center gap-3">
-          <img src="/DDUI-Logo.png" alt="DDUI" className="h-16 w-16 rounded-md" />
-          <div className="flex flex-col">
-            <div className="font-black uppercase tracking-tight leading-none text-slate-200 select-none text-lg">
-              <span className="bg-clip-text text-transparent bg-gradient-to-r from-brand to-sky-400">
-                DDUI
-              </span>
-            </div>
-            <Badge variant="outline" className="mt-1 w-fit">
-              Community
+        <div className="flex flex-col items-center">
+          <div className="font-black uppercase tracking-tight leading-none text-slate-200 select-none text-5xl mb-1">
+            <span className="gradient-wave">
+              DD-UI
+            </span>
+          </div>
+          <div className="flex justify-center mb-1">
+            <Badge variant="outline" className="w-fit text-xs">
+              Community Edition
             </Badge>
           </div>
+          <img src="/DDUI-Logo.png" alt="DD-UI" className="h-28 w-28 rounded-md" />
         </div>
       </div>
 

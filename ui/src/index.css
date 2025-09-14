@@ -3,3 +3,24 @@
 @tailwind utilities;
 
 :root { color-scheme: dark; }
+
+@keyframes gradient-wave {
+  0% {
+    background-position: 0% 50%;
+  }
+  50% {
+    background-position: 100% 50%;
+  }
+  100% {
+    background-position: 0% 50%;
+  }
+}
+
+.gradient-wave {
+  background: linear-gradient(90deg, #74ecbe, #0ea5e9, #74ecbe, #0ea5e9);
+  background-size: 200% 200%;
+  animation: gradient-wave 3s ease-in-out infinite;
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+}

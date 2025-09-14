@@ -322,7 +322,7 @@ func ScanHostContainers(ctx context.Context, hostName string) (int, error) {
 
 		saved++
 		scanLog(ctx, h.ID, "info", "container discovered",
-			map[string]any{"name": name, "image": c.Image, "state": c.State, "project": project})
+			map[string]any{"name": name, "image": c.Image, "state": c.State, "status": c.Status, "project": project})
 	}
 
 	// prune gone containers

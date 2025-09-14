@@ -160,7 +160,7 @@ export default function HostStacksView({
       });
 
       // Smart update: Only refresh container data, not full page sync
-      await updateContainerStatus(ctr);
+      await updateContainerStatus(ctr, action);
       
     } catch (e) {
       // Show error notification
@@ -228,7 +228,7 @@ export default function HostStacksView({
   }
 
   // Enhanced container status update with reliable polling for state transitions
-  async function updateContainerStatus(containerName: string) {
+  async function updateContainerStatus(containerName: string, action?: string) {
     // Prevent duplicate updates for the same container
     if (pendingContainerUpdates.has(containerName)) {
       debugLog(`[DDUI] Skipping duplicate update for ${containerName}`);
@@ -245,8 +245,15 @@ export default function HostStacksView({
       while (attempts < maxAttempts) {
         attempts++;
         
-        // Progressive delay: fast at first, then slower
-        const delay = attempts <= 5 ? 400 : attempts <= 10 ? 1000 : 2000;
+        // Progressive delay: optimized for different action types
+        let delay: number;
+        if (action === 'pause' || action === 'unpause') {
+          // Pause/unpause are near-instantaneous - check quickly
+          delay = attempts <= 3 ? 150 : attempts <= 8 ? 300 : 800;
+        } else {
+          // Other actions may need more time
+          delay = attempts <= 5 ? 400 : attempts <= 10 ? 1000 : 2000;
+        }
         await new Promise(resolve => setTimeout(resolve, delay));
         
         // Fetch container data
@@ -271,7 +278,7 @@ export default function HostStacksView({
         const currentState = updatedContainer.state;
         const currentStatus = updatedContainer.status || '';
         
-        debugLog(`[DDUI] Container ${containerName} polling (${attempts}/${maxAttempts}): ${currentState} | ${currentStatus}`);
+        debugLog(`[DDUI] Container ${containerName} polling (${attempts}/${maxAttempts}) for action '${action || 'unknown'}': ${currentState} | ${currentStatus}`);
         
         // Always update the UI with current data
         setStacks(prevStacks => 
@@ -383,6 +390,10 @@ export default function HostStacksView({
           return;
         }
         
+        if (!rc.ok) {
+          throw new Error(`Failed to load containers: ${rc.status} ${rc.statusText}`);
+        }
+        
         const contJson = await rc.json();
         const runtime: ApiContainer[] = (contJson.containers || []) as ApiContainer[];
         
@@ -399,6 +410,10 @@ export default function HostStacksView({
         if (ri.status === 401) {
           window.location.replace("/auth/login");
           return;
+        }
+        
+        if (!ri.ok) {
+          throw new Error(`Failed to load IaC data: ${ri.status} ${ri.statusText}`);
         }
         
         const iacJson = await ri.json();
@@ -777,7 +792,19 @@ export default function HostStacksView({
           iac_enabled: false,
         }),
       });
-      if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+      
+      if (!r.ok) {
+        // Try to get error message from response body
+        let errorMessage = `${r.status} ${r.statusText}`;
+        try {
+          const errorText = await r.text();
+          if (errorText) errorMessage = errorText;
+        } catch {
+          // Ignore JSON parsing errors for error responses
+        }
+        throw new Error(errorMessage);
+      }
+      
       const j = await r.json();
       onOpenStack(name, j.id);
     } catch (e: any) {
@@ -1074,20 +1101,21 @@ export default function HostStacksView({
             </div>
           </CardHeader>
           <CardContent className="pt-0">
-            <div className="overflow-x-auto rounded-lg border border-slate-800">
-              <table className="w-full text-xs table-fixed">
-                <thead className="bg-slate-900/70 text-slate-300">
-                  <tr className="whitespace-nowrap">
-                    <th className="px-2 py-2 text-left w-56">Name</th>
-                    <th className="px-2 py-2 text-left w-36">State</th>
-                    <th className="px-2 py-2 text-left w-[24rem]">Image</th>
-                    <th className="px-2 py-2 text-left w-40">Created</th>
-                    <th className="px-2 py-2 text-left w-36">IP</th>
-                    <th className="px-2 py-2 text-left w-56">Published Ports</th>
-                    <th className="px-2 py-2 text-left w-32">Owner</th>
-                    <th className="px-2 py-2 text-left w-[18rem]">Actions</th>
-                  </tr>
-                </thead>
+            <div className="overflow-hidden rounded-lg border border-slate-800">
+              <div className="overflow-x-auto">
+                <table className="w-full text-xs table-auto">
+                  <thead className="bg-slate-900/70 text-slate-300">
+                    <tr className="whitespace-nowrap">
+                      <th className="px-2 py-2 text-left min-w-[120px] w-[20%]">Name</th>
+                      <th className="px-2 py-2 text-left min-w-[80px] w-[12%]">State</th>
+                      <th className="px-2 py-2 text-left min-w-[150px] w-[25%]">Image</th>
+                      <th className="px-2 py-2 text-left min-w-[100px] w-[15%]">Published Ports</th>
+                      <th className="px-2 py-2 text-left min-w-[120px] w-[15%]">Actions</th>
+                      <th className="px-2 py-2 text-left min-w-[80px] w-[8%] hidden sm:table-cell">Created</th>
+                      <th className="px-2 py-2 text-left min-w-[90px] w-[10%] hidden md:table-cell">IP</th>
+                      <th className="px-2 py-2 text-left min-w-[80px] w-[8%] hidden lg:table-cell pr-4">Owner</th>
+                    </tr>
+                  </thead>
                 <tbody>
                   {s.rows
                     .filter((r) => matchRow(r, hostQuery))
@@ -1104,23 +1132,21 @@ export default function HostStacksView({
                           </td>
                           <td className="px-2 py-1.5 text-slate-300">
                             <div className="flex items-center gap-2">
-                              <div className="max-w-[24rem] truncate" title={r.imageRun || ""}>
+                              <div className="truncate" title={r.imageRun || ""}>
                                 {r.imageRun || "—"}
                               </div>
                               {r.imageIac && r.state === "missing" && (
                                 <>
                                   <ChevronRight className="h-4 w-4 text-slate-500" />
-                                  <div className="max-w-[24rem] truncate text-slate-300" title={r.imageIac}>
+                                  <div className="truncate text-slate-300" title={r.imageIac}>
                                     {r.imageIac}
                                   </div>
                                 </>
                               )}
                             </div>
                           </td>
-                          <td className="px-2 py-1.5 text-slate-300">{r.created || "—"}</td>
-                          <td className="px-2 py-1.5 text-slate-300">{r.ip || "—"}</td>
                           <td className="px-2 py-1.5 text-slate-300 align-top">
-                            <div className="max-w-56">
+                            <div className="truncate">
                               <PortLinks 
                                 ports={r.ports || []} 
                                 hostAddress={host.address || host.name}
@@ -1128,9 +1154,8 @@ export default function HostStacksView({
                               />
                             </div>
                           </td>
-                          <td className="px-2 py-1.5 text-slate-300">{r.owner || "—"}</td>
                           <td className="px-2 py-1">
-                            <div className="flex items-center gap-1 overflow-x-auto whitespace-nowrap py-0.5">
+                            <div className="flex items-center gap-1 whitespace-nowrap py-0.5">
                               {r.state === "missing" ? (
                                 // For missing services, only show inspect action
                                 <>
@@ -1235,6 +1260,9 @@ export default function HostStacksView({
                               )}
                             </div>
                           </td>
+                          <td className="px-2 py-1.5 text-slate-300 hidden sm:table-cell">{r.created || "—"}</td>
+                          <td className="px-2 py-1.5 text-slate-300 hidden md:table-cell">{r.ip || "—"}</td>
+                          <td className="px-2 py-1.5 text-slate-300 hidden lg:table-cell pr-4">{r.owner || "—"}</td>
                         </tr>
                       );
                     })}
@@ -1246,7 +1274,8 @@ export default function HostStacksView({
                     </tr>
                   )}
                 </tbody>
-              </table>
+                </table>
+              </div>
             </div>
             <div className="pt-2 text-xs text-slate-400">Tip: click the stack title to open the full compare & editor view.</div>
           </CardContent>

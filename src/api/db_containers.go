@@ -16,6 +16,7 @@ type ContainerRow struct {
 	Image        string             `json:"image"`
 	State        string             `json:"state"`
 	Status       string             `json:"status"`
+	Health       string             `json:"health,omitempty"`
 	Ports        []any              `json:"ports"`                      // flattened list (see scan)
 	Labels       map[string]string  `json:"labels"`
 	Env          []string           `json:"env"`                        // raw docker env ["K=V", ...]
@@ -92,6 +93,72 @@ func pruneMissingContainers(ctx context.Context, hostID int64, keepIDs []string)
 	return cmd.RowsAffected(), nil
 }
 
+// getContainerByHostAndName fetches a single container by host and container name
+func getContainerByHostAndName(ctx context.Context, hostName, containerName string) (*ContainerRow, error) {
+	h, err := GetHostByName(ctx, hostName)
+	if err != nil {
+		return nil, err
+	}
+	
+	var (
+		cr                  ContainerRow
+		portsB, labelsB     []byte
+		envB, nwB, mountsB  []byte
+		projectFromStack    *string
+	)
+	
+	err = db.QueryRow(ctx, `
+		SELECT
+		  c.id, c.host_id, c.stack_id, c.container_id, c.name, c.image, c.state, c.status,
+		  c.ports, c.labels, c.env, c.networks, c.mounts, c.ip_addr, c.created_ts,
+		  s.project, c.owner, c.updated_at
+		FROM containers c
+		LEFT JOIN stacks s ON s.id = c.stack_id
+		WHERE c.host_id = $1 AND c.name = $2
+		ORDER BY c.updated_at DESC
+		LIMIT 1
+	`, h.ID, containerName).Scan(
+		&cr.ID, &cr.HostID, &cr.StackID, &cr.ContainerID, &cr.Name, &cr.Image, &cr.State, &cr.Status,
+		&portsB, &labelsB, &envB, &nwB, &mountsB, &cr.IPAddr, &cr.CreatedTS,
+		&projectFromStack, &cr.Owner, &cr.UpdatedAt,
+	)
+	
+	if err != nil {
+		return nil, err
+	}
+	
+	_ = json.Unmarshal(portsB, &cr.Ports)
+	_ = json.Unmarshal(labelsB, &cr.Labels)
+	_ = json.Unmarshal(envB, &cr.Env)
+	_ = json.Unmarshal(nwB, &cr.Networks)
+	_ = json.Unmarshal(mountsB, &cr.Mounts)
+	
+	// Derive compose metadata
+	if projectFromStack != nil && *projectFromStack != "" {
+		cr.ComposeProj = *projectFromStack
+	} else if cr.Labels != nil {
+		if lp, ok := cr.Labels["com.docker.compose.project"]; ok {
+			cr.ComposeProj = lp
+		}
+	}
+	if cr.Labels != nil {
+		if ls, ok := cr.Labels["com.docker.compose.service"]; ok {
+			cr.ComposeSvc = ls
+		}
+	}
+	
+	// Add health from labels if available
+	if cr.Labels != nil {
+		if health, ok := cr.Labels["com.docker.compose.health"]; ok {
+			cr.Health = health
+		} else if health, ok := cr.Labels["org.label-schema.health"]; ok {
+			cr.Health = health
+		}
+	}
+	
+	return &cr, nil
+}
+
 // listContainersByHost includes created_ts, ip, env, networks, mounts, and compose_* derivations.
 func listContainersByHost(ctx context.Context, hostName string) ([]ContainerRow, error) {
 	h, err := GetHostByName(ctx, hostName)
@@ -147,6 +214,15 @@ func listContainersByHost(ctx context.Context, hostName string) ([]ContainerRow,
         } else if v, ok := cr.Labels["com.docker.service.name"]; ok && v != "" {
             cr.ComposeSvc = v
         }
+
+		// Add health from labels if available
+		if cr.Labels != nil {
+			if health, ok := cr.Labels["com.docker.compose.health"]; ok {
+				cr.Health = health
+			} else if health, ok := cr.Labels["org.label-schema.health"]; ok {
+				cr.Health = health
+			}
+		}
 
 		out = append(out, cr)
 	}

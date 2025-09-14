@@ -1,8 +1,15 @@
 // ui/src/components/StatePill.tsx
+import { debugLog } from "@/utils/logging";
+
 export default function StatePill({ state, status, health }: { state?: string; status?: string; health?: string }) {
     const s = (state || "").toLowerCase();
     const st = (status || "").toLowerCase();
     const h = (health || "").toLowerCase();
+    
+    // Debug logging to understand what values we're getting
+    if (s.includes("paused") || st.includes("paused")) {
+        debugLog(`StatePill PAUSED: state="${state}", status="${status}", s="${s}", st="${st}"`);
+    }
     
     let classes = "border-slate-700 bg-slate-900 text-slate-300";
     let text = state || "unknown";
@@ -21,15 +28,15 @@ export default function StatePill({ state, status, health }: { state?: string; s
     } else if (st.includes("starting")) {
         classes = "border-amber-700/60 bg-amber-900/40 text-amber-200 animate-pulse";
         displayText = "starting";
-    } else if (st.includes("up") || s.includes("running")) {
-        classes = "border-emerald-700/60 bg-emerald-900/40 text-emerald-200";
-        displayText = "running";
+    } else if (s.includes("paused") || st.includes("paused")) {
+        classes = "border-sky-700/60 bg-sky-900/40 text-sky-200";
+        displayText = "paused";
     } else if (s.includes("restarting")) {
         classes = "border-amber-700/60 bg-amber-900/40 text-amber-200 animate-pulse";
         displayText = "restarting";
-    } else if (s.includes("paused")) {
-        classes = "border-sky-700/60 bg-sky-900/40 text-sky-200";
-        displayText = "paused";
+    } else if (st.includes("up") || s.includes("running")) {
+        classes = "border-emerald-700/60 bg-emerald-900/40 text-emerald-200";
+        displayText = "running";
     } else if (st.includes("exited") || s.includes("exited")) {
         classes = "border-rose-700/60 bg-rose-900/40 text-rose-200";
         // Extract exit code if available (e.g., "Exited (0) 2 minutes ago")

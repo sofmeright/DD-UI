@@ -29,6 +29,142 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// CommentInfo stores information about comments and their positions in dotenv files
+type CommentInfo struct {
+	LineNumber int    `json:"lineNumber"`
+	Content    string `json:"content"`
+}
+
+// DotenvComments stores all comment metadata for a dotenv file
+type DotenvComments struct {
+	Comments []CommentInfo `json:"comments"`
+}
+
+// parseDotenvWithComments extracts comments and their positions, returns cleaned content for SOPS
+func parseDotenvWithComments(content string) (cleanedContent string, comments DotenvComments) {
+	debugLog("SOPS: parseDotenvWithComments called with %d bytes", len(content))
+	
+	// Normalize line endings: convert \r\n to \n and remove standalone \r
+	normalizedContent := strings.ReplaceAll(content, "\r\n", "\n")
+	normalizedContent = strings.ReplaceAll(normalizedContent, "\r", "\n")
+	
+	lines := strings.Split(normalizedContent, "\n")
+	var cleanedLines []string
+	var commentInfos []CommentInfo
+	
+	for i, line := range lines {
+		trimmed := strings.TrimSpace(line)
+		
+		// Track comments and their line numbers (but skip purely empty lines)
+		if strings.HasPrefix(trimmed, "#") {
+			commentInfos = append(commentInfos, CommentInfo{
+				LineNumber: i,
+				Content:    line, // preserve original spacing
+			})
+			continue
+		}
+		
+		// Skip empty lines entirely - don't preserve them as comments
+		if trimmed == "" {
+			continue
+		}
+		
+		// Keep lines that look like KEY=VALUE
+		if strings.Contains(trimmed, "=") {
+			cleanedLines = append(cleanedLines, line)
+		} else {
+			// Treat malformed lines as comments too
+			commentInfos = append(commentInfos, CommentInfo{
+				LineNumber: i,
+				Content:    line,
+			})
+		}
+	}
+	
+	// Check if original content ended with a newline to preserve that behavior
+	cleanedContent = strings.Join(cleanedLines, "\n")
+	if strings.HasSuffix(normalizedContent, "\n") && !strings.HasSuffix(cleanedContent, "\n") {
+		cleanedContent += "\n"
+	}
+	
+	debugLog("SOPS: parseDotenvWithComments returning - original had trailing newline: %v, output has trailing newline: %v", 
+		strings.HasSuffix(normalizedContent, "\n"), strings.HasSuffix(cleanedContent, "\n"))
+		
+	return cleanedContent, DotenvComments{Comments: commentInfos}
+}
+
+// reconstructDotenvWithComments merges decrypted content with preserved comments
+func reconstructDotenvWithComments(cleanContent string, comments DotenvComments) string {
+	if len(comments.Comments) == 0 {
+		return cleanContent
+	}
+	
+	// Normalize line endings in clean content too
+	normalizedClean := strings.ReplaceAll(cleanContent, "\r\n", "\n")
+	normalizedClean = strings.ReplaceAll(normalizedClean, "\r", "\n")
+	
+	// Check if original clean content ended with a newline
+	endsWithNewline := strings.HasSuffix(normalizedClean, "\n")
+	
+	cleanLines := strings.Split(strings.TrimSuffix(normalizedClean, "\n"), "\n")
+	var result []string
+	
+	// Create a map of line numbers to comments for quick lookup
+	commentMap := make(map[int]string)
+	for _, comment := range comments.Comments {
+		commentMap[comment.LineNumber] = comment.Content
+	}
+	
+	// Find the maximum line number to determine final size
+	maxLine := 0
+	for lineNum := range commentMap {
+		if lineNum > maxLine {
+			maxLine = lineNum
+		}
+	}
+	
+	// Reconstruct the file line by line
+	cleanIndex := 0
+	for i := 0; i <= maxLine; i++ {
+		if commentContent, isComment := commentMap[i]; isComment {
+			result = append(result, commentContent)
+		} else if cleanIndex < len(cleanLines) && cleanLines[cleanIndex] != "" {
+			// Only add non-empty clean lines to avoid duplicating empty lines
+			result = append(result, cleanLines[cleanIndex])
+			cleanIndex++
+		} else if cleanIndex < len(cleanLines) {
+			// Skip empty clean lines since they should be represented as comments
+			cleanIndex++
+		}
+	}
+	
+	// Add any remaining clean lines
+	for cleanIndex < len(cleanLines) {
+		if cleanLines[cleanIndex] != "" || cleanIndex == len(cleanLines)-1 {
+			result = append(result, cleanLines[cleanIndex])
+		}
+		cleanIndex++
+	}
+	
+	// Join and preserve original trailing newline behavior
+	reconstructed := strings.Join(result, "\n")
+	if endsWithNewline && !strings.HasSuffix(reconstructed, "\n") {
+		reconstructed += "\n"
+	}
+	
+	return reconstructed
+}
+
+// normalizeFileContent normalizes line endings and handles trailing newlines consistently
+func normalizeFileContent(content string) string {
+	// Normalize line endings: convert \r\n to \n and remove standalone \r
+	normalized := strings.ReplaceAll(content, "\r\n", "\n")
+	normalized = strings.ReplaceAll(normalized, "\r", "\n")
+	
+	// Don't add extra trailing newlines - preserve original behavior
+	return normalized
+}
+
 type Health struct {
 	Status    string    `json:"status"`
 	StartedAt time.Time `json:"startedAt"`
@@ -771,6 +907,66 @@ func makeRouter() http.Handler {
 				})
 			})
 
+			// Create a new stack for a host
+			priv.Post("/iac/hosts/{hostname}/stacks", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				
+				var body struct {
+					StackName  string `json:"stack_name"`
+					IacEnabled bool   `json:"iac_enabled"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				if body.StackName == "" {
+					http.Error(w, "stack_name required", http.StatusBadRequest)
+					return
+				}
+
+				// Verify host exists
+				_, err := GetHostByName(r.Context(), hostname)
+				if err != nil {
+					http.Error(w, "host not found", http.StatusNotFound)
+					return
+				}
+
+				// Check if stack already exists
+				var existingID int64
+				err = db.QueryRow(r.Context(), 
+					`SELECT id FROM iac_stacks WHERE scope_kind='host' AND scope_name=$1 AND stack_name=$2`,
+					hostname, body.StackName).Scan(&existingID)
+				if err == nil {
+					http.Error(w, "stack already exists", http.StatusConflict)
+					return
+				}
+
+				// Create the stack using the same logic as the generic endpoint
+				relPath := fmt.Sprintf("hosts/%s/%s", hostname, body.StackName)
+				
+				var newID int64
+				err = db.QueryRow(r.Context(), `
+					INSERT INTO iac_stacks (repo_id, scope_kind, scope_name, stack_name, rel_path, iac_enabled)
+					VALUES (1, 'host', $1, $2, $3, $4)
+					RETURNING id`,
+					hostname, body.StackName, relPath, body.IacEnabled).Scan(&newID)
+				if err != nil {
+					debugLog("Failed to create stack: %v", err)
+					http.Error(w, "failed to create stack", http.StatusInternalServerError)
+					return
+				}
+
+				debugLog("Created new stack: id=%d, hostname=%s, stack_name=%s", newID, hostname, body.StackName)
+				
+				writeJSON(w, http.StatusCreated, map[string]any{
+					"id":          newID,
+					"stack_name":  body.StackName,
+					"hostname":    hostname,
+					"rel_path":    relPath,
+					"iac_enabled": body.IacEnabled,
+				})
+			})
+
 			// Group-scoped Stack CRUD operations
 			priv.Get("/iac/groups/{groupname}/stacks/{stackname}", func(w http.ResponseWriter, r *http.Request) {
 				groupname := chi.URLParam(r, "groupname")
@@ -953,7 +1149,29 @@ func makeRouter() http.Handler {
 						http.Error(w, "sops decrypt failed: "+string(out), http.StatusNotImplemented)
 						return
 					}
-					data = out
+					
+					// Check if this is a dotenv file with comment metadata
+					decryptedContent := string(out)
+					if strings.HasSuffix(strings.ToLower(rel), ".env") {
+						commentsFile := full + ".comments.json"
+						if commentsData, err := os.ReadFile(commentsFile); err == nil {
+							debugLog("SOPS: Found comment metadata file for decryption: %s", commentsFile)
+							var comments DotenvComments
+							if err := json.Unmarshal(commentsData, &comments); err == nil {
+								debugLog("SOPS: Successfully loaded %d comments from metadata", len(comments.Comments))
+								// Reconstruct the original format with comments
+								reconstructed := reconstructDotenvWithComments(decryptedContent, comments)
+								debugLog("SOPS: Reconstructed dotenv with comments - original %d bytes, reconstructed %d bytes", 
+									len(decryptedContent), len(reconstructed))
+								decryptedContent = reconstructed
+							} else {
+								debugLog("SOPS: Failed to parse comment metadata: %v", err)
+							}
+						} else {
+							debugLog("SOPS: No comment metadata found for %s", commentsFile)
+						}
+					}
+					data = []byte(decryptedContent)
 				} else {
 					b, err := os.ReadFile(full)
 					if err != nil {
@@ -971,6 +1189,7 @@ func makeRouter() http.Handler {
 			priv.Post("/iac/hosts/{hostname}/stacks/{stackname}/file", func(w http.ResponseWriter, r *http.Request) {
 				hostname := chi.URLParam(r, "hostname")
 				stackname := chi.URLParam(r, "stackname")
+				debugLog("SOPS: File save request - hostname=%s stackname=%s", hostname, stackname)
 				
 				id, err := getStackID(r.Context(), "host", hostname, stackname)
 				if err != nil {
@@ -985,9 +1204,11 @@ func makeRouter() http.Handler {
 					Role    string `json:"role,omitempty"` // compose|env|script|other
 				}
 				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					debugLog("SOPS: JSON decode error: %v", err)
 					http.Error(w, "bad json", http.StatusBadRequest)
 					return
 				}
+				debugLog("SOPS: Decoded request body - path=%s sops=%v content_len=%d", body.Path, body.Sops, len(body.Content))
 				if strings.TrimSpace(body.Path) == "" {
 					http.Error(w, "path required", http.StatusBadRequest)
 					return
@@ -1006,7 +1227,47 @@ func makeRouter() http.Handler {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
-				if err := os.WriteFile(full, []byte(body.Content), 0o644); err != nil {
+				
+				// Determine if we should encrypt with SOPS
+				shouldSops := body.Sops || strings.HasSuffix(strings.ToLower(body.Path), "_private.env") || strings.HasSuffix(strings.ToLower(body.Path), "_secret.env")
+				debugLog("SOPS save debug: path=%s body.Sops=%v shouldSops=%v", body.Path, body.Sops, shouldSops)
+				
+				// Handle dotenv files with comment preservation for SOPS
+				var contentToWrite string = body.Content
+				var commentsMetadata DotenvComments
+				
+				debugLog("SOPS: Comment parsing check - shouldSops=%v path=%s lowered=%s hasSuffix=%v", 
+					shouldSops, body.Path, strings.ToLower(body.Path), strings.HasSuffix(strings.ToLower(body.Path), ".env"))
+				
+				if shouldSops && strings.HasSuffix(strings.ToLower(body.Path), ".env") {
+					// Parse comments and get cleaned content for SOPS
+					debugLog("SOPS: About to call parseDotenvWithComments")
+					cleanedContent, comments := parseDotenvWithComments(body.Content)
+					contentToWrite = cleanedContent
+					commentsMetadata = comments
+					
+					debugLog("SOPS: Parsed dotenv - original %d lines, cleaned %d lines, %d comments", 
+						len(strings.Split(body.Content, "\n")), 
+						len(strings.Split(cleanedContent, "\n")), 
+						len(comments.Comments))
+					
+					// Save comment metadata for later restoration
+					if len(comments.Comments) > 0 {
+						commentsFile := full + ".comments.json"
+						commentsData, _ := json.Marshal(commentsMetadata)
+						if err := os.WriteFile(commentsFile, commentsData, 0o644); err != nil {
+							debugLog("SOPS: Warning - failed to save comments metadata: %v", err)
+						} else {
+							debugLog("SOPS: Saved %d comments to metadata file", len(comments.Comments))
+						}
+					}
+				}
+
+				normalizedContentToWrite := normalizeFileContent(contentToWrite)
+				debugLog("File write debug: path=%s originalLen=%d normalizedLen=%d", body.Path, len(contentToWrite), len(normalizedContentToWrite))
+				debugLog("File write debug: original ending: %q", contentToWrite[max(0, len(contentToWrite)-10):])
+				debugLog("File write debug: normalized ending: %q", normalizedContentToWrite[max(0, len(normalizedContentToWrite)-10):])
+				if err := os.WriteFile(full, []byte(normalizedContentToWrite), 0o644); err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
@@ -1025,9 +1286,6 @@ func makeRouter() http.Handler {
 						body.Role = "other"
 					}
 				}
-
-				// Optional SOPS auto-encrypt on save (opt-in)
-				shouldSops := body.Sops || strings.HasSuffix(strings.ToLower(body.Path), "_private.env") || strings.HasSuffix(strings.ToLower(body.Path), "_secret.env")
 				if shouldSops && (os.Getenv("SOPS_AGE_KEY") != "" || os.Getenv("SOPS_AGE_KEY_FILE") != "" || os.Getenv("SOPS_AGE_RECIPIENTS") != "") {
 					args := []string{"-e", "-i"}
 					if strings.HasSuffix(strings.ToLower(body.Path), ".env") {
@@ -1088,6 +1346,7 @@ func makeRouter() http.Handler {
 					return
 				}
 				_ = os.Remove(full) // best effort
+				cleanupAssociatedCommentFile(full)
 				_ = deleteIacFileRow(r.Context(), id, rel)
 				
 				// Clean up empty directories and remove empty stack if no content remains
@@ -1218,7 +1477,8 @@ func makeRouter() http.Handler {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
-				if err := os.WriteFile(full, []byte(body.Content), 0o644); err != nil {
+				normalizedContent := normalizeFileContent(body.Content)
+				if err := os.WriteFile(full, []byte(normalizedContent), 0o644); err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
@@ -1240,6 +1500,7 @@ func makeRouter() http.Handler {
 
 				// Optional SOPS auto-encrypt on save (opt-in)
 				shouldSops := body.Sops || strings.HasSuffix(strings.ToLower(body.Path), "_private.env") || strings.HasSuffix(strings.ToLower(body.Path), "_secret.env")
+				debugLog("SOPS save debug: path=%s body.Sops=%v shouldSops=%v", body.Path, body.Sops, shouldSops)
 				if shouldSops && (os.Getenv("SOPS_AGE_KEY") != "" || os.Getenv("SOPS_AGE_KEY_FILE") != "" || os.Getenv("SOPS_AGE_RECIPIENTS") != "") {
 					args := []string{"-e", "-i"}
 					if strings.HasSuffix(strings.ToLower(body.Path), ".env") {
@@ -1300,6 +1561,7 @@ func makeRouter() http.Handler {
 					return
 				}
 				_ = os.Remove(full) // best effort
+				cleanupAssociatedCommentFile(full)
 				_ = deleteIacFileRow(r.Context(), id, rel)
 				
 				// Clean up empty directories and remove empty stack if no content remains
@@ -1820,6 +2082,18 @@ func makeRouter() http.Handler {
 					return
 				}
 				writeJSON(w, http.StatusOK, map[string]any{"containers": containers})
+			})
+
+			// Single container status endpoint
+			priv.Get("/containers/hosts/{hostname}/{ctr}", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				containerName := chi.URLParam(r, "ctr")
+				container, err := getContainerByHostAndName(r.Context(), hostname, containerName)
+				if err != nil {
+					http.Error(w, fmt.Sprintf("failed to get container: %v", err), http.StatusInternalServerError)
+					return
+				}
+				writeJSON(w, http.StatusOK, map[string]any{"container": container})
 			})
 
 			// Container log streaming endpoint (NEW API)
@@ -2706,7 +2980,8 @@ func makeRouter() http.Handler {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
-				if err := os.WriteFile(full, []byte(body.Content), 0o644); err != nil {
+				normalizedContent := normalizeFileContent(body.Content)
+				if err := os.WriteFile(full, []byte(normalizedContent), 0o644); err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
 				}
@@ -2728,6 +3003,7 @@ func makeRouter() http.Handler {
 
 				// Optional SOPS auto-encrypt on save (opt-in)
 				shouldSops := body.Sops || strings.HasSuffix(strings.ToLower(body.Path), "_private.env") || strings.HasSuffix(strings.ToLower(body.Path), "_secret.env")
+				debugLog("SOPS save debug: path=%s body.Sops=%v shouldSops=%v", body.Path, body.Sops, shouldSops)
 				if shouldSops && (os.Getenv("SOPS_AGE_KEY") != "" || os.Getenv("SOPS_AGE_KEY_FILE") != "" || os.Getenv("SOPS_AGE_RECIPIENTS") != "") {
 					args := []string{"-e", "-i"}
 					if strings.HasSuffix(strings.ToLower(body.Path), ".env") {
@@ -2782,6 +3058,7 @@ func makeRouter() http.Handler {
 					return
 				}
 				_ = os.Remove(full) // best effort
+				cleanupAssociatedCommentFile(full)
 				_ = deleteIacFileRow(r.Context(), id, rel)
 				
 				// Clean up empty directories and remove empty stack if no content remains
@@ -3761,6 +4038,16 @@ func cleanupEmptyDirs(path, root string) error {
 	}
 	
 	return nil
+}
+
+// cleanupAssociatedCommentFile removes the .comments.json file if it exists for the given IaC file
+func cleanupAssociatedCommentFile(filePath string) {
+	if strings.HasSuffix(filePath, ".env") {
+		commentFile := filePath + ".comments.json"
+		if err := os.Remove(commentFile); err == nil {
+			debugLog("Cleaned up comment file: %s", commentFile)
+		}
+	}
 }
 
 // cleanupEmptyStackAfterFileDeletion removes a stack from database if it has no content after file deletion

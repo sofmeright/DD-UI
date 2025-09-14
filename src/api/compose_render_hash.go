@@ -147,6 +147,14 @@ func renderComposeServices(ctx context.Context, stageDir, projectName string, fi
 				debugLog("Failed to read env file %s: %v", entry.Name(), err)
 				continue // Skip problematic env files but don't fail entirely
 			}
+			debugLog("renderComposeServices: reading %s from %s, got %d bytes", entry.Name(), sourcePath, len(rawContent))
+			if len(rawContent) > 0 {
+				sample := string(rawContent)
+				if len(sample) > 200 {
+					sample = sample[:200] + "..."
+				}
+				debugLog("renderComposeServices: %s content sample: %q", entry.Name(), sample)
+			}
 			content := filterDotenvSopsKeys(rawContent)
 			envVars := parseEnvFileContent(content)
 			envFiles[entry.Name()] = envVars
@@ -429,10 +437,18 @@ func resolveVariablesWithPrecedence(input string, rootEnv, serviceEnv map[string
 // parseEnvFileContent parses key=value pairs from .env file content
 func parseEnvFileContent(content []byte) map[string]string {
 	vars := make(map[string]string)
+	debugLog("parseEnvFileContent: received %d bytes of content", len(content))
+	if len(content) > 0 {
+		debugLog("parseEnvFileContent: content sample (first 200 chars): %q", string(content[:min(200, len(content))]))
+	}
 	lines := strings.Split(string(content), "\n")
-	for _, line := range lines {
+	debugLog("parseEnvFileContent: split into %d lines", len(lines))
+	for i, line := range lines {
+		debugLog("parseEnvFileContent: line %d: %q", i, line)
 		line = strings.TrimSpace(line)
+		debugLog("parseEnvFileContent: line %d after trim: %q", i, line)
 		if line == "" || strings.HasPrefix(line, "#") {
+			debugLog("parseEnvFileContent: line %d skipped (empty or comment)", i)
 			continue
 		}
 		if idx := strings.Index(line, "="); idx > 0 {
@@ -442,7 +458,10 @@ func parseEnvFileContent(content []byte) map[string]string {
 			if len(value) >= 2 && ((value[0] == '"' && value[len(value)-1] == '"') || (value[0] == '\'' && value[len(value)-1] == '\'')) {
 				value = value[1 : len(value)-1]
 			}
+			debugLog("parseEnvFileContent: found var: %s = %s", key, value)
 			vars[key] = value
+		} else {
+			debugLog("parseEnvFileContent: line %d has no valid = assignment: %q", i, line)
 		}
 	}
 	return vars

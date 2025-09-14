@@ -113,6 +113,28 @@ func upsertIacFile(ctx context.Context, stackID int64, role, relPath string, sop
 	return err
 }
 
+func pruneEmptyIacStacks(ctx context.Context, repoID int64) (int64, error) {
+	if repoID == 0 {
+		return 0, errors.New("repoID=0")
+	}
+	
+	// Delete stacks that have no files (abandoned stack creation)
+	cmd, err := db.Exec(ctx, `
+		DELETE FROM iac_stacks 
+		WHERE repo_id=$1 
+		AND id NOT IN (
+			SELECT DISTINCT stack_id 
+			FROM iac_stack_files 
+			WHERE stack_id IS NOT NULL
+		)
+		AND (compose_file IS NULL OR compose_file = '')
+	`, repoID)
+	if err != nil {
+		return 0, err
+	}
+	return cmd.RowsAffected(), nil
+}
+
 func pruneIacStacksNotIn(ctx context.Context, repoID int64, keepIDs []int64) (int64, error) {
 	if repoID == 0 {
 		return 0, errors.New("repoID=0")
@@ -197,6 +219,23 @@ func listIacStacksForHost(ctx context.Context, hostName string) ([]IacStackOut, 
 	
 	debugLog("Found %d basic stacks for host %s", len(stacks), hostName)
 
+	// Filter out empty stacks to prevent 500 errors during processing
+	var filteredStacks []IacStackOut
+	for _, s := range stacks {
+		hasContent, err := stackHasContent(ctx, s.ID)
+		if err != nil {
+			debugLog("Failed to check stack content for %s: %v", s.Name, err)
+			continue
+		}
+		if !hasContent {
+			debugLog("Skipping empty stack %s (no files)", s.Name)
+			continue
+		}
+		filteredStacks = append(filteredStacks, s)
+	}
+	stacks = filteredStacks
+	debugLog("After filtering empty stacks: %d stacks remain for host %s", len(stacks), hostName)
+
 	// load services per stack
 	for i := range stacks {
 		rs, err := db.Query(ctx, `
@@ -268,6 +307,10 @@ func listFilesForStack(ctx context.Context, stackID int64) ([]IacFileMetaRow, er
 		var it IacFileMetaRow
 		if err := rows.Scan(&it.Role, &it.RelPath, &it.Sops, &it.Sha256Hex, &it.SizeBytes, &it.UpdatedAt); err != nil {
 			return nil, err
+		}
+		// Filter out comment metadata files from user-facing file listings
+		if strings.HasSuffix(it.RelPath, ".comments.json") {
+			continue
 		}
 		out = append(out, it)
 	}
@@ -359,6 +402,17 @@ func listEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 
 	out := make([]EnhancedIacStackOut, 0, len(base))
 	for _, s := range base {
+		// Skip empty stacks to prevent 500 errors during processing
+		hasContent, err := stackHasContent(ctx, s.ID)
+		if err != nil {
+			debugLog("Failed to check stack content for %s: %v", s.Name, err)
+			continue
+		}
+		if !hasContent {
+			debugLog("Skipping empty stack %s (no files)", s.Name)
+			continue
+		}
+
 		e := EnhancedIacStackOut{IacStackOut: s}
 
 		// Lookup runtime by Compose project label = sanitized(stack_name)

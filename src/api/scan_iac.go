@@ -213,6 +213,11 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 		}
 	}
 
+	// prune empty stacks (abandoned stack creation)
+	if n, err := pruneEmptyIacStacks(ctx, repoID); err == nil && n > 0 {
+		infoLog("iac: pruned %d empty stacks (no files) from repo_id=%d", n, repoID)
+	}
+
 	// prune removed stacks for this repo
 	if n, err := pruneIacStacksNotIn(ctx, repoID, keepStackIDs); err == nil && n > 0 {
 		infoLog("iac: pruned %d stacks no longer present in repo_id=%d", n, repoID)

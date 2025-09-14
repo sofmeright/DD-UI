@@ -54,6 +54,16 @@ func looksSopsEncrypted(path, inputType string) bool {
 		hasAge := strings.Contains(s, "sops_age__")
 		result := hasMac || hasVersion || hasAge
 		debugLog("SOPS detection for dotenv %s: sops_mac=%v, sops_version=%v, sops_age=%v -> encrypted=%v", path, hasMac, hasVersion, hasAge, result)
+		
+		// Debug: show first 200 chars of content to diagnose detection issues  
+		if !result || strings.Contains(path, "immich-postgres_secret.env") {
+			sample := string(b)
+			if len(sample) > 200 {
+				sample = sample[:200] + "..."
+			}
+			debugLog("SOPS detection content for %s: %q", path, sample)
+		}
+		
 		return result
 	}
 	// YAML/JSON compose: top-level "sops:" (yaml) or a "sops" object (json)
@@ -93,7 +103,15 @@ func readDecryptedOrPlain(ctx context.Context, full, inputType string) ([]byte, 
 
 	out, err := exec.CommandContext(dctx, "sops", args...).CombinedOutput()
 	if err == nil {
-		return out, true, nil
+		// Normalize line endings in decrypted content to prevent Windows CRLF issues
+		normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
+		normalized = strings.ReplaceAll(normalized, "\r", "\n")
+		sample := normalized
+		if len(sample) > 100 {
+			sample = sample[:100] + "..."
+		}
+		debugLog("SOPS decryption success for %s: got %d bytes, content sample: %q", full, len(normalized), sample)
+		return []byte(normalized), true, nil
 	}
 
 	// If sops complains about missing metadata, treat it as plaintext.
@@ -328,14 +346,17 @@ func stageStackForCompose(ctx context.Context, stackID int64) (stageStackDir str
 	for _, f := range files {
 		switch f.role {
 		case "env":
-			content, _, derr := readDecryptedOrPlain(ctx, f.srcAbs, "dotenv")
+			content, wasDecrypted, derr := readDecryptedOrPlain(ctx, f.srcAbs, "dotenv")
 			if derr != nil {
 				return "", nil, cleanup, derr
 			}
+			debugLog("Staging env file %s: original %d bytes, was_decrypted=%v", f.relPath, len(content), wasDecrypted)
 			content = filterDotenvSopsKeys(content)
+			debugLog("Staging env file %s: filtered %d bytes", f.relPath, len(content))
 			if err := writeFileSecure(f.dstAbs, content, 0o600); err != nil {
 				return "", nil, cleanup, err
 			}
+			debugLog("Staging env file %s: written to %s", f.relPath, f.dstAbs)
 		case "compose":
 			plain, _, perr := readDecryptedOrPlain(ctx, f.srcAbs, "")
 			if perr != nil {
@@ -397,15 +418,18 @@ func stageStackForCompose(ctx context.Context, stackID int64) (stageStackDir str
 				if sj != nil {
 					return "", nil, cleanup, sj
 				}
-				content, _, derr := readDecryptedOrPlain(ctx, origEnv, "dotenv")
+				content, wasDecrypted, derr := readDecryptedOrPlain(ctx, origEnv, "dotenv")
 				if derr != nil {
 					// If missing, keep going (compose may handle it or it's optional)
 					continue
 				}
+				debugLog("Staging extra env file %s: original %d bytes, was_decrypted=%v", ref, len(content), wasDecrypted)
 				content = filterDotenvSopsKeys(content)
+				debugLog("Staging extra env file %s: filtered %d bytes", ref, len(content))
 				if err := writeFileSecure(stageEnv, content, 0o600); err != nil {
 					return "", nil, cleanup, err
 				}
+				debugLog("Staging extra env file %s: written to %s", ref, stageEnv)
 			}
 		}
 	}

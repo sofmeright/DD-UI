@@ -11,6 +11,7 @@ import NetworksView from "@/views/NetworksView";
 import VolumesView from "@/views/VolumesView";
 import DashboardView from "@/views/DashboardView";
 import GroupsView from "@/views/GroupsView";
+import CleanupView from "@/views/CleanupView";
 import { SessionResp, Host, ApiContainer, IacStack } from "@/types";
 import { computeHostMetrics } from "@/utils/metrics";
 
@@ -37,6 +38,7 @@ export default function App() {
     if (/^\/hosts\/[^/]+\/images/.test(path)) return "images";
     if (/^\/hosts\/[^/]+\/networks/.test(path)) return "networks";
     if (/^\/hosts\/[^/]+\/volumes/.test(path)) return "volumes";
+    if (path === "/cleanup") return "cleanup";
     return "hosts";
   };
 
@@ -258,6 +260,7 @@ export default function App() {
           if (h) navigate(`/hosts/${encodeURIComponent(h)}/volumes`);
           else navigate('/hosts');
         }}
+        onGoCleanup={() => navigate('/cleanup')}
       />
 
       {/* Right side: layout unchanged */}
@@ -285,6 +288,9 @@ export default function App() {
             <Route path="/hosts/:hostName/stacks" element={<HostStacksPage />} />
             <Route path="/hosts/:hostName/stacks/:stackName" element={<StackDetailPage />} />
             <Route path="/groups" element={<GroupsView hosts={hosts} />} />
+            
+            {/* Cleanup route */}
+            <Route path="/cleanup" element={<CleanupView hosts={hosts} loading={loading} />} />
             
             {/* Resource routes */}
             <Route path="/hosts/:hostName/images" element={<HostImagesPage />} />

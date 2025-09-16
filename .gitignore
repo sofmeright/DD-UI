@@ -259,8 +259,7 @@ config/local.yaml
 
 # === Documentation (development notes) ===
 CLAUDE.md
-HASH_BASED_DRIFT_DETECTION.md
-DEPLOYMENT_NOTES.md
+internal-docs/
 *.notes.md
 notes/
 docs/dev/

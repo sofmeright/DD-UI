@@ -1,0 +1,126 @@
+version: "3.8"
+services:
+  
+  ddui-postgres:
+    container_name: ddui-postgres
+    image: postgres:16-alpine
+    environment:
+      - POSTGRES_DB=ddui
+      - POSTGRES_USER=prplanit
+      - POSTGRES_PASSWORD_FILE=/run/secrets/postgres_pass
+    ports:
+      - 5432:5432
+    volumes:
+      - /opt/docker/ddui/postgres:/var/lib/postgresql/data
+    secrets:
+      - postgres_pass
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $POSTGRES_USER -d $POSTGRES_DB"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+      
+  ddui-app:
+    container_name: ddui-app
+    depends_on:
+      ddui-postgres:
+        condition: service_healthy
+    image: ddui-dev:test
+    ports:
+      - "3000:443"
+    env_file: stack.env
+    environment:
+      # General Config
+      #- DDUI_BIND=0.0.0.0:443
+      # - DDUI_DEFAULT_OWNER=kai.hamil@gmail.com
+      - DDUI_INVENTORY_PATH=/data/inventory
+      - DDUI_LOCAL_HOST=anchorage
+      - DDUI_LOG_LEVEL=debug
+      - DDUI_UI_ORIGIN=https://ddui.pcfae.com
+      
+      # Authentication / OIDC
+      - DDUI_COOKIE_SECURE=true
+      - DDUI_COOKIE_DOMAIN=ddui.pcfae.com
+      - OIDC_CLIENT_ID_FILE=/run/secrets/oidc_client_id
+      - OIDC_CLIENT_SECRET_FILE=/run/secrets/oidc_client_secret
+      - OIDC_ISSUER_URL=https://sso.prplanit.com
+      - OIDC_REDIRECT_URL=https://ddui.pcfae.com/auth/callback
+      - OIDC_POST_LOGOUT_REDIRECT_URL=https://ddui.pcfae.com/login
+      - OIDC_SCOPES=openid email profile
+        # - OIDC_ALLOWED_EMAIL_DOMAIN # (optional; blocks others)
+      
+      # Database (Postgres) Configuration:
+      - DDUI_DB_HOST=ddui-postgres
+      - DDUI_DB_PORT=5432
+      - DDUI_DB_NAME=ddui
+      - DDUI_DB_USER=prplanit
+      - DDUI_DB_PASS_FILE=/run/secrets/postgres_pass
+      - DDUI_DB_SSLMODE=disable
+      - DDUI_DB_MIGRATE=true
+        # or provide a single DSN:
+        # - DDUI_DB_DSN=postgres://ddui:...@db:5432/ddui?sslmode=disable
+
+      # Docker Connection Config
+      - DOCKER_CONNECTION_METHOD=ssh
+      
+      # Encryption / SOPS Config
+      - DDUI_ALLOW_SOPS_DECRYPT=true
+      - SOPS_AGE_KEY_FILE=/run/secrets/sops_age_key
+      - DDUI_SESSION_SECRET_FILE=/run/secrets/session_secret
+      
+      # SSH Config
+      - SSH_USER=kai           # or a limited user in docker group
+      - SSH_PORT=22
+      - SSH_KEY_FILE=/run/secrets/ssh_key
+      - SSH_USE_SUDO=false      # true if your user needs sudo
+      - SSH_STRICT_HOST_KEY=false
+      
+      # Auto DevOps Config
+      - DDUI_DEVOPS_APPLY=false
+      
+      # Scanning Config - Docker Host(s) States
+      - DDUI_SCAN_DOCKER_AUTO=true
+      # - DDUI_SCAN_DOCKER_INTERVAL=5s  # Using default now
+      - DDUI_SCAN_DOCKER_HOST_TIMEOUT=45s
+      - DDUI_SCAN_DOCKER_CONCURRENCY=3
+      - DDUI_SCAN_DOCKER_ON_START=true
+      - DDUI_SCAN_DOCKER_DEBUG=true
+      
+      # Scannning Config - IAC
+      - DDUI_IAC_ROOT=/data
+      - DDUI_IAC_DIRNAME=docker-compose
+      - DDUI_SCAN_IAC_AUTO=true
+      - DDUI_SCAN_IAC_INTERVAL=90s
+
+      #Theming
+      - DDUI_THEME_BG=#0b1220
+      - DDUI_THEME_SURFACE=#0f172a
+      - DDUI_THEME_TEXT=#1f2937
+      - DDUI_THEME_TEXT_MUTED=#94a3b8
+      - DDUI_THEME_DANGER=#FF001EFF
+      - DDUI_THEME_INFO=#310937
+
+    secrets:
+      - oidc_client_id
+      - oidc_client_secret
+      - postgres_pass
+      - session_secret
+      - sops_age_key
+      - ssh_key
+    volumes:
+      - /opt/docker/ddui/data:/data
+      - /var/run/docker.sock:/var/run/docker.sock
+
+secrets:
+  oidc_client_id:
+    file: /opt/docker/ddui/secrets/oidc_client_id
+  oidc_client_secret:
+    file: /opt/docker/ddui/secrets/oidc_client_secret
+  postgres_pass:
+    file: /opt/docker/ddui/secrets/postgres_password
+  session_secret:
+    file: /opt/docker/ddui/secrets/session_secret
+  sops_age_key:
+    file: /opt/docker/ddui/secrets/sops_age_key
+  ssh_key:
+    file: /opt/docker/ddui/secrets/id_ed25519   # your private key

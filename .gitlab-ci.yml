@@ -24,4 +24,5 @@ include:
         
 stages:
   - build
+  - security
   - release

@@ -13,6 +13,7 @@ export default function LeftNav({
   onGoDashboard,
   onGoGroups,
   onGoCleanup,
+  onGoLogging,
 }: {
   page: string;
   onGoHosts: () => void;
@@ -23,6 +24,7 @@ export default function LeftNav({
   onGoDashboard?: () => void;
   onGoGroups?: () => void;
   onGoCleanup?: () => void;
+  onGoLogging?: () => void;
 }) {
   const item = (id: string, label: string, onClick: () => void) => (
     <button
@@ -89,6 +91,7 @@ export default function LeftNav({
       </div>
       <nav className="px-2 pb-4 space-y-1">
         {onGoCleanup && item("cleanup", "Cleanup", onGoCleanup)}
+        {onGoLogging && item("logging", "Logging", onGoLogging)}
       </nav>
 
       <div className="px-4 py-3 text-xs tracking-wide uppercase text-slate-400">

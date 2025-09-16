@@ -156,6 +156,9 @@ func makeRouter() http.Handler {
 
 			// System management routes (organized in routes/system.go)
 			handlers.SetupSystemRoutes(priv)
+			
+			// Logging routes (organized in handlers/logs_routes.go)
+			handlers.SetupLoggingRoutes(priv)
 
 			// SSH operation routes (organized in routes/ssh.go)
 			handlers.SetupSshRoutes(priv)

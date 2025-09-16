@@ -17,6 +17,7 @@ import (
 	"github.com/docker/docker/api/types"
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
+	"github.com/docker/docker/api/types/network"
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 )
@@ -1401,7 +1402,7 @@ func getSpacePreview(ctx context.Context, hostName string, operation string) (pr
 
 	case "networks":
 		// Get all networks
-		networks, err := cli.NetworkList(ctx, types.NetworkListOptions{})
+		networks, err := cli.NetworkList(ctx, network.ListOptions{})
 		if err != nil {
 			return nil, fmt.Errorf("failed to list networks: %w", err)
 		}

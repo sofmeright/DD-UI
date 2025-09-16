@@ -20,6 +20,7 @@ import (
 	"github.com/docker/docker/api/types/container"
 	"github.com/docker/docker/api/types/filters"
 	"github.com/docker/docker/api/types/image"
+	"github.com/docker/docker/api/types/network"
 	"github.com/docker/docker/api/types/volume"
 	"github.com/docker/docker/client"
 	"github.com/docker/docker/pkg/stdcopy"
@@ -647,7 +648,7 @@ func handleNetworksList(w http.ResponseWriter, r *http.Request) {
 	}
 	defer cli.Close()
 
-	nets, err := cli.NetworkList(r.Context(), types.NetworkListOptions{Filters: filters.NewArgs()})
+	nets, err := cli.NetworkList(r.Context(), network.ListOptions{Filters: filters.NewArgs()})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -828,7 +829,7 @@ func handleLocalConsole(conn *websocket.Conn, cli *client.Client, host, ctr stri
 
 	for _, cmd := range candidates {
 		common.DebugLog("Console: Trying shell command %v on host=%s container=%s", cmd, host, ctr)
-		created, cerr := cli.ContainerExecCreate(tryCtx, ctr, types.ExecConfig{
+		created, cerr := cli.ContainerExecCreate(tryCtx, ctr, container.ExecOptions{
 			AttachStdin:  true,
 			AttachStdout: true,
 			AttachStderr: true,
@@ -842,7 +843,7 @@ func handleLocalConsole(conn *websocket.Conn, cli *client.Client, host, ctr stri
 			continue
 		}
 
-		att, aerr := cli.ContainerExecAttach(tryCtx, created.ID, types.ExecStartCheck{Tty: true})
+		att, aerr := cli.ContainerExecAttach(tryCtx, created.ID, container.ExecStartOptions{Tty: true})
 		if aerr != nil {
 			common.ErrorLog("Console: Shell attach failed for %v on host=%s container=%s: %v", cmd, host, ctr, aerr)
 			continue

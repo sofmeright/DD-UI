@@ -8,7 +8,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"errors"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
@@ -218,7 +217,7 @@ func InitAuthFromEnv() (*scs.SessionManager, error) {
 		endSessionEndpoint = strings.TrimSpace(disc.EndSessionEndpoint)
 	}
 	if endSessionEndpoint == "" {
-		log.Printf("auth: no end_session_endpoint found in discovery; RP-logout will fall back to local clear")
+		infoLog("auth: no end_session_endpoint found in discovery; RP-logout will fall back to local clear")
 	}
 
 	oidcVerifier = oidcProv.Verifier(&oidc.Config{ClientID: cfg.ClientID})
@@ -368,7 +367,7 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 	idtStore.put(sid, rawID, exp)
 
-	log.Printf("auth: login ok sub=%s email=%s", u.Sub, u.Email)
+	infoLog("auth: login ok sub=%s email=%s", u.Sub, u.Email)
 
 	http.Redirect(w, r, "/", http.StatusFound)
 }
@@ -381,7 +380,7 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	// destroy the session
 	err := sessionManager.Destroy(r.Context())
 	if err != nil {
-		log.Printf("auth: failed to destroy session: %v", err)
+		errorLog("auth: failed to destroy session: %v", err)
 	}
 
 	// OAuth temp data is automatically cleaned up with session destruction
@@ -399,7 +398,7 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 			q.Set("client_id", cfg.ClientID)
 		}
 		u.RawQuery = q.Encode()
-		log.Printf("auth: rp-logout redirecting to OP end_session_endpoint")
+		infoLog("auth: rp-logout redirecting to OP end_session_endpoint")
 		http.Redirect(w, r, u.String(), http.StatusSeeOther) // 303
 		return
 	}

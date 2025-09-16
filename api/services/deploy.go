@@ -184,8 +184,8 @@ func DeployStack(ctx context.Context, stackID int64) error {
 		if stamp != nil {
 			_ = database.UpdateDeploymentStampStatus(ctx, stamp.ID, "failed")
 		}
-		common.ErrorLog("deploy: docker compose failed: %v\n----\n%s\n----", err, string(out))
-		return fmt.Errorf("docker compose up failed: %v\n%s", err, string(out))
+		common.LogCommandError("deploy: docker compose", err, out)
+		return fmt.Errorf("docker compose up failed: %v", err)
 	}
 
 	// Mark success and associate by Compose label (sanitized form).

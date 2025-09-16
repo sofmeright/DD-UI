@@ -17,7 +17,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.2
 	golang.org/x/crypto v0.42.0
 	golang.org/x/oauth2 v0.31.0
-	gopkg.in/yaml.v3 v3.0.1
+	github.com/goccy/go-yaml v1.15.13
 )
 
 require (

@@ -15,7 +15,7 @@ import (
 
 	"dd-ui/common"
 	"dd-ui/database"
-	"gopkg.in/yaml.v3"
+	"github.com/goccy/go-yaml"
 )
 
 var (

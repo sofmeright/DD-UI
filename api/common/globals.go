@@ -2,7 +2,6 @@ package common
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"os"
 	"strings"
@@ -22,12 +21,8 @@ const (
 	SessionName = "ddui_sess"
 )
 
-// DebugLog provides debug logging functionality
-func DebugLog(format string, args ...interface{}) {
-	if os.Getenv("DD_UI_LOG_LEVEL") == "debug" {
-		fmt.Printf("DEBUG: "+format+"\n", args...)
-	}
-}
+// Logging functions moved to logging.go - these are kept for backward compatibility
+// but just re-export from logging.go
 
 // RespondJSON sends a JSON response
 func RespondJSON(w http.ResponseWriter, v any) {
@@ -49,16 +44,6 @@ func Env(key, defaultValue string) string {
 func EnvBool(key, def string) bool {
 	v := strings.ToLower(Env(key, def))
 	return v == "1" || v == "t" || v == "true" || v == "yes" || v == "on"
-}
-
-// InfoLog provides info logging functionality
-func InfoLog(format string, args ...interface{}) {
-	fmt.Printf("INFO: "+format+"\n", args...)
-}
-
-// ErrorLog provides error logging functionality
-func ErrorLog(format string, args ...interface{}) {
-	fmt.Printf("ERROR: "+format+"\n", args...)
 }
 
 // ReadSecretMaybeFile reads a secret from a file if the value starts with "@"

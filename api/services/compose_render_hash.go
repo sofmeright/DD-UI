@@ -15,7 +15,7 @@ import (
 	"strings"
 
 	"dd-ui/common"
-	"gopkg.in/yaml.v3"
+	"github.com/goccy/go-yaml"
 )
 
 // computeRenderedConfigHash runs `docker compose config --hash` against the staged
@@ -144,13 +144,6 @@ func renderComposeServices(ctx context.Context, stageDir, projectName string, fi
 				continue // Skip problematic env files but don't fail entirely
 			}
 			common.DebugLog("renderComposeServices: reading %s from %s, got %d bytes", entry.Name(), sourcePath, len(rawContent))
-			if len(rawContent) > 0 {
-				sample := string(rawContent)
-				if len(sample) > 200 {
-					sample = sample[:200] + "..."
-				}
-				common.DebugLog("renderComposeServices: %s content sample: %q", entry.Name(), sample)
-			}
 			content := filterDotenvSopsKeys(rawContent)
 			envVars := parseEnvFileContent(content)
 			envFiles[entry.Name()] = envVars
@@ -159,14 +152,8 @@ func renderComposeServices(ctx context.Context, stageDir, projectName string, fi
 			if entry.Name() == ".env" {
 				rootEnv = envVars
 				common.DebugLog("Parsed root .env file with %d variables (already decrypted in staging)", len(envVars))
-				for k, v := range envVars {
-					common.DebugLog("  Root .env: %s = %s", k, v)
-				}
 			} else {
 				common.DebugLog("Parsed env file %s with %d variables (already decrypted in staging)", entry.Name(), len(envVars))
-				for k, v := range envVars {
-					common.DebugLog("  %s: %s = %s", entry.Name(), k, v)
-				}
 			}
 			
 			// Write env file to temp directory
@@ -434,9 +421,6 @@ func resolveVariablesWithPrecedence(input string, rootEnv, serviceEnv map[string
 func parseEnvFileContent(content []byte) map[string]string {
 	vars := make(map[string]string)
 	common.DebugLog("parseEnvFileContent: received %d bytes of content", len(content))
-	if len(content) > 0 {
-		common.DebugLog("parseEnvFileContent: content sample (first 200 chars): %q", string(content[:min(200, len(content))]))
-	}
 	lines := strings.Split(string(content), "\n")
 	common.DebugLog("parseEnvFileContent: split into %d lines", len(lines))
 	for i, line := range lines {

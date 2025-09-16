@@ -16,7 +16,7 @@ import (
 	"time"
 
 	"dd-ui/common"
-	"gopkg.in/yaml.v3"
+	"github.com/goccy/go-yaml"
 )
 
 // CommentInfo stores information about comments and their positions in dotenv files
@@ -69,13 +69,9 @@ func looksSopsEncrypted(path, inputType string) bool {
 		result := hasMac || hasVersion || hasAge
 		common.DebugLog("SOPS detection for dotenv %s: sops_mac=%v, sops_version=%v, sops_age=%v -> encrypted=%v", path, hasMac, hasVersion, hasAge, result)
 		
-		// Debug: show first 200 chars of content to diagnose detection issues  
+		// Debug: log detection result without exposing content
 		if !result || strings.Contains(path, "immich-postgres_secret.env") {
-			sample := string(b)
-			if len(sample) > 200 {
-				sample = sample[:200] + "..."
-			}
-			common.DebugLog("SOPS detection content for %s: %q", path, sample)
+			common.DebugLog("SOPS detection for %s: file size=%d bytes, encrypted=%v", path, len(b), result)
 		}
 		
 		return result
@@ -87,12 +83,7 @@ func looksSopsEncrypted(path, inputType string) bool {
 	result := hasSopsColon || hasSopsIndent || hasSopsJson
 	common.DebugLog("SOPS detection for compose %s: \\nsops=%v, \\n sops=%v, \"sops\"=%v -> encrypted=%v", path, hasSopsColon, hasSopsIndent, hasSopsJson, result)
 	if !result {
-		// Show a sample of the content for debugging
-		sample := string(b)
-		if len(sample) > 200 {
-			sample = sample[:200] + "..."
-		}
-		common.DebugLog("SOPS detection: file %s content sample: %s", path, sample)
+		common.DebugLog("SOPS detection: file %s size: %d bytes, not encrypted", path, len(b))
 	}
 	return result
 }
@@ -128,11 +119,7 @@ func readDecryptedOrPlain(ctx context.Context, full, inputType string) ([]byte, 
 		// Normalize line endings in decrypted content to prevent Windows CRLF issues
 		normalized := strings.ReplaceAll(string(out), "\r\n", "\n")
 		normalized = strings.ReplaceAll(normalized, "\r", "\n")
-		sample := normalized
-		if len(sample) > 100 {
-			sample = sample[:100] + "..."
-		}
-		common.DebugLog("SOPS decryption success for %s: got %d bytes, content sample: %q", full, len(normalized), sample)
+		common.DebugLog("SOPS decryption success for %s: got %d bytes", full, len(normalized))
 		return []byte(normalized), true, nil
 	}
 

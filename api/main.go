@@ -10,7 +10,6 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"errors"
-	"log"
 	"math/big"
 	"net"
 	"net/http"
@@ -187,62 +186,14 @@ func getLogLevel() string {
 	return strings.ToLower(common.Env("DD_UI_LOG_LEVEL", "info"))
 }
 
-// shouldLog checks if the given level should be logged based on current log level
-func shouldLog(level string) bool {
-	currentLevel := getLogLevel()
-	levelOrder := map[string]int{
-		"debug": 0,
-		"info":  1,
-		"warn":  2,
-		"error": 3,
-		"fatal": 4,
-	}
-	
-	currentLevelNum, exists := levelOrder[currentLevel]
-	if !exists {
-		currentLevelNum = 1 // default to info
-	}
-	
-	targetLevelNum, exists := levelOrder[strings.ToLower(level)]
-	if !exists {
-		return false
-	}
-	
-	return targetLevelNum >= currentLevelNum
-}
-
-// debugLog logs debug messages only if log level allows it
-func debugLog(format string, args ...interface{}) {
-	if shouldLog("debug") {
-		log.Printf("DEBUG: "+format, args...)
-	}
-}
-
-// infoLog logs info messages only if log level allows it
-func infoLog(format string, args ...interface{}) {
-	if shouldLog("info") {
-		log.Printf("INFO: "+format, args...)
-	}
-}
-
-// warnLog logs warning messages only if log level allows it
-func warnLog(format string, args ...interface{}) {
-	if shouldLog("warn") {
-		log.Printf("WARN: "+format, args...)
-	}
-}
-
-// errorLog logs error messages only if log level allows it
-func errorLog(format string, args ...interface{}) {
-	if shouldLog("error") {
-		log.Printf("ERROR: "+format, args...)
-	}
-}
-
-// fatalLog logs fatal messages and exits (always shown)
-func fatalLog(format string, args ...interface{}) {
-	log.Fatalf("FATAL: "+format, args...)
-}
+// Use common logging functions (aliases for backward compatibility)
+var (
+	debugLog = common.DebugLog
+	infoLog  = common.InfoLog
+	warnLog  = common.WarnLog
+	errorLog = common.ErrorLog
+	fatalLog = common.FatalLog
+)
 
 // run one full pass across hosts with limited concurrency
 func scanAllOnce(ctx context.Context, perHostTO time.Duration, conc int) {

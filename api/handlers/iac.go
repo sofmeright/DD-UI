@@ -400,7 +400,7 @@ func SetupIacRoutes(router chi.Router) {
 					
 					// Debug: Check for YAML anchors
 					if strings.Contains(body.Content, "&") || strings.Contains(body.Content, "*") {
-						common.DebugLog("File save: Found YAML anchors in %s, content sample: %.100s", body.Path, body.Content)
+						common.DebugLog("File save: Found YAML anchors in %s", body.Path)
 					}
 
 					// Handle SOPS encryption with comment preservation for .env files

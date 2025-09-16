@@ -23,6 +23,10 @@ import {
   ZapOff,
   Eye,
   Loader2,
+  Boxes,
+  Layers,
+  AlertTriangle,
+  XCircle,
 } from "lucide-react";
 import StatePill from "@/components/StatePill";
 import DriftBadge from "@/components/DriftBadge";
@@ -34,6 +38,7 @@ import PortLinks from "@/components/PortLinks";
 import { ApiContainer, Host, IacService, IacStack, MergedRow, MergedStack } from "@/types";
 import { formatDT, formatPortsLines } from "@/utils/format";
 import { debugLog, warnLog } from "@/utils/logging";
+import { computeHostMetrics } from "@/utils/metrics";
 
 // Debounce helper to prevent excessive API calls
 function useDebounce<T extends (...args: any[]) => any>(func: T, delay: number): T {
@@ -92,6 +97,7 @@ export default function HostStacksView({
   const [stacks, setStacks] = useState<MergedStack[]>([]);
   const [hostQuery, setHostQuery] = useState("");
   const [deletingStacks, setDeletingStacks] = useState<Set<number>>(new Set());
+  const [hostMetrics, setHostMetrics] = useState<{ stacks: number; containers: number; drift: number; errors: number }>({ stacks: 0, containers: 0, drift: 0, errors: 0 });
   
   // Performance optimization: debounced sync to prevent excessive API calls
   const debouncedSync = useDebounce(onSync, 300);
@@ -687,6 +693,9 @@ export default function HostStacksView({
         if (!cancel) {
           setStacks(merged);
           debugLog('[DD-UI] Loaded data for host:', host.name, 'stacks:', merged.length);
+          // Compute metrics for this host
+          const metrics = computeHostMetrics(runtime, iacStacks);
+          setHostMetrics(metrics);
         }
       } catch (e: any) {
         if (!cancel) setErr(e?.message || "Failed to load host stacks");
@@ -984,6 +993,27 @@ export default function HostStacksView({
       <div className="flex items-center gap-4">
         <div className="text-lg font-semibold text-white">Stacks</div>
         <HostPicker hosts={hosts} activeHost={host.name} setActiveHost={onHostChange} />
+        
+        {/* Small square metric cards for selected host */}
+        <div className="flex items-center gap-2">
+          <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
+            <Boxes className="h-4 w-4 text-slate-400" />
+            <span className="text-sm text-slate-300">{hostMetrics.stacks}</span>
+          </div>
+          <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
+            <Layers className="h-4 w-4 text-slate-400" />
+            <span className="text-sm text-slate-300">{hostMetrics.containers}</span>
+          </div>
+          <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
+            <AlertTriangle className="h-4 w-4 text-amber-400" />
+            <span className="text-sm text-amber-400">{hostMetrics.drift}</span>
+          </div>
+          <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
+            <XCircle className="h-4 w-4 text-rose-400" />
+            <span className="text-sm text-rose-400">{hostMetrics.errors}</span>
+          </div>
+        </div>
+        
         <SearchBar 
           value={hostQuery}
           onChange={setHostQuery}

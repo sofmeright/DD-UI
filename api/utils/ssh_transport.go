@@ -124,17 +124,14 @@ type SSHTransport struct {
 
 // RoundTrip implements http.RoundTripper
 func (t *SSHTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Create SSH tunnel for this request
-	conn, err := t.sshClient.Dial("unix", "/var/run/docker.sock")
-	if err != nil {
-		return nil, fmt.Errorf("failed to create SSH tunnel to Docker socket: %v", err)
-	}
-	defer conn.Close()
-
-	// Create a custom transport that uses our SSH connection
+	// Create a custom transport that dials through SSH
 	transport := &http.Transport{
 		Dial: func(network, addr string) (net.Conn, error) {
-			// Always return our SSH tunneled connection
+			// Create SSH tunnel to Docker socket
+			conn, err := t.sshClient.Dial("unix", "/var/run/docker.sock")
+			if err != nil {
+				return nil, fmt.Errorf("failed to create SSH tunnel to Docker socket: %v", err)
+			}
 			return conn, nil
 		},
 		// Set reasonable timeouts

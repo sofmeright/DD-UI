@@ -101,6 +101,9 @@ func main() {
 		fatalLog("inventory init failed: %v", err)
 	}
 
+	// Start inventory file watcher for auto-reload
+	services.StartInventoryWatcher(ctx)
+
 	// kick off background auto-scanner (Portainer-ish cadence)
 	startAutoScanner(ctx)
 	startIacAutoScanner(ctx)

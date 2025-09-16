@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"dd-ui/common"
 	"dd-ui/database"
@@ -26,7 +27,18 @@ func InitInventory() error {
 	if p == "" {
 		p = findInventoryPath()
 		if p == "" {
-			return errors.New("no inventory file found; set DD_UI_INVENTORY_PATH or mount /data/inventory")
+			// Try a few times in case the mount is slow
+			for i := 0; i < 5; i++ {
+				common.InfoLog("Inventory file not found (attempt %d/5), waiting...", i+1)
+				time.Sleep(2 * time.Second)
+				p = findInventoryPath()
+				if p != "" {
+					break
+				}
+			}
+			if p == "" {
+				return errors.New("no inventory file found; set DD_UI_INVENTORY_PATH or mount /data/inventory")
+			}
 		}
 	}
 	invPath = p

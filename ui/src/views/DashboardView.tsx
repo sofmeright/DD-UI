@@ -31,7 +31,16 @@ export default function DashboardView({ hosts }: { hosts: Host[] }) {
             const iacJson = await ri.json();
             const runtime: ApiContainer[] = (contJson.containers || []) as ApiContainer[];
             const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
+            
+            // Count actual drift from backend's drift_detected field
+            let driftCount = 0;
+            if (Array.isArray(iacJson.stacks)) {
+              driftCount = iacJson.stacks.filter((s: any) => s.drift_detected === true).length;
+            }
+            
+            // Use backend drift count instead of frontend calculation
             const m = computeHostMetrics(runtime, iacStacks);
+            m.drift = driftCount; // Override with backend's drift detection
             setMetricsCache(prev => ({ ...prev, [name]: m }));
           } catch {
             // ignore per-host metrics errors

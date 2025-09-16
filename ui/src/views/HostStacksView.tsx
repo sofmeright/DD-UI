@@ -693,8 +693,18 @@ export default function HostStacksView({
         if (!cancel) {
           setStacks(merged);
           debugLog('[DD-UI] Loaded data for host:', host.name, 'stacks:', merged.length);
+          
+          // Count actual drift from backend's drift_detected field
+          let driftCount = 0;
+          for (const [, enh] of enhancedByName) {
+            if (enh.drift_detected === true) {
+              driftCount++;
+            }
+          }
+          
           // Compute metrics for this host
           const metrics = computeHostMetrics(runtime, iacStacks);
+          metrics.drift = driftCount; // Override with backend's drift detection
           setHostMetrics(metrics);
         }
       } catch (e: any) {

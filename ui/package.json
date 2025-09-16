@@ -8,26 +8,27 @@
     "preview": "vite preview --port 3000"
   },
   "dependencies": {
-    "@monaco-editor/react": "^4.6.0",
+    "@monaco-editor/react": "^4.7.0",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "lucide-react": "^0.469.0",
-    "monaco-editor": "^0.47.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
-    "react-router-dom": "^6.27.0",
+    "lucide-react": "^0.544.0",
+    "monaco-editor": "^0.53.0",
+    "react": "^19.1.1",
+    "react-dom": "^19.1.1",
+    "react-router-dom": "^7.9.1",
     "tailwind-merge": "^3.3.1",
-    "xterm": "^5.3.0",
-    "xterm-addon-fit": "^0.7.0"
+    "@xterm/xterm": "^5.5.0",
+    "@xterm/addon-fit": "^0.10.0"
   },
   "devDependencies": {
-    "@types/react": "^18.3.11",
-    "@types/react-dom": "^18.3.1",
-    "@vitejs/plugin-react": "^4.3.4",
-    "autoprefixer": "^10.4.20",
-    "postcss": "^8.4.47",
-    "tailwindcss": "^3.4.15",
-    "typescript": "^5.6.3",
-    "vite": "^5.4.10"
+    "@types/react": "^19.1.13",
+    "@types/react-dom": "^19.1.9",
+    "@vitejs/plugin-react": "^5.0.2",
+    "autoprefixer": "^10.4.21",
+    "postcss": "^8.5.6",
+    "@tailwindcss/postcss": "^4.1.13",
+    "tailwindcss": "^4.1.13",
+    "typescript": "^5.9.2",
+    "vite": "^7.1.5"
   }
 }

@@ -1,9 +1,9 @@
 // ui/src/components/ConsoleModal.tsx
 import { useEffect, useRef, useState, useCallback } from "react";
 import { Button } from "@/components/ui/button";
-import { Terminal as Term } from "xterm";
-import { FitAddon } from "xterm-addon-fit";
-import "xterm/css/xterm.css";
+import { Terminal as Term } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import "@xterm/xterm/css/xterm.css";
 
 type Shell = "auto" | "bash" | "ash" | "dash" | "sh";
 

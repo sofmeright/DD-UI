@@ -15,10 +15,10 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/cors"
-	"github.com/gorilla/websocket"
 
 	"dd-ui/common"
 	"dd-ui/handlers"
+	"dd-ui/middleware"
 	"dd-ui/services"
 )
 
@@ -68,15 +68,12 @@ func makeRouter() http.Handler {
 			common.RespondJSON(w, Health{Status: "ok", StartedAt: startedAt, Edition: "Community"})
 		})
 
-		// Session probe MUST be public
-		// TODO: Implement SessionHandler
-		// api.Get("/session", SessionHandler)
+		// Session probe MUST be public (implemented at line 182)
 
 		// Everything below requires auth
 		api.Group(func(priv chi.Router) {
-			// TODO: Set up auth middleware
-			// authMiddleware := middleware.NewAuthMiddleware(common.Store, common.SessionName)
-			// priv.Use(authMiddleware.RequireAuth)
+			// Apply auth middleware to all routes in this group
+			priv.Use(middleware.RequireAuth)
 
 
 
@@ -404,23 +401,7 @@ func writeSSEHeader(w http.ResponseWriter) (http.Flusher, bool) {
 	return fl, ok
 }
 
-var wsUpgrader = websocket.Upgrader{
-	ReadBufferSize:  32 * 1024,
-	WriteBufferSize: 32 * 1024,
-	CheckOrigin: func(r *http.Request) bool {
-		// allow same-origin and configured UI origin
-		origin := strings.TrimSpace(r.Header.Get("Origin"))
-		ui := strings.TrimSpace(common.Env("DD_UI_UI_ORIGIN", ""))
-		if origin == "" || origin == ui {
-			return true
-		}
-		// dev helpers
-		if strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "http://127.0.0.1:") {
-			return true
-		}
-		return false
-	},
-}
+// WebSocket upgrader moved to utils/sse.go to avoid duplication
 
 
 // cleanupEmptyDirs removes empty directories recursively up to but not including root

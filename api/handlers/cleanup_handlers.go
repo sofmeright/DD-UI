@@ -71,20 +71,9 @@ type SpacePreview struct {
 	Error         string            `json:"error,omitempty"`
 }
 
-// getSessionUser extracts the user from the session
+// getSessionUser extracts the user from the request context
 func getSessionUser(r *http.Request) string {
-	sess, _ := common.Store.Get(r, common.SessionName)
-	u, ok := sess.Values["user"].(middleware.User)
-	if !ok {
-		return "anonymous"
-	}
-	if u.Email != "" {
-		return u.Email
-	}
-	if u.Name != "" {
-		return u.Name
-	}
-	return "anonymous"
+	return middleware.GetUserEmail(r.Context())
 }
 
 // handleCleanupSystemPrune handles POST /api/cleanup/hosts/{hostname}/system

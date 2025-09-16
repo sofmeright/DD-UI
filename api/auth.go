@@ -17,27 +17,22 @@ import (
 	"time"
 
 	"dd-ui/common"
+	"dd-ui/middleware"
+	"github.com/alexedwards/scs/v2"
 	"github.com/coreos/go-oidc/v3/oidc"
-	"github.com/gorilla/sessions"
 	"golang.org/x/oauth2"
 )
 
 func init() {
-	gob.Register(User{}) // ensure gorilla/sessions can (de)serialize User
-}
-
-type User struct {
-	Sub   string `json:"sub"`
-	Email string `json:"email"`
-	Name  string `json:"name"`
-	Pic   string `json:"picture,omitempty"`
+	gob.Register(middleware.User{}) // ensure scs can (de)serialize User
+	gob.Register(map[string]interface{}{}) // for storing oauth temp data
 }
 
 var (
 	oidcProv           *oidc.Provider
 	oidcVerifier       *oidc.IDTokenVerifier
 	oauthCfg           *oauth2.Config
-	store              *sessions.CookieStore
+	sessionManager     *scs.SessionManager
 	cfg                AuthConfig
 	endSessionEndpoint string // discovered from .well-known
 )
@@ -152,24 +147,24 @@ func envOrFile(valueKey, fileKey string) (string, error) {
 	return "", nil
 }
 
-func InitAuthFromEnv() error {
+func InitAuthFromEnv() (*scs.SessionManager, error) {
 	var err error
 
 	// ---- OIDC client credentials (allow *_FILE and "@/path")
 	clientID, err := envOrFile("OIDC_CLIENT_ID", "OIDC_CLIENT_ID_FILE")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	clientSecret, err := envOrFile("OIDC_CLIENT_SECRET", "OIDC_CLIENT_SECRET_FILE")
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// ---- Session secret (renamed: DDUI_SESSION_SECRET / DDUI_SESSION_SECRET_FILE)
 	// Compatibility with old SESSION_SECRET is intentionally dropped.
 	sec, err := envOrFile("DDUI_SESSION_SECRET", "DDUI_SESSION_SECRET_FILE")
 	if err != nil {
-		return err
+		return nil, err
 	}
 	if sec == "" {
 		sec = randHex(64) // generate one if not provided
@@ -205,14 +200,14 @@ func InitAuthFromEnv() error {
 	}
 
 	if cfg.Issuer == "" || cfg.ClientID == "" || cfg.ClientSecret == "" || cfg.RedirectURL == "" {
-		return errors.New("OIDC_ISSUER_URL, OIDC_CLIENT_ID{/_FILE}, OIDC_CLIENT_SECRET{/_FILE}, OIDC_REDIRECT_URL are required")
+		return nil, errors.New("OIDC_ISSUER_URL, OIDC_CLIENT_ID{/_FILE}, OIDC_CLIENT_SECRET{/_FILE}, OIDC_REDIRECT_URL are required")
 	}
 
 	// ---- OIDC wiring
 	ctx := context.Background()
 	oidcProv, err = oidc.NewProvider(ctx, cfg.Issuer)
 	if err != nil {
-		return err
+		return nil, err
 	}
 
 	// Try to discover end_session_endpoint (not all providers expose it)
@@ -235,23 +230,22 @@ func InitAuthFromEnv() error {
 		Scopes:       cfg.Scopes,
 	}
 
-	// ---- Session cookie store
-	sameSite := http.SameSiteLaxMode
+	// ---- Session manager setup
+	sessionManager = scs.New()
+	sessionManager.Lifetime = time.Duration(cookieMaxAge) * time.Second
+	sessionManager.Cookie.Name = sessionName
+	sessionManager.Cookie.HttpOnly = true
+	sessionManager.Cookie.Secure = cfg.SecureCookies
+	sessionManager.Cookie.Path = "/"
+	sessionManager.Cookie.Domain = cfg.CookieDomain
 	if cfg.SecureCookies {
-		sameSite = http.SameSiteNoneMode
-	}
-	store = sessions.NewCookieStore(cfg.SessionSecret)
-	store.Options = &sessions.Options{
-		Path:     "/",
-		MaxAge:   cookieMaxAge,
-		HttpOnly: true,
-		Secure:   cfg.SecureCookies,
-		SameSite: sameSite,
-		Domain:   cfg.CookieDomain,
+		sessionManager.Cookie.SameSite = http.SameSiteNoneMode
+	} else {
+		sessionManager.Cookie.SameSite = http.SameSiteLaxMode
 	}
 	
-	// Also initialize the global Store in common package so handlers can use it
-	common.Store = store
+	// Also initialize the global SessionManager in common package so handlers can use it
+	common.SessionManager = sessionManager
 
 	// start background sweeper for server-side id_tokens
 	go func() {
@@ -262,7 +256,7 @@ func InitAuthFromEnv() error {
 		}
 	}()
 
-	return nil
+	return sessionManager, nil
 }
 
 func scopes(s string) []string { return strings.Fields(s) }
@@ -278,24 +272,12 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 	state := randHex(32)
 	nonce := randHex(32)
 
-	// Short-lived temp cookie just for OAuth flow data
-	tmp, _ := store.Get(r, oauthTmpName)
-	tmp.Values["state"] = state
-	tmp.Values["nonce"] = nonce
-	// If embedded in an iframe, None is required.
-	sameSite := http.SameSiteLaxMode
-	if cfg.SecureCookies {
-		sameSite = http.SameSiteNoneMode
+	// Store OAuth flow data in session (will auto-expire)
+	oauthData := map[string]interface{}{
+		"state": state,
+		"nonce": nonce,
 	}
-	tmp.Options = &sessions.Options{
-		Path:     "/",
-		MaxAge:   300, // 5 minutes
-		HttpOnly: true,
-		Secure:   cfg.SecureCookies,
-		SameSite: sameSite,
-		Domain:   cfg.CookieDomain,
-	}
-	_ = tmp.Save(r, w)
+	sessionManager.Put(r.Context(), "oauth_temp", oauthData)
 
 	// Build OP authorize URL with nonce
 	authURL := oauthCfg.AuthCodeURL(state, oidc.Nonce(nonce))
@@ -303,12 +285,10 @@ func LoginHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func CallbackHandler(w http.ResponseWriter, r *http.Request) {
-	// Read and immediately expire the temporary oauth cookie
-	tmp, _ := store.Get(r, oauthTmpName)
-	wantState, _ := tmp.Values["state"].(string)
-	nonce, _ := tmp.Values["nonce"].(string)
-	tmp.Options.MaxAge = -1
-	_ = tmp.Save(r, w)
+	// Read and remove the temporary oauth data
+	oauthData, _ := sessionManager.Pop(r.Context(), "oauth_temp").(map[string]interface{})
+	wantState, _ := oauthData["state"].(string)
+	nonce, _ := oauthData["nonce"].(string)
 
 	// CSRF protection: state must match
 	if r.URL.Query().Get("state") != wantState || wantState == "" {
@@ -363,7 +343,7 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	u := User{
+	u := middleware.User{
 		Sub:   claims.Sub,
 		Email: strings.ToLower(claims.Email),
 		Name:  claims.Name,
@@ -371,15 +351,13 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Save minimal session + sid; store id_token server-side keyed by sid
-	sess, _ := store.Get(r, sessionName)
-	sid, _ := sess.Values["sid"].(string)
+	sid := sessionManager.GetString(r.Context(), "sid")
 	if strings.TrimSpace(sid) == "" {
 		sid = randHex(32)
-		sess.Values["sid"] = sid
+		sessionManager.Put(r.Context(), "sid", sid)
 	}
-	sess.Values["user"] = u
-	sess.Values["exp"] = time.Now().Add(7 * 24 * time.Hour).Unix()
-	_ = sess.Save(r, w)
+	sessionManager.Put(r.Context(), "user", u)
+	sessionManager.Put(r.Context(), "exp", time.Now().Add(7 * 24 * time.Hour).Unix())
 
 	// expiry = min(session 7d, token exp if present)
 	exp := time.Now().Add(7 * 24 * time.Hour)
@@ -397,40 +375,16 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 
 func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 	// retrieve sid/id_token for RP-initiated logout BEFORE clearing
-	sess, _ := store.Get(r, sessionName)
-	sid, _ := sess.Values["sid"].(string)
+	sid := sessionManager.GetString(r.Context(), "sid")
 	rawID := idtStore.pop(sid) // empty if absent/expired
 
-	// expire main session
-	for k := range sess.Values {
-		delete(sess.Values, k)
+	// destroy the session
+	err := sessionManager.Destroy(r.Context())
+	if err != nil {
+		log.Printf("auth: failed to destroy session: %v", err)
 	}
-	// match store options; SameSite mirrors InitAuthFromEnv choice
-	sameSite := http.SameSiteLaxMode
-	if cfg.SecureCookies {
-		sameSite = http.SameSiteNoneMode
-	}
-	sess.Options = &sessions.Options{
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   cfg.SecureCookies,
-		SameSite: sameSite,
-		Domain:   cfg.CookieDomain,
-	}
-	_ = sess.Save(r, w)
 
-	// expire oauth temp cookie too
-	tmp, _ := store.Get(r, oauthTmpName)
-	tmp.Options = &sessions.Options{
-		Path:     "/",
-		MaxAge:   -1,
-		HttpOnly: true,
-		Secure:   cfg.SecureCookies,
-		SameSite: http.SameSiteLaxMode,
-		Domain:   cfg.CookieDomain,
-	}
-	_ = tmp.Save(r, w)
+	// OAuth temp data is automatically cleaned up with session destruction
 
 	// If discovery had an end_session_endpoint and we have an id_token, do RP-initiated logout.
 	if endSessionEndpoint != "" && strings.TrimSpace(rawID) != "" {
@@ -459,9 +413,8 @@ func LogoutHandler(w http.ResponseWriter, r *http.Request) {
 }
 
 func SessionHandler(w http.ResponseWriter, r *http.Request) {
-	sess, _ := store.Get(r, sessionName)
-	u, ok := sess.Values["user"].(User)
-	exp, _ := sess.Values["exp"].(int64)
+	u, ok := sessionManager.Get(r.Context(), "user").(middleware.User)
+	exp := sessionManager.GetInt64(r.Context(), "exp")
 
 	if !ok || exp == 0 || time.Now().Unix() > exp {
 		writeJSON(w, http.StatusOK, map[string]any{"user": nil})
@@ -470,34 +423,7 @@ func SessionHandler(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{"user": u})
 }
 
-// --- auth helpers/middleware ---
-
-type ctxKey string
-
-const userKey ctxKey = "ddui.user"
-
-func RequireAuth(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		sess, _ := store.Get(r, sessionName)
-		u, ok := sess.Values["user"].(User)
-		exp, _ := sess.Values["exp"].(int64)
-		if !ok || time.Now().Unix() > exp {
-			http.Error(w, "unauthorized", http.StatusUnauthorized)
-			return
-		}
-		ctx := context.WithValue(r.Context(), userKey, u)
-		next.ServeHTTP(w, r.WithContext(ctx))
-	})
-}
-
-func CurrentUser(ctx context.Context) User {
-	if v := ctx.Value(userKey); v != nil {
-		if u, ok := v.(User); ok {
-			return u
-		}
-	}
-	return User{}
-}
+// --- auth helpers ---
 
 func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")

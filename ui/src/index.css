@@ -1,8 +1,41 @@
-@tailwind base;
-@tailwind components;
-@tailwind utilities;
+@import "tailwindcss";
 
-:root { color-scheme: dark; }
+@theme {
+  --color-brand: #74ecbe;
+}
+
+:root { 
+  color-scheme: dark;
+  --font-mono: Monofur, ui-monospace, SFMono-Regular, Consolas, Liberation Mono, Menlo, monospace;
+  --font-sans: Monofur, ui-sans-serif, system-ui, sans-serif;
+  --font-brand: ui-sans-serif, system-ui, sans-serif;
+}
+
+/* Custom utility classes for fonts */
+.font-mono {
+  font-family: var(--font-mono);
+}
+
+.font-sans {
+  font-family: var(--font-sans);
+}
+
+.font-brand {
+  font-family: var(--font-brand);
+}
+
+/* Custom utility classes for brand color */
+.text-brand {
+  color: var(--color-brand);
+}
+
+.bg-brand {
+  background-color: var(--color-brand);
+}
+
+.bg-brand\/70 {
+  background-color: rgb(116 236 190 / 0.7);
+}
 
 @keyframes gradient-wave {
   0% {

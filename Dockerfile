@@ -17,7 +17,7 @@ COPY ui/ .
 RUN npm run build
 
 # --- Go build ---
-FROM golang:1.24-alpine AS api
+FROM golang:1.25.1-alpine AS api
 WORKDIR /api
 COPY api/go.mod ./
 RUN go mod download
@@ -46,7 +46,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       && rm -rf /var/lib/apt/lists/*
 
 # --- Docker CLI (static) ---
-ARG DOCKER_CLI_VERSION=26.1.4
+ARG DOCKER_CLI_VERSION=28.4.0
 RUN set -eux; \
       deb_arch="$(dpkg --print-architecture)"; \
       case "$deb_arch" in \
@@ -61,7 +61,7 @@ RUN set -eux; \
       docker --version
 
 # --- Compose v2 plugin ---
-ARG COMPOSE_VERSION=2.28.1
+ARG COMPOSE_VERSION=2.39.3
 RUN set -eux; \
       deb_arch="$(dpkg --print-architecture)"; \
       case "$deb_arch" in \
@@ -76,7 +76,7 @@ RUN set -eux; \
       chmod +x /usr/local/lib/docker/cli-plugins/docker-compose; \
       docker compose version
 
-# Install SOPS (v3.10.2)
+# Install SOPS (v3.10.2 - latest stable, not upgrading as it's already current)
 RUN set -eux; \
     curl -fsSL -o /usr/local/bin/sops \
       https://github.com/getsops/sops/releases/download/v3.10.2/sops-v3.10.2.linux.amd64; \

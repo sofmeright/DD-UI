@@ -32,7 +32,7 @@ services:
     environment:
       # General Config
       #- DD_UI_BIND=0.0.0.0:443
-      # - DD_UI_DEFAULT_OWNER=
+      # - DD_UI_DEFAULT_OWNER= # (email)
       - DD_UI_INVENTORY_PATH=/data/inventory
       - DD_UI_LOCAL_HOST=anchorage
       - DD_UI_LOG_LEVEL=debug

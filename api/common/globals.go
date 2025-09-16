@@ -7,14 +7,14 @@ import (
 	"os"
 	"strings"
 
-	"github.com/gorilla/sessions"
+	"github.com/alexedwards/scs/v2"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 // Global variables that are shared between main and handlers
 var (
 	DB    *pgxpool.Pool  // Database connection pool used across all packages
-	Store *sessions.CookieStore
+	SessionManager *scs.SessionManager
 )
 
 // Constants

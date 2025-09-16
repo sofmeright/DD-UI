@@ -87,7 +87,8 @@ func main() {
 	debugLog("Debug logging is enabled")
 
 	// Initialize auth from environment
-	if err := InitAuthFromEnv(); err != nil {
+	sessionManager, err := InitAuthFromEnv()
+	if err != nil {
 		fatalLog("OIDC setup failed: %v", err)
 	}
 
@@ -109,10 +110,16 @@ func main() {
 	startIacAutoScanner(ctx)
 
 	r := makeRouter()
+	
+	// Wrap router with session middleware
+	var handler http.Handler = r
+	if sessionManager != nil {
+		handler = sessionManager.LoadAndSave(r)
+	}
 
 	srv := &http.Server{
 		Addr:              addr,
-		Handler:           r,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 

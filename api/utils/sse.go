@@ -74,13 +74,16 @@ var WSUpgrader = websocket.Upgrader{
 		// allow same-origin and configured UI origin
 		origin := strings.TrimSpace(r.Header.Get("Origin"))
 		ui := strings.TrimSpace(common.Env("DD_UI_UI_ORIGIN", ""))
+		
 		if origin == "" || origin == ui {
 			return true
 		}
-		// dev helpers
-		if strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "http://127.0.0.1:") {
+		// dev helpers - allow both HTTP and HTTPS
+		if strings.HasPrefix(origin, "http://localhost:") || strings.HasPrefix(origin, "http://127.0.0.1:") ||
+		   strings.HasPrefix(origin, "https://localhost:") || strings.HasPrefix(origin, "https://127.0.0.1:") {
 			return true
 		}
+		
 		return false
 	},
 }

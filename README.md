@@ -21,8 +21,8 @@
 <img src="example/screenshots/DD-UI-Logs.png" width="400" /><img src="example/screenshots/DD-UI-Networks.png" width="400" />
 <img src="example/screenshots/DD-UI-Stack-Compose-Editor.png" width="400" /><img src="example/screenshots/DD-UI-Stack-Encrypted.png" width="400" />
 <img src="example/screenshots/DD-UI-Stats.png" width="400" /><img src="example/screenshots/DD-UI-Terminal.png" width="400" />
-<img src="example/screenshots/DD-UI-Volumes.png" width="400" />
-
+<img src="example/screenshots/DD-UI-Volumes.png" width="400" /><img src="example/screenshots/DD-UI-Cleanup.png" width="400" />
+<img src="example/screenshots/DD-UI-Logging.png" width="400" />
 ---
 
 ## Status

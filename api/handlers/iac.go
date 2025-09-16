@@ -9,12 +9,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"time"
 
 	"dd-ui/common"
-	"dd-ui/database"
 	"dd-ui/services"
 
 	"github.com/go-chi/chi/v5"
@@ -54,7 +52,600 @@ func SetupIacRoutes(router chi.Router) {
 						}
 					}
 				}
-				writeJSON(w, http.StatusOK, items)
+				writeJSON(w, http.StatusOK, map[string]any{"stacks": items})
+			})
+			
+			// Create stack for this host
+			r.Post("/stacks", func(w http.ResponseWriter, r *http.Request) {
+				hostname := chi.URLParam(r, "hostname")
+				
+				var body struct {
+					StackName  string `json:"stack_name"`
+					IacEnabled bool   `json:"iac_enabled"`
+				}
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+					http.Error(w, "bad json", http.StatusBadRequest)
+					return
+				}
+				
+				// Create the stack with host scope
+				ctx := r.Context()
+				id, err := services.CreateIacStack(ctx, "host", hostname, body.StackName, body.IacEnabled)
+				if err != nil {
+					http.Error(w, err.Error(), http.StatusBadRequest)
+					return
+				}
+				
+				writeJSON(w, http.StatusOK, map[string]any{"id": id, "created": true})
+			})
+			
+			// Stack-specific hierarchical endpoints
+			r.Route("/stacks/{stackname}", func(r chi.Router) {
+				// Get stack details
+				r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+					hostname := chi.URLParam(r, "hostname")
+					stackname := chi.URLParam(r, "stackname")
+					
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					if err != nil {
+						http.Error(w, "Stack not found", http.StatusNotFound)
+						return
+					}
+					
+					// Get stack details
+					var stack services.IacStackRow
+					var autoApplyOverride *bool
+					var updatedAt time.Time
+					err = common.DB.QueryRow(r.Context(), `
+						SELECT id, repo_id, scope_kind, scope_name, name, rel_path, iac_enabled, 
+						       deploy_kind, auto_apply_override, updated_at
+						FROM iac_stacks WHERE id=$1
+					`, stackID).Scan(&stack.ID, &stack.RepoID, &stack.ScopeKind, &stack.ScopeName, 
+						&stack.StackName, &stack.RelPath, &stack.IacEnabled, &stack.DeployKind, 
+						&autoApplyOverride, &updatedAt)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					
+					// Add extra fields to response
+					response := map[string]any{
+						"stack": stack,
+						"auto_apply_override": autoApplyOverride,
+						"updated_at": updatedAt.Format(time.RFC3339),
+					}
+					writeJSON(w, http.StatusOK, response)
+				})
+				
+				// Update stack settings
+				r.Patch("/", func(w http.ResponseWriter, r *http.Request) {
+					hostname := chi.URLParam(r, "hostname")
+					stackname := chi.URLParam(r, "stackname")
+					
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					if err != nil {
+						http.Error(w, "Stack not found", http.StatusNotFound)
+						return
+					}
+					
+					var body struct {
+						IacEnabled        *bool   `json:"iac_enabled,omitempty"`
+						AutoApplyOverride *bool   `json:"auto_apply_override,omitempty"`
+						DeployKind        *string `json:"deploy_kind,omitempty"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						http.Error(w, "bad json", http.StatusBadRequest)
+						return
+					}
+					
+					// Update fields if provided
+					if body.IacEnabled != nil {
+						_, err = common.DB.Exec(r.Context(), 
+							`UPDATE iac_stacks SET iac_enabled=$1, updated_at=now() WHERE id=$2`,
+							*body.IacEnabled, stackID)
+						if err != nil {
+							http.Error(w, err.Error(), http.StatusBadRequest)
+							return
+						}
+					}
+					
+					if body.AutoApplyOverride != nil {
+						_, err = common.DB.Exec(r.Context(),
+							`UPDATE iac_stacks SET auto_apply_override=$1, updated_at=now() WHERE id=$2`,
+							*body.AutoApplyOverride, stackID)
+						if err != nil {
+							http.Error(w, err.Error(), http.StatusBadRequest)
+							return
+						}
+					}
+					
+					if body.DeployKind != nil {
+						_, err = common.DB.Exec(r.Context(),
+							`UPDATE iac_stacks SET deploy_kind=$1, updated_at=now() WHERE id=$2`,
+							*body.DeployKind, stackID)
+						if err != nil {
+							http.Error(w, err.Error(), http.StatusBadRequest)
+							return
+						}
+					}
+					
+					writeJSON(w, http.StatusOK, map[string]any{"updated": true})
+				})
+				
+				// Delete stack
+				r.Delete("/", func(w http.ResponseWriter, r *http.Request) {
+					hostname := chi.URLParam(r, "hostname")
+					stackname := chi.URLParam(r, "stackname")
+					
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					if err != nil {
+						http.Error(w, "Stack not found", http.StatusNotFound)
+						return
+					}
+					
+					// Delete the stack
+					if _, err := common.DB.Exec(r.Context(), `DELETE FROM iac_stacks WHERE id=$1`, stackID); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					
+					writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+				})
+				
+				// Get stack files
+				r.Get("/files", func(w http.ResponseWriter, r *http.Request) {
+					hostname := chi.URLParam(r, "hostname")
+					stackname := chi.URLParam(r, "stackname")
+					
+					// Find the stack ID from host and stack name
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					if err != nil {
+						http.Error(w, "Stack not found", http.StatusNotFound)
+						return
+					}
+					
+					items, err := services.ListFilesForStack(r.Context(), stackID)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					writeJSON(w, http.StatusOK, map[string]any{"files": items})
+				})
+				
+				// Get file content
+				r.Get("/file", func(w http.ResponseWriter, r *http.Request) {
+					hostname := chi.URLParam(r, "hostname")
+					stackname := chi.URLParam(r, "stackname")
+					rel := strings.TrimSpace(r.URL.Query().Get("path"))
+					if rel == "" {
+						http.Error(w, "missing path", http.StatusBadRequest)
+						return
+					}
+					
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					if err != nil {
+						http.Error(w, "Stack not found", http.StatusNotFound)
+						return
+					}
+					
+					// Get the file content using the existing logic
+					root, err := services.GetRepoRootForStack(r.Context(), stackID)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					
+					full, err := services.JoinUnder(root, rel)
+					if err != nil {
+						http.Error(w, "invalid path", http.StatusBadRequest)
+						return
+					}
+					
+					decrypt := r.URL.Query().Get("decrypt") == "1" || r.URL.Query().Get("decrypt") == "true"
+					
+					var data []byte
+					if decrypt {
+						// This check ONLY gates the UI reveal functionality, NOT deployments
+						// Deployments always decrypt SOPS files if keys are available (see deploy_sops.go)
+						if !common.EnvBool("DD_UI_ALLOW_SOPS_DECRYPT", "false") {
+							http.Error(w, "decrypt disabled on server", http.StatusForbidden)
+							return
+						}
+						if strings.ToLower(r.Header.Get("X-Confirm-Reveal")) != "yes" {
+							http.Error(w, "confirmation required", http.StatusForbidden)
+							return
+						}
+						
+						// For .env files, reconstruct with preserved comments
+						if strings.HasSuffix(strings.ToLower(rel), ".env") {
+							// Decrypt the file
+							ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+							defer cancel()
+							
+							// Use dotenv input/output types for SOPS
+							cmd := exec.CommandContext(ctx, "sops", "-d", "--input-type", "dotenv", "--output-type", "dotenv", full)
+							out, err := cmd.CombinedOutput()
+							if err != nil {
+								// Fallback to normal decryption if dotenv type fails
+								cmd = exec.CommandContext(ctx, "sops", "-d", full)
+								out, err = cmd.CombinedOutput()
+								if err != nil {
+									http.Error(w, "sops decrypt failed: "+string(out), http.StatusNotImplemented)
+									return
+								}
+							}
+							
+							// Try to load and apply preserved comments
+							commentsFile := full + ".comments.json"
+							if commentData, err := os.ReadFile(commentsFile); err == nil {
+								var comments services.DotenvComments
+								if err := json.Unmarshal(commentData, &comments); err == nil && len(comments.Comments) > 0 {
+									// Reconstruct with comments
+									data = []byte(services.ReconstructDotenvWithComments(string(out), comments))
+								} else {
+									data = out
+								}
+							} else {
+								data = out
+							}
+						} else {
+							// Non-.env files: decrypt with proper type detection
+							ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
+							defer cancel()
+							
+							// Detect file type for SOPS decryption
+							var cmd *exec.Cmd
+							lowerPath := strings.ToLower(rel)
+							if strings.HasSuffix(lowerPath, ".yaml") || strings.HasSuffix(lowerPath, ".yml") {
+								// Explicitly set YAML type for proper decryption
+								cmd = exec.CommandContext(ctx, "sops", "-d", "--input-type", "yaml", "--output-type", "yaml", full)
+							} else if strings.HasSuffix(lowerPath, ".json") {
+								// Explicitly set JSON type
+								cmd = exec.CommandContext(ctx, "sops", "-d", "--input-type", "json", "--output-type", "json", full)
+							} else {
+								// Let SOPS auto-detect for other file types
+								cmd = exec.CommandContext(ctx, "sops", "-d", full)
+							}
+							
+							out, err := cmd.CombinedOutput()
+							if err != nil {
+								http.Error(w, "sops decrypt failed: "+string(out), http.StatusNotImplemented)
+								return
+							}
+							data = out
+						}
+					} else {
+						// Read file without decryption
+						var err error
+						data, err = os.ReadFile(full)
+						if err != nil {
+							if os.IsNotExist(err) {
+								http.Error(w, "file not found", http.StatusNotFound)
+								return
+							}
+							http.Error(w, err.Error(), http.StatusBadRequest)
+							return
+						}
+					}
+					
+					// Return raw content, not JSON
+					w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+					w.Header().Set("Cache-Control", "no-store")
+					_, _ = w.Write(data)
+				})
+				
+				// Save/update file - use existing logic with resolved stack ID
+				r.Post("/file", func(w http.ResponseWriter, r *http.Request) {
+					hostname := chi.URLParam(r, "hostname")
+					stackname := chi.URLParam(r, "stackname")
+					
+					// Get or create stack ID
+					id, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					if err != nil {
+						// Stack doesn't exist, create it
+						id, err = services.CreateIacStack(r.Context(), "host", hostname, stackname, false)
+						if err != nil {
+							http.Error(w, err.Error(), http.StatusBadRequest)
+							return
+						}
+					}
+					
+					// Now use the same logic as /stacks/{id}/file endpoint
+					var body struct {
+						Path    string `json:"path"`
+						Content string `json:"content"`
+						Sops    bool   `json:"sops,omitempty"`
+						Role    string `json:"role,omitempty"`
+					}
+					if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+						http.Error(w, "bad json", http.StatusBadRequest)
+						return
+					}
+					if strings.TrimSpace(body.Path) == "" {
+						http.Error(w, "path required", http.StatusBadRequest)
+						return
+					}
+					root, err := services.GetRepoRootForStack(r.Context(), id)
+					if err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					full, err := services.JoinUnder(root, body.Path)
+					if err != nil {
+						http.Error(w, "invalid path", http.StatusBadRequest)
+						return
+					}
+					if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+
+					// Auto-detect role from filename if not provided
+					if body.Role == "" {
+						base := strings.ToLower(filepath.Base(body.Path))
+						if strings.Contains(base, "compose") && (strings.HasSuffix(base, ".yml") || strings.HasSuffix(base, ".yaml")) {
+							body.Role = "compose"
+						} else if strings.HasSuffix(base, ".env") {
+							body.Role = "env"
+						} else if strings.HasSuffix(base, ".sh") {
+							body.Role = "script"
+						} else {
+							body.Role = "other"
+						}
+					}
+
+					data := []byte(body.Content)
+					sz := len(data)
+					sum := fmt.Sprintf("%x", sha256.Sum256(data))
+					
+					// Debug: Check for YAML anchors
+					if strings.Contains(body.Content, "&") || strings.Contains(body.Content, "*") {
+						common.DebugLog("File save: Found YAML anchors in %s, content sample: %.100s", body.Path, body.Content)
+					}
+
+					// Handle SOPS encryption with comment preservation for .env files
+					if body.Sops {
+						// No need to check for permission - encryption should always be allowed
+						// The user explicitly requested it and it's necessary for security
+						
+						// For .env files, preserve comments
+						if strings.HasSuffix(strings.ToLower(body.Path), ".env") {
+							cleanContent, comments := services.ParseDotenvWithComments(body.Content)
+							
+							// Save comments to .comments.json file
+							if len(comments.Comments) > 0 {
+								commentsFile := full + ".comments.json"
+								commentsJSON, _ := json.MarshalIndent(comments, "", "  ")
+								if err := os.WriteFile(commentsFile, commentsJSON, 0o644); err != nil {
+									common.InfoLog("Failed to save comments file: %v", err)
+								}
+							}
+							
+							// Encrypt the cleaned content
+							tmp := full + ".tmp"
+							if err := os.WriteFile(tmp, []byte(cleanContent), 0o644); err != nil {
+								http.Error(w, err.Error(), http.StatusBadRequest)
+								return
+							}
+							defer os.Remove(tmp)
+							
+							ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+							defer cancel()
+							cmd := exec.CommandContext(ctx, "sops", "-e", "-i", "--input-type", "dotenv", "--output-type", "dotenv", tmp)
+							out, err := cmd.CombinedOutput()
+							if err != nil {
+								http.Error(w, "sops encrypt failed: "+string(out), http.StatusBadRequest)
+								return
+							}
+							if err := os.Rename(tmp, full); err != nil {
+								http.Error(w, err.Error(), http.StatusBadRequest)
+								return
+							}
+						} else {
+							// Non-.env files: detect file type and encrypt accordingly
+							tmp := full + ".tmp"
+							if err := os.WriteFile(tmp, data, 0o644); err != nil {
+								http.Error(w, err.Error(), http.StatusBadRequest)
+								return
+							}
+							defer os.Remove(tmp)
+							ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+							defer cancel()
+							
+							// Detect file type for SOPS
+							var cmd *exec.Cmd
+							lowerPath := strings.ToLower(body.Path)
+							if strings.HasSuffix(lowerPath, ".yaml") || strings.HasSuffix(lowerPath, ".yml") {
+								// Explicitly set YAML type to prevent SOPS from using JSON format
+								cmd = exec.CommandContext(ctx, "sops", "-e", "-i", "--input-type", "yaml", "--output-type", "yaml", tmp)
+							} else if strings.HasSuffix(lowerPath, ".json") {
+								// Explicitly set JSON type
+								cmd = exec.CommandContext(ctx, "sops", "-e", "-i", "--input-type", "json", "--output-type", "json", tmp)
+							} else {
+								// Let SOPS auto-detect for other file types
+								cmd = exec.CommandContext(ctx, "sops", "-e", "-i", tmp)
+							}
+							
+							out, err := cmd.CombinedOutput()
+							if err != nil {
+								http.Error(w, "sops encrypt failed: "+string(out), http.StatusBadRequest)
+								return
+							}
+							if err := os.Rename(tmp, full); err != nil {
+								http.Error(w, err.Error(), http.StatusBadRequest)
+								return
+							}
+						}
+					} else {
+						// No encryption: write directly
+						if err := os.WriteFile(full, data, 0o644); err != nil {
+							http.Error(w, err.Error(), http.StatusBadRequest)
+							return
+						}
+						
+						// Clean up any old comment files if saving without SOPS
+						if strings.HasSuffix(strings.ToLower(body.Path), ".env") {
+							commentsFile := full + ".comments.json"
+							_ = os.Remove(commentsFile)
+						}
+					}
+					
+					// Update database with file metadata
+					if err := services.UpsertIacFile(r.Context(), id, body.Role, body.Path, body.Sops, sum, int64(sz)); err != nil {
+						common.InfoLog("Failed to update database for file %s: %v", body.Path, err)
+					}
+					
+					writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "size": sz, "sha256": sum, "sops": body.Sops})
+				})
+				
+				// Delete file
+				r.Delete("/file", func(w http.ResponseWriter, r *http.Request) {
+					hostname := chi.URLParam(r, "hostname")
+					stackname := chi.URLParam(r, "stackname")
+					rel := strings.TrimSpace(r.URL.Query().Get("path"))
+					if rel == "" {
+						http.Error(w, "missing path", http.StatusBadRequest)
+						return
+					}
+					
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					if err != nil {
+						http.Error(w, "Stack not found", http.StatusNotFound)
+						return
+					}
+					
+					if err := services.DeleteIacFileRow(r.Context(), stackID, rel); err != nil {
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					
+					root, err := services.GetRepoRootForStack(r.Context(), stackID)
+					if err == nil {
+						fullPath := filepath.Join(root, rel)
+						os.Remove(fullPath)
+					}
+					
+					writeJSON(w, http.StatusOK, map[string]any{"deleted": true})
+				})
+				
+				// Deploy endpoint (non-streaming)
+				r.Post("/deploy", func(w http.ResponseWriter, r *http.Request) {
+					hostname := chi.URLParam(r, "hostname")
+					stackname := chi.URLParam(r, "stackname")
+					
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					if err != nil {
+						http.Error(w, "Stack not found", http.StatusNotFound)
+						return
+					}
+					
+					// Check if stack has content
+					ok, derr := services.StackHasContent(r.Context(), stackID)
+					if derr != nil {
+						http.Error(w, derr.Error(), http.StatusInternalServerError)
+						return
+					}
+					if !ok {
+						http.Error(w, "stack has no deployable content", http.StatusBadRequest)
+						return
+					}
+					
+					// Deploy in background
+					manual := r.URL.Query().Get("auto") != "1"
+					go func(id int64, manual bool) {
+						ctx := context.Background()
+						if manual {
+							ctx = context.WithValue(ctx, services.CtxManualKey{}, true)
+						}
+						if err := services.DeployStack(ctx, id); err != nil {
+							common.ErrorLog("deploy: stack %d failed: %v", id, err)
+							return
+						}
+						common.InfoLog("deploy: stack %d ok", id)
+					}(stackID, manual)
+					
+					writeJSON(w, http.StatusAccepted, map[string]any{
+						"status":  "accepted",
+						"stackID": stackID,
+						"allowed": true,
+					})
+				})
+				
+				// Deploy check endpoint
+				r.Post("/deploy-check", func(w http.ResponseWriter, r *http.Request) {
+					hostname := chi.URLParam(r, "hostname")
+					stackname := chi.URLParam(r, "stackname")
+					
+					_, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					if err != nil {
+						http.Error(w, "Stack not found", http.StatusNotFound)
+						return
+					}
+					
+					// For now, just return that deployment is allowed
+					// TODO: Add actual configuration change detection
+					writeJSON(w, http.StatusOK, map[string]any{
+						"config_unchanged": false,
+						"allowed": true,
+					})
+				})
+				
+				// Streaming deploy endpoint
+				r.Get("/deploy-stream", func(w http.ResponseWriter, r *http.Request) {
+					hostname := chi.URLParam(r, "hostname")
+					stackname := chi.URLParam(r, "stackname")
+					
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					if err != nil {
+						http.Error(w, "Stack not found", http.StatusNotFound)
+						return
+					}
+					
+					// Check if stack has content
+					ok, derr := services.StackHasContent(r.Context(), stackID)
+					if derr != nil {
+						http.Error(w, derr.Error(), http.StatusInternalServerError)
+						return
+					}
+					if !ok {
+						http.Error(w, "stack has no deployable content", http.StatusBadRequest)
+						return
+					}
+					
+					// Set up Server-Sent Events
+					w.Header().Set("Content-Type", "text/event-stream")
+					w.Header().Set("Cache-Control", "no-cache")
+					w.Header().Set("Connection", "keep-alive")
+					w.Header().Set("Access-Control-Allow-Origin", "*")
+					
+					// Create event channel
+					eventChan := make(chan map[string]interface{}, 100)
+					
+					// Start deployment in background
+					ctx := context.WithValue(r.Context(), services.CtxManualKey{}, true)
+					if r.URL.Query().Get("force") == "true" {
+						ctx = context.WithValue(ctx, services.CtxForceKey{}, true)
+					}
+					go func() {
+						if err := services.DeployStackWithStream(ctx, stackID, eventChan); err != nil {
+							common.ErrorLog("deploy-stream: stack %d failed: %v", stackID, err)
+						}
+					}()
+					
+					// Create encoder for SSE
+					flusher, ok := w.(http.Flusher)
+					if !ok {
+						http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
+						return
+					}
+					
+					// Send events to client
+					for event := range eventChan {
+						data, _ := json.Marshal(event)
+						fmt.Fprintf(w, "data: %s\n\n", string(data))
+						flusher.Flush()
+					}
+				})
 			})
 		})
 		
@@ -115,518 +706,6 @@ func SetupIacRoutes(router chi.Router) {
 				return
 			}
 			writeJSON(w, http.StatusOK, map[string]any{"id": id, "rel_path": rel})
-		})
-
-		// Get a single IaC stack (returns effective auto devops)
-		r.Get("/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {
-			idStr := chi.URLParam(r, "id")
-			id, _ := strconv.ParseInt(idStr, 10, 64)
-
-			var row struct {
-				ID         int64   `json:"id"`
-				RepoID     int64   `json:"repo_id"`
-				ScopeKind  string  `json:"scope_kind"`
-				ScopeName  string  `json:"scope_name"`
-				StackName  string  `json:"stack_name"`
-				RelPath    string  `json:"rel_path"`
-				IacEnabled bool    `json:"iac_enabled"`
-				DeployKind string  `json:"deploy_kind"`
-				SopsStatus string  `json:"sops_status"`
-				Override   *bool   `json:"auto_apply_override"`
-				UpdatedAt  string  `json:"updated_at"`
-				Effective  bool    `json:"effective_auto_devops"`
-			}
-			var updatedAt time.Time
-			err := common.DB.QueryRow(r.Context(), `
-				SELECT id, repo_id, scope_kind::text, scope_name, stack_name, rel_path,
-					iac_enabled, deploy_kind::text, sops_status::text, auto_apply_override, updated_at
-				FROM iac_stacks
-				WHERE id=$1
-			`, id).Scan(
-				&row.ID, &row.RepoID, &row.ScopeKind, &row.ScopeName, &row.StackName, &row.RelPath,
-				&row.IacEnabled, &row.DeployKind, &row.SopsStatus, &row.Override, &updatedAt,
-			)
-			if err != nil {
-				http.Error(w, "not found", http.StatusNotFound)
-				return
-			}
-			row.UpdatedAt = updatedAt.Format(time.RFC3339)
-			eff, _ := services.ShouldAutoApply(r.Context(), id)
-			row.Effective = eff
-			writeJSON(w, http.StatusOK, map[string]any{"stack": row})
-		})
-
-		// Patch IaC stack (no implicit override writes)
-		r.Patch("/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {
-			idStr := chi.URLParam(r, "id")
-			id, _ := strconv.ParseInt(idStr, 10, 64)
-
-			var body struct {
-				IacEnabled        *bool `json:"iac_enabled,omitempty"`
-				AutoDevOps        *bool `json:"auto_devops,omitempty"`          // explicit override set/clear (when provided)
-				AutoDevOpsInherit *bool `json:"auto_devops_inherit,omitempty"`  // when true, clear override (set NULL)
-			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				http.Error(w, "bad json", http.StatusBadRequest)
-				return
-			}
-
-			// Only update iac_enabled if caller asked
-			if body.IacEnabled != nil {
-				if _, err := common.DB.Exec(r.Context(), `UPDATE iac_stacks SET iac_enabled=$1 WHERE id=$2`, *body.IacEnabled, id); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-			}
-
-			// Clear explicit override if requested
-			if body.AutoDevOpsInherit != nil && *body.AutoDevOpsInherit {
-				if _, err := common.DB.Exec(r.Context(), `UPDATE iac_stacks SET auto_apply_override=NULL WHERE id=$1`, id); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-			}
-
-			// Set explicit override when provided
-			if body.AutoDevOps != nil {
-				override := "enable"
-				if !*body.AutoDevOps {
-					override = "disable"
-				}
-				if _, err := common.DB.Exec(r.Context(), `UPDATE iac_stacks SET auto_apply_override=$1 WHERE id=$2`, override, id); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-			}
-
-			writeJSON(w, http.StatusOK, map[string]any{
-				"status":                "ok",
-			})
-		})
-
-		// Delete a stack (optionally delete files too)
-		r.Delete("/stacks/{id}", func(w http.ResponseWriter, r *http.Request) {
-			idStr := chi.URLParam(r, "id")
-			id, _ := strconv.ParseInt(idStr, 10, 64)
-			deleteFiles := r.URL.Query().Get("delete_files") == "1" || r.URL.Query().Get("delete_files") == "true"
-
-			root, err := services.GetRepoRootForStack(r.Context(), id)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-
-			var rel string
-			_ = common.DB.QueryRow(r.Context(), `SELECT rel_path FROM iac_stacks WHERE id=$1`, id).Scan(&rel)
-
-			if _, err := common.DB.Exec(r.Context(), `DELETE FROM iac_stacks WHERE id=$1`, id); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			if deleteFiles && rel != "" {
-				if full, err := services.JoinUnder(root, rel); err == nil {
-					_ = os.RemoveAll(full) // best effort
-				}
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
-		})
-
-		// ===== IaC Editor APIs =====
-
-		// List files tracked for a stack
-		r.Get("/stacks/{id}/files", func(w http.ResponseWriter, r *http.Request) {
-			idStr := chi.URLParam(r, "id")
-			id, _ := strconv.ParseInt(idStr, 10, 64)
-			items, err := services.ListFilesForStack(r.Context(), id)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"files": items})
-		})
-
-		// Read file content for a stack file (with optional decrypt)
-		r.Get("/stacks/{id}/file", func(w http.ResponseWriter, r *http.Request) {
-			idStr := chi.URLParam(r, "id")
-			id, _ := strconv.ParseInt(idStr, 10, 64)
-			rel := strings.TrimSpace(r.URL.Query().Get("path"))
-			if rel == "" {
-				http.Error(w, "missing path", http.StatusBadRequest)
-				return
-			}
-			root, err := services.GetRepoRootForStack(r.Context(), id)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			full, err := services.JoinUnder(root, rel)
-			if err != nil {
-				http.Error(w, "invalid path", http.StatusBadRequest)
-				return
-			}
-			decrypt := r.URL.Query().Get("decrypt") == "1" || r.URL.Query().Get("decrypt") == "true"
-
-			var data []byte
-			if decrypt {
-				if !common.EnvBool("DD_UI_ALLOW_SOPS_DECRYPT", "false") {
-					http.Error(w, "decrypt disabled on server", http.StatusForbidden)
-					return
-				}
-				if strings.ToLower(r.Header.Get("X-Confirm-Reveal")) != "yes" {
-					http.Error(w, "confirmation required", http.StatusForbidden)
-					return
-				}
-				ctx, cancel := context.WithTimeout(r.Context(), 10*time.Second)
-				defer cancel()
-				cmd := exec.CommandContext(ctx, "sops", "-d", full)
-				out, err := cmd.CombinedOutput()
-				if err != nil {
-					http.Error(w, "sops decrypt failed: "+string(out), http.StatusNotImplemented)
-					return
-				}
-				data = out
-			} else {
-				data, err = os.ReadFile(full)
-				if err != nil {
-					http.Error(w, "file not found", http.StatusNotFound)
-					return
-				}
-			}
-
-			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
-			w.Header().Set("Cache-Control", "no-store")
-			_, _ = w.Write(data)
-		})
-
-		// Create/update file content
-		r.Post("/stacks/{id}/file", func(w http.ResponseWriter, r *http.Request) {
-			idStr := chi.URLParam(r, "id")
-			id, _ := strconv.ParseInt(idStr, 10, 64)
-			var body struct {
-				Path    string `json:"path"`
-				Content string `json:"content"`
-				Sops    bool   `json:"sops,omitempty"`
-				Role    string `json:"role,omitempty"` // compose|env|script|other
-			}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				http.Error(w, "bad json", http.StatusBadRequest)
-				return
-			}
-			if strings.TrimSpace(body.Path) == "" {
-				http.Error(w, "path required", http.StatusBadRequest)
-				return
-			}
-			root, err := services.GetRepoRootForStack(r.Context(), id)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			full, err := services.JoinUnder(root, body.Path)
-			if err != nil {
-				http.Error(w, "invalid path", http.StatusBadRequest)
-				return
-			}
-			if err := os.MkdirAll(filepath.Dir(full), 0o755); err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-
-			data := []byte(body.Content)
-			sz := len(data)
-			sum := fmt.Sprintf("%x", sha256.Sum256(data))
-
-			if body.Sops {
-				if !common.EnvBool("DD_UI_ALLOW_SOPS_ENCRYPT", "false") {
-					http.Error(w, "encrypt disabled on server", http.StatusForbidden)
-					return
-				}
-				tmp := full + ".tmp"
-				if err := os.WriteFile(tmp, data, 0o644); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-				defer os.Remove(tmp)
-				ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
-				defer cancel()
-				cmd := exec.CommandContext(ctx, "sops", "-e", "-i", tmp)
-				out, err := cmd.CombinedOutput()
-				if err != nil {
-					http.Error(w, "sops encrypt failed: "+string(out), http.StatusBadRequest)
-					return
-				}
-				if err := os.Rename(tmp, full); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-			} else {
-				if err := os.WriteFile(full, data, 0o644); err != nil {
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
-				}
-			}
-			writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "size": sz, "sha256": sum, "sops": body.Sops})
-		})
-
-		// Delete a file from a stack
-		r.Delete("/stacks/{id}/file", func(w http.ResponseWriter, r *http.Request) {
-			idStr := chi.URLParam(r, "id")
-			id, _ := strconv.ParseInt(idStr, 10, 64)
-			rel := strings.TrimSpace(r.URL.Query().Get("path"))
-			if rel == "" {
-				http.Error(w, "missing path", http.StatusBadRequest)
-				return
-			}
-			root, err := services.GetRepoRootForStack(r.Context(), id)
-			if err != nil {
-				http.Error(w, err.Error(), http.StatusBadRequest)
-				return
-			}
-			full, err := services.JoinUnder(root, rel)
-			if err != nil {
-				http.Error(w, "invalid path", http.StatusBadRequest)
-				return
-			}
-			_ = os.Remove(full) // best effort
-			_ = services.DeleteIacFileRow(r.Context(), id, rel)
-			writeJSON(w, http.StatusOK, map[string]any{"status": "deleted"})
-		})
-
-		// Deploy endpoint
-		// - Manual deploys: **default** (for UI). Pass ?auto=1 for background/auto callers.
-		r.Post("/stacks/{id}/deploy", func(w http.ResponseWriter, r *http.Request) {
-			idStr := chi.URLParam(r, "id")
-			id, err := strconv.ParseInt(idStr, 10, 64)
-			if err != nil || id <= 0 {
-				http.Error(w, "bad id", http.StatusBadRequest)
-				return
-			}
-
-			// must have something to deploy
-			ok, derr := services.StackHasContent(r.Context(), id)
-			if derr != nil {
-				http.Error(w, derr.Error(), http.StatusInternalServerError)
-				return
-			}
-			if !ok {
-				http.Error(w, "stack has no files", http.StatusBadRequest)
-				return
-			}
-
-			// Manual by default (UI-friendly). Auto callers pass ?auto=1 explicitly.
-			manual := !services.IsTrueish(r.URL.Query().Get("auto"))
-
-			// Gate only if NOT manual
-			if !manual {
-				allowed, aerr := services.ShouldAutoApply(r.Context(), id)
-				if aerr != nil {
-					http.Error(w, aerr.Error(), http.StatusBadRequest)
-					return
-				}
-				if !allowed {
-					writeJSON(w, http.StatusAccepted, map[string]any{
-						"status":  "skipped",
-						"reason":  "auto_devops_disabled",
-						"stackID": id,
-					})
-					return
-				}
-			}
-
-			// async deploy with timeout + logging; mark manual flag in context
-			go func(stackID int64, manual bool) {
-				ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				defer cancel()
-				ctx = context.WithValue(ctx, services.CtxManualKey{}, manual)
-				if err := services.DeployStack(ctx, stackID); err != nil {
-					common.ErrorLog("deploy: stack %d failed: %v", stackID, err)
-					return
-				}
-				common.InfoLog("deploy: stack %d ok", stackID)
-			}(id, manual)
-
-			writeJSON(w, http.StatusAccepted, map[string]any{
-				"status":  "accepted",
-				"stackID": id,
-				"allowed": true,
-			})
-		})
-
-		// Streaming deploy endpoint (compatible with existing frontend)
-		r.Get("/stacks/{id}/deploy-stream", func(w http.ResponseWriter, r *http.Request) {
-			idStr := chi.URLParam(r, "id")
-			id, err := strconv.ParseInt(idStr, 10, 64)
-			if err != nil || id <= 0 {
-				http.Error(w, "bad id", http.StatusBadRequest)
-				return
-			}
-
-			// Check if stack has content
-			ok, derr := services.StackHasContent(r.Context(), id)
-			if derr != nil {
-				http.Error(w, derr.Error(), http.StatusInternalServerError)
-				return
-			}
-			if !ok {
-				http.Error(w, "stack has no deployable content", http.StatusBadRequest)
-				return
-			}
-
-			// Set up Server-Sent Events
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
-			w.Header().Set("Connection", "keep-alive")
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-			
-			// Create event channel
-			eventChan := make(chan map[string]interface{}, 100)
-			
-			// Start deployment in background
-			ctx := context.WithValue(r.Context(), services.CtxManualKey{}, true)
-			// Check for force parameter to bypass config unchanged checks
-			if r.URL.Query().Get("force") == "true" {
-				ctx = context.WithValue(ctx, services.CtxForceKey{}, true)
-			}
-			go func() {
-				if err := services.DeployStackWithStream(ctx, id, eventChan); err != nil {
-					common.ErrorLog("deploy-stream: stack %d failed: %v", id, err)
-				}
-			}()
-
-			// Stream events to client
-			flusher, ok := w.(http.Flusher)
-			if !ok {
-				http.Error(w, "Streaming not supported", http.StatusInternalServerError)
-				return
-			}
-
-			for event := range eventChan {
-				eventJSON, _ := json.Marshal(event)
-				fmt.Fprintf(w, "data: %s\n\n", eventJSON)
-				flusher.Flush()
-
-				// Break on completion
-				if eventType, ok := event["type"].(string); ok && eventType == "complete" {
-					break
-				}
-			}
-		})
-
-		// Check if configuration has changed endpoint
-		r.Post("/stacks/{id}/deploy-check", func(w http.ResponseWriter, r *http.Request) {
-			idStr := chi.URLParam(r, "id")
-			id, err := strconv.ParseInt(idStr, 10, 64)
-			if err != nil || id <= 0 {
-				http.Error(w, "bad id", http.StatusBadRequest)
-				return
-			}
-
-			// Get the current configuration
-			_, err = services.GetRepoRootForStack(r.Context(), id)
-			if err != nil {
-				http.Error(w, "failed to get repo root", http.StatusInternalServerError)
-				return
-			}
-			var rel string
-			_ = common.DB.QueryRow(r.Context(), `SELECT rel_path FROM iac_stacks WHERE id=$1`, id).Scan(&rel)
-			if strings.TrimSpace(rel) == "" {
-				http.Error(w, "stack has no rel_path", http.StatusBadRequest)
-				return
-			}
-
-			// Stage (SOPS decrypts into tmpfs and is cleaned afterwards)
-			_, stagedComposes, cleanup, derr := services.StageStackForCompose(r.Context(), id)
-			if derr != nil {
-				http.Error(w, fmt.Sprintf("failed to stage stack: %v", derr), http.StatusInternalServerError)
-				return
-			}
-			defer func() {
-				if cleanup != nil {
-					cleanup()
-				}
-			}()
-
-			if len(stagedComposes) == 0 {
-				writeJSON(w, http.StatusOK, map[string]interface{}{
-					"config_unchanged": false,
-				})
-				return
-			}
-
-			var allComposeContent []byte
-			for _, f := range stagedComposes {
-				b, rerr := os.ReadFile(f)
-				if rerr != nil {
-					http.Error(w, fmt.Sprintf("failed to read compose file: %v", rerr), http.StatusInternalServerError)
-					return
-				}
-				allComposeContent = append(allComposeContent, b...)
-				allComposeContent = append(allComposeContent, '\n')
-			}
-
-			// Check if configuration has changed by comparing with latest deployment stamp
-			latest, lerr := database.GetLatestDeploymentStamp(r.Context(), id)
-			if lerr != nil {
-				// No previous deployment, so config is new
-				writeJSON(w, http.StatusOK, map[string]interface{}{
-					"config_unchanged": false,
-				})
-				return
-			}
-
-			// Calculate hash of current config
-			currentHash := fmt.Sprintf("%x", sha256.Sum256(allComposeContent))
-			
-			// Compare with latest deployment hash
-			configUnchanged := (latest.DeploymentHash == currentHash)
-
-			writeJSON(w, http.StatusOK, map[string]interface{}{
-				"config_unchanged": configUnchanged,
-			})
-		})
-
-		// Confirmation endpoint for deploying unchanged configuration
-		r.Get("/stacks/{id}/deploy-force", func(w http.ResponseWriter, r *http.Request) {
-			idStr := chi.URLParam(r, "id")
-			id, err := strconv.ParseInt(idStr, 10, 64)
-			if err != nil || id <= 0 {
-				http.Error(w, "bad id", http.StatusBadRequest)
-				return
-			}
-
-			// Set up Server-Sent Events
-			w.Header().Set("Content-Type", "text/event-stream")
-			w.Header().Set("Cache-Control", "no-cache")
-			w.Header().Set("Connection", "keep-alive")
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-
-			flusher, ok := w.(http.Flusher)
-			if !ok {
-				http.Error(w, "streaming not supported", http.StatusInternalServerError)
-				return
-			}
-
-			eventChan := make(chan map[string]interface{}, 100)
-
-			// Start forced deployment in background
-			ctx := context.WithValue(r.Context(), services.CtxManualKey{}, true)
-			ctx = context.WithValue(ctx, services.CtxForceKey{}, true)
-			go func() {
-				if err := services.DeployStackWithStream(ctx, id, eventChan); err != nil {
-					common.ErrorLog("deploy-force: stack %d failed: %v", id, err)
-				}
-			}()
-
-			// Stream events to client
-			for event := range eventChan {
-				eventJSON, _ := json.Marshal(event)
-				fmt.Fprintf(w, "data: %s\n\n", eventJSON)
-				flusher.Flush()
-
-				// Break on completion
-				if eventType, ok := event["type"].(string); ok && eventType == "complete" {
-					break
-				}
-			}
 		})
 	})
 

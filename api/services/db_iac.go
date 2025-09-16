@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
 	"sort"
 	"strings"
 	"time"
@@ -107,7 +108,7 @@ func upsertIacService(ctx context.Context, s IacServiceRow) error {
 	return err
 }
 
-func upsertIacFile(ctx context.Context, stackID int64, role, relPath string, sops bool, sha256Hex string, sizeBytes int64) error {
+func UpsertIacFile(ctx context.Context, stackID int64, role, relPath string, sops bool, sha256Hex string, sizeBytes int64) error {
 	_, err := common.DB.Exec(ctx, `
 		INSERT INTO iac_stack_files (stack_id, role, rel_path, sops, sha256_hex, size_bytes)
 		VALUES ($1,$2,$3,$4,$5,$6)
@@ -294,6 +295,62 @@ func GetRepoRootForStack(ctx context.Context, stackID int64) (string, error) {
 	return root, err
 }
 
+// CreateIacStack creates a new IAC stack for a host
+func CreateIacStack(ctx context.Context, scopeKind, scopeName, stackName string, enabled bool) (int64, error) {
+	// Get the repo ID (use 1 as default for now, or get from context)
+	repoID := int64(1)
+	
+	// Set defaults for a new stack
+	relPath := fmt.Sprintf("docker-compose/%s/%s", scopeName, stackName)
+	composeFile := ""
+	deployKind := "unmanaged"
+	pullPolicy := ""
+	sopsStatus := "none"
+	
+	return UpsertIacStack(ctx, repoID, scopeKind, scopeName, stackName, relPath, composeFile, deployKind, pullPolicy, sopsStatus, enabled)
+}
+
+// GetStackIDByHostAndName finds a stack ID by host and stack name
+func GetStackIDByHostAndName(ctx context.Context, hostName, stackName string) (int64, error) {
+	var id int64
+	err := common.DB.QueryRow(ctx, `
+		SELECT id FROM iac_stacks 
+		WHERE scope_kind = 'host' 
+		AND scope_name = $1 
+		AND stack_name = $2
+		LIMIT 1
+	`, hostName, stackName).Scan(&id)
+	
+	if err != nil {
+		// Try group scope as fallback
+		h, herr := database.GetHostByName(ctx, hostName)
+		if herr == nil && len(h.Groups) > 0 {
+			err = common.DB.QueryRow(ctx, `
+				SELECT id FROM iac_stacks 
+				WHERE scope_kind = 'group' 
+				AND scope_name = ANY($1)
+				AND stack_name = $2
+				LIMIT 1
+			`, h.Groups, stackName).Scan(&id)
+		}
+	}
+	
+	return id, err
+}
+
+// ReadIacFile reads a file with optional SOPS decryption detection
+func ReadIacFile(fullPath string) ([]byte, bool, error) {
+	data, err := os.ReadFile(fullPath)
+	if err != nil {
+		return nil, false, err
+	}
+	
+	// Check if it looks like SOPS encrypted
+	encrypted := strings.Contains(string(data), "sops:") && strings.Contains(string(data), "mac:")
+	
+	return data, encrypted, nil
+}
+
 func ListFilesForStack(ctx context.Context, stackID int64) ([]IacFileMetaRow, error) {
 	rows, err := common.DB.Query(ctx, `
 	  SELECT role, rel_path, sops, sha256_hex, size_bytes, updated_at
@@ -456,16 +513,17 @@ func ListEnhancedIacStacksForHost(ctx context.Context, hostName string) ([]Enhan
 			dir, composes, cleanup, err := StageStackForCompose(ctx, stackID)
 			return dir, composes, cleanup, err
 		}
+		common.InfoLog("Starting drift detection for stack %s (ID: %d)", s.Name, s.ID)
 		hasDrift, driftReason, err := utils.DetectDriftViaHashesWithStager(ctx, common.DB, s.ID, s.Name, cli, stageFunc)
 		if err != nil {
-			common.DebugLog("Hash-based drift detection failed for stack %s: %v", s.Name, err)
+			common.ErrorLog("Hash-based drift detection failed for stack %s: %v", s.Name, err)
 			// Fallback to no drift detected on error
 			e.DriftDetected = false
-			e.DriftReason = "Unable to determine drift status"
+			e.DriftReason = fmt.Sprintf("Error: %v", err)
 		} else {
 			e.DriftDetected = hasDrift
 			e.DriftReason = driftReason
-			common.DebugLog("Stack %s: drift=%v, reason=%s", s.Name, hasDrift, driftReason)
+			common.InfoLog("Stack %s: drift=%v, reason=%s", s.Name, hasDrift, driftReason)
 		}
 
 		// Stage for render (SOPS-aware) - still needed for UI display of rendered services

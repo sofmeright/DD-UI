@@ -134,14 +134,14 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 		// Track files
 		for _, ef := range envFiles {
 			sum, sz := sha256File(ef.fullPath)
-			if err := upsertIacFile(ctx, stackID, "env", relFrom(root, ef.fullPath), ef.sops, sum, sz); err != nil {
+			if err := UpsertIacFile(ctx, stackID, "env", relFrom(root, ef.fullPath), ef.sops, sum, sz); err != nil {
 				common.ErrorLog("iac: upsert file(env) failed stack_id=%d file=%s err=%v", stackID, ef.fullPath, err)
 			}
 		}
 		if composeFile != "" {
 			full := filepath.Join(p, composeFile)
 			sum, sz := sha256File(full)
-			if err := upsertIacFile(ctx, stackID, "compose", filepath.ToSlash(filepath.Join(dirname, scopeName, stackName, composeFile)), false, sum, sz); err != nil {
+			if err := UpsertIacFile(ctx, stackID, "compose", filepath.ToSlash(filepath.Join(dirname, scopeName, stackName, composeFile)), false, sum, sz); err != nil {
 				common.ErrorLog("iac: upsert file(compose) failed stack_id=%d file=%s err=%v", stackID, full, err)
 			}
 		}
@@ -149,7 +149,7 @@ func ScanIacLocal(ctx context.Context) (int, int, error) {
 			full := filepath.Join(p, s)
 			if fi, err := os.Stat(full); err == nil && !fi.IsDir() {
 				sum, sz := sha256File(full)
-				if err := upsertIacFile(ctx, stackID, "script", relFrom(root, full), false, sum, sz); err != nil {
+				if err := UpsertIacFile(ctx, stackID, "script", relFrom(root, full), false, sum, sz); err != nil {
 					common.ErrorLog("iac: upsert file(script) failed stack_id=%d file=%s err=%v", stackID, full, err)
 				}
 			}

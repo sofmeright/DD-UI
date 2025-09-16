@@ -108,10 +108,10 @@ Mount or place your repo under a root (default `/data`) with this layout:
 
 Env (if you customize):
 ```bash
-DD-UI_IAC_ROOT="/data"
-DD-UI_IAC_DIRNAME="docker-compose"
+DD_UI_IAC_ROOT="/data"
+DD_UI_IAC_DIRNAME="docker-compose"
 # Gated decrypt is OFF by default; see SOPS section below to enable carefully.
-# DD-UI_ALLOW_SOPS_DECRYPT=true
+# DD_UI_ALLOW_SOPS_DECRYPT=true
 ```
 
 ---
@@ -155,15 +155,15 @@ services:
     env_file: stack.env
     environment:
       # General Config
-      #- DD-UI_BIND=0.0.0.0:443
-      # - DD-UI_DEFAULT_OWNER= # (email)
-      - DD-UI_INVENTORY_PATH=/data/inventory
-      - DD-UI_LOCAL_HOST=anchorage
-      - DD-UI_UI_ORIGIN=https://dd-ui.pcfae.com
+      #- DD_UI_BIND=0.0.0.0:443
+      # - DD_UI_DEFAULT_OWNER= # (email)
+      - DD_UI_INVENTORY_PATH=/data/inventory
+      - DD_UI_LOCAL_HOST=anchorage
+      - DD_UI_UI_ORIGIN=https://dd-ui.pcfae.com
       
       # Authentication / OIDC
-      - DD-UI_COOKIE_SECURE=true
-      - DD-UI_COOKIE_DOMAIN=dd-ui.pcfae.com
+      - DD_UI_COOKIE_SECURE=true
+      - DD_UI_COOKIE_DOMAIN=dd-ui.pcfae.com
       - OIDC_CLIENT_ID_FILE=/run/secrets/oidc_client_id
       - OIDC_CLIENT_SECRET_FILE=/run/secrets/oidc_client_secret
       - OIDC_ISSUER_URL=https://sso.prplanit.com
@@ -173,23 +173,23 @@ services:
         # - OIDC_ALLOWED_EMAIL_DOMAIN # (optional; blocks others)
       
       # Database (Postgres) Configuration:
-      - DD-UI_DB_HOST=dd-ui-postgres
-      - DD-UI_DB_PORT=5432
-      - DD-UI_DB_NAME=dd-ui
-      - DD-UI_DB_USER=prplanit
-      - DD-UI_DB_PASS_FILE=/run/secrets/postgres_pass
-      - DD-UI_DB_SSLMODE=disable
-      - DD-UI_DB_MIGRATE=true
+      - DD_UI_DB_HOST=dd-ui-postgres
+      - DD_UI_DB_PORT=5432
+      - DD_UI_DB_NAME=dd-ui
+      - DD_UI_DB_USER=prplanit
+      - DD_UI_DB_PASS_FILE=/run/secrets/postgres_pass
+      - DD_UI_DB_SSLMODE=disable
+      - DD_UI_DB_MIGRATE=true
         # or provide a single DSN:
-        # - DD-UI_DB_DSN=postgres://dd-ui:...@db:5432/dd-ui?sslmode=disable
+        # - DD_UI_DB_DSN=postgres://dd-ui:...@db:5432/dd-ui?sslmode=disable
 
       # Docker Connection Config
       - DOCKER_CONNECTION_METHOD=local
       
       # Encryption / SOPS Config
-      - DD-UI_ALLOW_SOPS_DECRYPT=true
+      - DD_UI_ALLOW_SOPS_DECRYPT=true
       - SOPS_AGE_KEY_FILE=/run/secrets/sops_age_key
-      - DD-UI_SESSION_SECRET_FILE=/run/secrets/session_secret
+      - DD_UI_SESSION_SECRET_FILE=/run/secrets/session_secret
       
       # SSH Config
       - SSH_USER=kai           # or a limited user in docker group
@@ -199,21 +199,21 @@ services:
       - SSH_STRICT_HOST_KEY=false
       
       # Auto DevOps Config
-      - DD-UI_DEVOPS_APPLY=false
+      - DD_UI_DEVOPS_APPLY=false
       
       # Scanning Config - Docker Host(s) States
-      - DD-UI_SCAN_DOCKER_AUTO=true
-      - DD-UI_SCAN_DOCKER_INTERVAL=1m
-      - DD-UI_SCAN_DOCKER_HOST_TIMEOUT=45s
-      - DD-UI_SCAN_DOCKER_CONCURRENCY=3
-      - DD-UI_SCAN_DOCKER_ON_START=true
-      - DD-UI_SCAN_DOCKER_DEBUG=true
+      - DD_UI_SCAN_DOCKER_AUTO=true
+      - DD_UI_SCAN_DOCKER_INTERVAL=1m
+      - DD_UI_SCAN_DOCKER_HOST_TIMEOUT=45s
+      - DD_UI_SCAN_DOCKER_CONCURRENCY=3
+      - DD_UI_SCAN_DOCKER_ON_START=true
+      - DD_UI_SCAN_DOCKER_DEBUG=true
       
       # Scannning Config - IAC
-      - DD-UI_IAC_ROOT=/data
-      - DD-UI_IAC_DIRNAME=docker-compose
-      - DD-UI_SCAN_IAC_AUTO=true
-      - DD-UI_SCAN_IAC_INTERVAL=90s
+      - DD_UI_IAC_ROOT=/data
+      - DD_UI_IAC_DIRNAME=docker-compose
+      - DD_UI_SCAN_IAC_AUTO=true
+      - DD_UI_SCAN_IAC_INTERVAL=90s
 
     secrets:
       - oidc_client_id
@@ -469,7 +469,7 @@ To encrypt, SOPS needs one or more **AGE recipients** (public keys). You have tw
 
 ### Decrypting (gated reveal)
 - Decryption in DD-UI is **explicitly gated**:
-  - Server-side must allow it: `DD-UI_ALLOW_SOPS_DECRYPT=true`
+  - Server-side must allow it: `DD_UI_ALLOW_SOPS_DECRYPT=true`
   - UI sends a confirmation header: `X-Confirm-Reveal: yes`
   - Backend calls: `sops -d <file>` and returns the plaintext (not persisted).
 - If decryption is not allowed you’ll see `403 Forbidden: decrypt disabled on server`.
@@ -533,21 +533,21 @@ To encrypt, SOPS needs one or more **AGE recipients** (public keys). You have tw
 
 | Variable              | Default | Description                                                                                      |
 | --------------------- | ------- | ------------------------------------------------------------------------------------------------ |
-| `DD-UI_DEFAULT_OWNER`  | —       | Default owner/team used when creating stacks or records (namespacing/attribution in the UI).     |
-| `DD-UI_BUILDS_DIR`     | —       | Directory for build outputs and artifacts (e.g., generated bundles/manifests).                   |
-| `DD-UI_INVENTORY_PATH` | —       | Path to the hosts inventory file (YAML/JSON) defining remote Docker targets.                     |
-| `DD-UI_LOCAL_HOST`     | `""`    | Optional override for the local host name/label; leave empty to use the tool’s implicit/default. |
-| `DD-UI_BIND`           | —       | Server bind address, e.g. `:8080` or `0.0.0.0:8080`.                                             |
-| `DD-UI_UI_ORIGIN`                             | empty                   | Additional allowed CORS origin for the dev UI (`http://localhost:5173` is allowed by default) |
-| `DD-UI_UI_DIR`                           | `/home/dd-ui/ui/dist`    | Where built SPA is served from                                                              |
+| `DD_UI_DEFAULT_OWNER`  | —       | Default owner/team used when creating stacks or records (namespacing/attribution in the UI).     |
+| `DD_UI_BUILDS_DIR`     | —       | Directory for build outputs and artifacts (e.g., generated bundles/manifests).                   |
+| `DD_UI_INVENTORY_PATH` | —       | Path to the hosts inventory file (YAML/JSON) defining remote Docker targets.                     |
+| `DD_UI_LOCAL_HOST`     | `""`    | Optional override for the local host name/label; leave empty to use the tool’s implicit/default. |
+| `DD_UI_BIND`           | —       | Server bind address, e.g. `:8080` or `0.0.0.0:8080`.                                             |
+| `DD_UI_UI_ORIGIN`                             | empty                   | Additional allowed CORS origin for the dev UI (`http://localhost:5173` is allowed by default) |
+| `DD_UI_UI_DIR`                           | `/home/dd-ui/ui/dist`    | Where built SPA is served from                                                              |
 
 
 ### Auth / OIDC
 
 | Variable                                | Default                 | Description                                                                                 |
 | --------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
-| `DD-UI_COOKIE_DOMAIN`                    | empty                   | e.g. `.example.com`                                                                         |
-| `DD-UI_COOKIE_SECURE`                    | inferred                | `true/false` (if unset, inferred from redirect URL scheme)                                  |
+| `DD_UI_COOKIE_DOMAIN`                    | empty                   | e.g. `.example.com`                                                                         |
+| `DD_UI_COOKIE_SECURE`                    | inferred                | `true/false` (if unset, inferred from redirect URL scheme)                                  |
 | `OIDC_ISSUER_URL`                       | —                       | Provider discovery URL (`…/.well-known/openid-configuration`)                               |
 | `OIDC_CLIENT_ID` / `OIDC_CLIENT_SECRET` | —                       | OAuth client (secret supports `@/path` indirection)                                         |
 | `OIDC_CLIENT_ID_FILE` / `OIDC_CLIENT_SECRET_FILE` | —                       | Same function as above but passed in as a file for docker secrets funtionality.   |
@@ -559,22 +559,22 @@ To encrypt, SOPS needs one or more **AGE recipients** (public keys). You have tw
 
 | Variable                    | Default | Description                                                                       |
 | --------------------------- | ------- | --------------------------------------------------------------------------------- |
-| `DD-UI_DB_DSN`               | —       | Full connection string, e.g. `postgres://user:pass@host:5432/db?sslmode=disable`. |
-| `DD-UI_DB_HOST`              | —       | Hostname/IP of the database (used when DSN is not set).                           |
-| `DD-UI_DB_PORT`              | —       | Database port, e.g. `5432`.                                                       |
-| `DD-UI_DB_NAME`              | —       | Database name.                                                                    |
-| `DD-UI_DB_USER`              | —       | Database user.                                                                    |
-| `DD-UI_DB_PASS`              | —       | Database password (prefer `DD-UI_DB_PASS_FILE` for secrets).                       |
-| `DD-UI_DB_PASS_FILE`         | —       | Read password from file (Docker secrets compatible).                              |
-| `DD-UI_DB_SSLMODE`           | —       | Postgres `sslmode` (`disable`, `require`, `verify-ca`, `verify-full`).            |
-| `DD-UI_DB_MAX_CONNS`         | —       | Max open connections in the pool (integer).                                       |
-| `DD-UI_DB_MIN_CONNS`         | —       | Minimum/idle pool size (integer).                                                 |
-| `DD-UI_DB_CONN_MAX_LIFETIME` | —       | Max lifetime per connection (duration, e.g. `30m`).                               |
-| `DD-UI_DB_CONN_MAX_IDLE`     | —       | Max idle time per connection (duration, e.g. `5m`).                               |
-| `DD-UI_DB_HEALTH_PERIOD`     | —       | Interval between DB health checks (duration, e.g. `10s`).                         |
-| `DD-UI_DB_CONNECT_TIMEOUT`   | —       | Dial/connect timeout (duration, e.g. `5s`).                                       |
-| `DD-UI_DB_PING_TIMEOUT`      | —       | Timeout for readiness/`PING` checks (duration, e.g. `2s`).                        |
-| `DD-UI_DB_MIGRATE`           | —       | `true/false` — run schema migrations on startup.                                  |
+| `DD_UI_DB_DSN`               | —       | Full connection string, e.g. `postgres://user:pass@host:5432/db?sslmode=disable`. |
+| `DD_UI_DB_HOST`              | —       | Hostname/IP of the database (used when DSN is not set).                           |
+| `DD_UI_DB_PORT`              | —       | Database port, e.g. `5432`.                                                       |
+| `DD_UI_DB_NAME`              | —       | Database name.                                                                    |
+| `DD_UI_DB_USER`              | —       | Database user.                                                                    |
+| `DD_UI_DB_PASS`              | —       | Database password (prefer `DD_UI_DB_PASS_FILE` for secrets).                       |
+| `DD_UI_DB_PASS_FILE`         | —       | Read password from file (Docker secrets compatible).                              |
+| `DD_UI_DB_SSLMODE`           | —       | Postgres `sslmode` (`disable`, `require`, `verify-ca`, `verify-full`).            |
+| `DD_UI_DB_MAX_CONNS`         | —       | Max open connections in the pool (integer).                                       |
+| `DD_UI_DB_MIN_CONNS`         | —       | Minimum/idle pool size (integer).                                                 |
+| `DD_UI_DB_CONN_MAX_LIFETIME` | —       | Max lifetime per connection (duration, e.g. `30m`).                               |
+| `DD_UI_DB_CONN_MAX_IDLE`     | —       | Max idle time per connection (duration, e.g. `5m`).                               |
+| `DD_UI_DB_HEALTH_PERIOD`     | —       | Interval between DB health checks (duration, e.g. `10s`).                         |
+| `DD_UI_DB_CONNECT_TIMEOUT`   | —       | Dial/connect timeout (duration, e.g. `5s`).                                       |
+| `DD_UI_DB_PING_TIMEOUT`      | —       | Timeout for readiness/`PING` checks (duration, e.g. `2s`).                        |
+| `DD_UI_DB_MIGRATE`           | —       | `true/false` — run schema migrations on startup.                                  |
 
 ### Docker Connection Config
 
@@ -591,11 +591,11 @@ To encrypt, SOPS needs one or more **AGE recipients** (public keys). You have tw
 
 | Variable                                | Default                 | Description                                                                                 |
 | --------------------------------------- | ----------------------- | ------------------------------------------------------------------------------------------- |
-| `DD-UI_ALLOW_SOPS_DECRYPT`               | unset                   | Enable gated decrypt API (`true/1/yes/on`), requires `X-Confirm-Reveal: yes` header         |
+| `DD_UI_ALLOW_SOPS_DECRYPT`               | unset                   | Enable gated decrypt API (`true/1/yes/on`), requires `X-Confirm-Reveal: yes` header         |
 | `SOPS_AGE_KEY_FILE` / `SOPS_AGE_KEY`    | unset                   | AGE private key (file path or raw), enables server-side **decrypt**                         |
 | `SOPS_AGE_RECIPIENTS`                   | unset                   | Space-separated AGE recipients, enables **encrypt** even without `.sops.yaml`               |
-| `DD-UI_SESSION_SECRET`                   | —                       | Session/cookie HMAC secret. Generate via `DD-UI_SESSION_SECRET="$(openssl rand -hex 64)"`    |
-| `DD-UI_SESSION_SECRET_FILE`              | —                       | Same function as above but passed in as a file for docker secrets funtionality.             |
+| `DD_UI_SESSION_SECRET`                   | —                       | Session/cookie HMAC secret. Generate via `DD_UI_SESSION_SECRET="$(openssl rand -hex 64)"`    |
+| `DD_UI_SESSION_SECRET_FILE`              | —                       | Same function as above but passed in as a file for docker secrets funtionality.             |
 
 ### SSH Config
 
@@ -613,28 +613,28 @@ To encrypt, SOPS needs one or more **AGE recipients** (public keys). You have tw
 
 | Variable                                | Default                 | Description                                                            |
 | --------------------------------------- | ----------------------- | ---------------------------------------------------------------------- |
-| `DD-UI_DEVOPS_APPLY`                     | `true`                  | Enables Automated Deployments via IaC / DevOps                         |
+| `DD_UI_DEVOPS_APPLY`                     | `true`                  | Enables Automated Deployments via IaC / DevOps                         |
 
 ### Scanning Docker
 
 | Variable                        | Default | Description                                                   |
 | ------------------------------- | ------- | ------------------------------------------------------------- |
-| `DD-UI_SCAN_DOCKER_AUTO`         | `true`  | `true/false` — enable the periodic Docker scan scheduler.     |
-| `DD-UI_SCAN_DOCKER_INTERVAL`     | `1m`    | How often to run scans (Go duration, e.g. `30s`, `5m`, `1h`). |
-| `DD-UI_SCAN_DOCKER_HOST_TIMEOUT` | `45s`   | Per-host scan timeout (Go duration).                          |
-| `DD-UI_SCAN_DOCKER_CONCURRENCY`  | `3`     | Max number of hosts scanned in parallel (integer).            |
-| `DD-UI_SCAN_DOCKER_ON_START`     | `true`  | `true/false` — run an initial scan at startup.                |
-| `DD-UI_SCAN_DOCKER_DEBUG`        | `false` | `true/false` — verbose logging for the Docker scanner.        |
+| `DD_UI_SCAN_DOCKER_AUTO`         | `true`  | `true/false` — enable the periodic Docker scan scheduler.     |
+| `DD_UI_SCAN_DOCKER_INTERVAL`     | `1m`    | How often to run scans (Go duration, e.g. `30s`, `5m`, `1h`). |
+| `DD_UI_SCAN_DOCKER_HOST_TIMEOUT` | `45s`   | Per-host scan timeout (Go duration).                          |
+| `DD_UI_SCAN_DOCKER_CONCURRENCY`  | `3`     | Max number of hosts scanned in parallel (integer).            |
+| `DD_UI_SCAN_DOCKER_ON_START`     | `true`  | `true/false` — run an initial scan at startup.                |
+| `DD_UI_SCAN_DOCKER_DEBUG`        | `false` | `true/false` — verbose logging for the Docker scanner.        |
 
 
 ### Scanning IaC
 
 | Variable                 | Default | Description                                                                             |
 | ------------------------ | ------- | --------------------------------------------------------------------------------------- |
-| `DD-UI_SCAN_IAC_AUTO`     | `true`  | `true/false` — enable the periodic IaC (compose) scan scheduler.                        |
-| `DD-UI_SCAN_IAC_INTERVAL` | `90s`   | How often to run IaC scans (Go duration, e.g. `30s`, `5m`, `1h`).                       |
-| `DD-UI_IAC_ROOT`          | —       | Root path to scan for IaC (Docker Compose) files; recommended `/data`.   |
-| `DD-UI_IAC_DIRNAME`       | `empty` | Optional subfolder under the root to scope scans; leave empty to use the root directly; recommended `docker-compose`. |
+| `DD_UI_SCAN_IAC_AUTO`     | `true`  | `true/false` — enable the periodic IaC (compose) scan scheduler.                        |
+| `DD_UI_SCAN_IAC_INTERVAL` | `90s`   | How often to run IaC scans (Go duration, e.g. `30s`, `5m`, `1h`).                       |
+| `DD_UI_IAC_ROOT`          | —       | Root path to scan for IaC (Docker Compose) files; recommended `/data`.   |
+| `DD_UI_IAC_DIRNAME`       | `empty` | Optional subfolder under the root to scope scans; leave empty to use the root directly; recommended `docker-compose`. |
 
 ---
 

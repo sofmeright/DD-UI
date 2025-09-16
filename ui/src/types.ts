@@ -69,19 +69,29 @@ export type IacFileMeta = {
 
 export type InspectOut = {
     id: string;
+    container_id?: string;  // Alternative ID field
     name: string;
     image: string;
     state: string;
+    status?: string;  // Container status text
     health?: string;
-    created: string;
+    created?: string;
+    created_ts?: string;  // Alternative created timestamp
+    created_at?: string;  // Another created field variant
     cmd?: string[];
     entrypoint?: string[];
-    env?: Record<string, string>;
+    env?: string[];  // Array of "KEY=VALUE" strings from Docker
     labels?: Record<string, string>;
     restart_policy?: string;
-    ports?: { published?: string; target?: string; protocol?: string }[];
+    ports?: any[];  // Can be various formats from Docker
     volumes?: { source?: string; target?: string; mode?: string; rw?: boolean }[];
-    networks?: string[];
+    mounts?: any[];  // Docker mounts array
+    networks?: string[] | Record<string, any>;  // Can be array of names or map of network details
+    ip_addr?: string;  // IP address
+    owner?: string;  // Owner of container
+    compose_project?: string;  // Docker Compose project name
+    compose_service?: string;  // Docker Compose service name
+    updated_at?: string;  // Last update time
 };
 
 

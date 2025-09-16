@@ -232,12 +232,72 @@ func handleContainerLogs(w http.ResponseWriter, r *http.Request) {
 func handleContainerInspect(w http.ResponseWriter, r *http.Request) {
 	hostname := chi.URLParam(r, "hostname")
 	ctr := chi.URLParam(r, "ctr")
-	out, err := database.GetContainerByHostAndName(r.Context(), hostname, ctr)
+	
+	// First get basic data from database
+	dbData, err := database.GetContainerByHostAndName(r.Context(), hostname, ctr)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	writeJSON(w, http.StatusOK, out)
+	
+	// Try to get fresh inspection data from Docker
+	h, err := database.GetHostByName(r.Context(), hostname)
+	if err == nil {
+		cli, err := services.DockerClientForHost(h)
+		if err == nil {
+			defer cli.Close()
+			
+			// Get fresh inspection from Docker
+			info, err := cli.ContainerInspect(r.Context(), ctr)
+			if err == nil {
+				// Enhance database data with fresh Docker inspection details
+				enhancedData := map[string]interface{}{
+					// All database fields
+					"id":              dbData.ID,
+					"host_id":         dbData.HostID,
+					"stack_id":        dbData.StackID,
+					"container_id":    dbData.ContainerID,
+					"name":            dbData.Name,
+					"image":           dbData.Image,
+					"state":           dbData.State,
+					"status":          dbData.Status,
+					"health":          dbData.Health,
+					"ports":           dbData.Ports,
+					"labels":          dbData.Labels,
+					"env":             dbData.Env,
+					"networks":        dbData.Networks,
+					"mounts":          dbData.Mounts,
+					"ip_addr":         dbData.IPAddr,
+					"created_ts":      dbData.CreatedTS,
+					"compose_project": dbData.ComposeProj,
+					"compose_service": dbData.ComposeSvc,
+					"owner":           dbData.Owner,
+					"updated_at":      dbData.UpdatedAt,
+					
+					// Fresh Docker inspection data
+					"cmd":            info.Config.Cmd,
+					"entrypoint":     info.Config.Entrypoint,
+					"restart_policy": "",
+				}
+				
+				// Get restart policy
+				if info.HostConfig != nil && info.HostConfig.RestartPolicy.Name != "" {
+					enhancedData["restart_policy"] = string(info.HostConfig.RestartPolicy.Name)
+					if info.HostConfig.RestartPolicy.MaximumRetryCount > 0 {
+						enhancedData["restart_policy"] = fmt.Sprintf("%s:%d", 
+							info.HostConfig.RestartPolicy.Name, 
+							info.HostConfig.RestartPolicy.MaximumRetryCount)
+					}
+				}
+				
+				writeJSON(w, http.StatusOK, enhancedData)
+				return
+			}
+		}
+	}
+	
+	// Fallback to database data if Docker inspection fails
+	writeJSON(w, http.StatusOK, dbData)
 }
 
 // handleContainerAction performs basic container actions (start, stop, restart, pause, unpause, remove)

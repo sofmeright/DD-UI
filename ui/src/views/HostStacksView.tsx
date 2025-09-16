@@ -218,7 +218,7 @@ export default function HostStacksView({
         autoDevOps: false,
         pullPolicy: undefined,
         sops: false,
-        deployKind: stackName === "(none)" ? "unmanaged" as const : "unknown" as const,
+        deployKind: stackName === "(none)" ? "unmanaged" as const : "unmanaged" as const,
         rows,
         iacId: undefined,
         hasIac: false,
@@ -432,7 +432,7 @@ export default function HostStacksView({
         >();
         try {
         debugLog('[DD-UI] Fetching enhanced-iac data for host:', host.name);
-        const re = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/enhanced`, {
+        const re = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}`, {
           credentials: "include",
         });
         if (re.ok) {

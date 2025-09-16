@@ -46,7 +46,9 @@ func parseDurationDefault(s string, def time.Duration) time.Duration {
 func writeJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	encoder := json.NewEncoder(w)
+	encoder.SetEscapeHTML(false) // Don't escape HTML characters like & in YAML anchors
+	encoder.Encode(data)
 }
 
 // ViewBoostTracker for performance optimization

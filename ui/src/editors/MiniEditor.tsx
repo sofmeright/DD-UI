@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
-import { Shield, ShieldOff, Eye, EyeOff, Save, Maximize2, Minimize2 } from "lucide-react";
+import { Shield, ShieldOff, Eye, EyeOff, Save, Maximize2, Minimize2, AlertTriangle } from "lucide-react";
 import { Editor } from "@monaco-editor/react";
 import type { IacFileMeta } from "@/types";
 import { errorLog } from "@/utils/logging";
@@ -54,6 +54,12 @@ export default function MiniEditor({
   // Fullscreen
   const [fullscreen, setFullscreen] = useState(false);
   const containerRef = useRef<HTMLDivElement | null>(null);
+  
+  // Tab detection
+  const hasTabs = useMemo(() => content.includes('\t'), [content]);
+  
+  // Windows line ending detection
+  const hasWindowsLineEndings = useMemo(() => content.includes('\r\n'), [content]);
 
   // Keep local flags in sync when props change (path switched via file list)
   useEffect(() => {
@@ -99,12 +105,35 @@ export default function MiniEditor({
         return;
       }
       const txt = await r.text();
-      if (!r.ok) throw new Error(txt || `${r.status} ${r.statusText}`);
-      setContent(txt);
+      if (!r.ok) {
+        // Show specific error messages for common issues
+        if (r.status === 403 && txt.includes("decrypt disabled")) {
+          alert("SOPS reveal/decrypt is disabled in the UI. Ask your administrator to set DD_UI_ALLOW_SOPS_DECRYPT=true to enable the Show/Hide button.");
+          // Don't change view mode, stay in encrypted view
+          setDecryptedView(false);
+          return;
+        }
+        if (r.status === 403 && txt.includes("confirmation required")) {
+          alert("Confirmation header missing for decrypt operation");
+          setDecryptedView(false);
+          return;
+        }
+        if (r.status === 501 && txt.includes("sops decrypt failed")) {
+          // File might not be encrypted or SOPS key is missing
+          alert("Failed to decrypt file. Either the file is not encrypted with SOPS, or the decryption key is not available.");
+          setDecryptedView(false);
+          return;
+        }
+        throw new Error(txt || `${r.status} ${r.statusText}`);
+      }
+      // Automatically normalize line endings to Unix (LF)
+      const normalized = txt.replace(/\r\n/g, '\n');
+      setContent(normalized);
     } catch (e) {
       // Keep failure soft to avoid interrupting editing flow
       setContent((prev) => prev); // no-op, preserve any local edits
       errorLog("Editor load failed:", e);
+      alert(`Failed to load file: ${(e as Error).message}`);
     } finally {
       setLoading(false);
     }
@@ -176,6 +205,7 @@ export default function MiniEditor({
   function toggleDecryptedView() {
     // Only meaningful if SOPS is on (persisted on disk or chosen to be on for save)
     if (!(isSopsPersisted || sopsOnSave)) {
+      alert("This file is not encrypted with SOPS. Enable SOPS to encrypt it.");
       return;
     }
     setDecryptedView((v) => !v);
@@ -190,6 +220,18 @@ export default function MiniEditor({
   // Fullscreen helpers
   function toggleFullscreen() {
     setFullscreen((f) => !f);
+  }
+  
+  // Convert tabs to spaces
+  function convertTabsToSpaces() {
+    const converted = content.replace(/\t/g, '  '); // Replace tabs with 2 spaces
+    setContent(converted);
+  }
+  
+  // Convert Windows line endings to Unix
+  function convertToUnixLineEndings() {
+    const converted = content.replace(/\r\n/g, '\n'); // Replace CRLF with LF
+    setContent(converted);
   }
 
   return (
@@ -243,13 +285,49 @@ export default function MiniEditor({
       </CardHeader>
 
       <CardContent className="flex-1 min-h-0 flex flex-col gap-3">
-        <div className="flex gap-2 shrink-0">
-          <Input
-            value={path}
-            onChange={(e) => setPath(e.target.value)}
-            placeholder="docker-compose/host/stack/docker-compose.yaml"
-            className="flex-1"
-          />
+        <div className="flex flex-col gap-2 shrink-0">
+          <div className="flex gap-2">
+            <Input
+              value={path}
+              onChange={(e) => setPath(e.target.value)}
+              placeholder="docker-compose/host/stack/docker-compose.yaml"
+              className="flex-1"
+            />
+          </div>
+          
+          {hasTabs && (
+            <div className="flex items-center gap-2 p-2 bg-yellow-900/30 border border-yellow-700 rounded text-sm">
+              <AlertTriangle className="h-4 w-4 text-yellow-500 shrink-0" />
+              <span className="text-yellow-200 flex-1">
+                This file contains tab characters which may cause YAML/SOPS issues. Tabs are shown as → in the editor.
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 border-yellow-700 text-yellow-200"
+                onClick={convertTabsToSpaces}
+              >
+                Convert to Spaces
+              </Button>
+            </div>
+          )}
+          
+          {hasWindowsLineEndings && (
+            <div className="flex items-center gap-2 p-2 bg-orange-900/30 border border-orange-700 rounded text-sm">
+              <AlertTriangle className="h-4 w-4 text-orange-500 shrink-0" />
+              <span className="text-orange-200 flex-1">
+                This file contains Windows line endings (CRLF) which may cause issues on Linux systems.
+              </span>
+              <Button
+                size="sm"
+                variant="outline"
+                className="h-7 px-2 border-orange-700 text-orange-200"
+                onClick={convertToUnixLineEndings}
+              >
+                Convert to Unix (LF)
+              </Button>
+            </div>
+          )}
         </div>
 
         <div className="flex-1 min-h-0 rounded border border-slate-800 overflow-hidden">
@@ -259,6 +337,13 @@ export default function MiniEditor({
             onChange={(val) => setContent(val ?? "")}
             language={language}
             theme="vs-dark"
+            onMount={(editor, monaco) => {
+              // Force Unix line endings on the model
+              const model = editor.getModel();
+              if (model) {
+                model.setEOL(monaco.editor.EndOfLineSequence.LF);
+              }
+            }}
             options={{
               lineNumbers: "on",
               wordWrap: "on",
@@ -266,8 +351,16 @@ export default function MiniEditor({
               fontSize: 13,
               scrollBeyondLastLine: false,
               tabSize: 2,
-              renderWhitespace: "selection",
+              insertSpaces: true, // Always use spaces instead of tabs
+              detectIndentation: false, // Don't auto-detect, always use our settings
+              renderWhitespace: "all", // Show ALL whitespace characters
+              renderControlCharacters: true, // Show control characters
+              renderIndentGuides: true, // Show indent guides
+              renderLineHighlight: "all", // Highlight current line
+              showUnused: true, // Show unused code
               readOnly: loading,
+              // Force Unix line endings
+              "files.eol": "\n",
             }}
             height="100%"
           />

@@ -86,10 +86,10 @@ func main() {
 	infoLog("DDUI starting with log level: %s", currentLevel)
 	debugLog("Debug logging is enabled")
 
-	// TODO: Initialize auth - InitAuthFromEnv() needs to be implemented
-	// if err := InitAuthFromEnv(); err != nil {
-	//	fatalLog("OIDC setup failed: %v", err)
-	// }
+	// Initialize auth from environment
+	if err := InitAuthFromEnv(); err != nil {
+		fatalLog("OIDC setup failed: %v", err)
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

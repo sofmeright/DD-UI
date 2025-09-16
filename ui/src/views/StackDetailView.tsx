@@ -8,6 +8,7 @@ import { ArrowLeft, ChevronRight, Eye, EyeOff, RefreshCw, Trash2, Rocket, Square
 import Fact from "@/components/Fact";
 import MiniEditor from "@/editors/MiniEditor";
 import StatePill from "@/components/StatePill";
+import ConfirmDialog from "@/components/ConfirmDialog";
 import { ApiContainer, Host, IacFileMeta, InspectOut } from "@/types";
 import { formatDT } from "@/utils/format";
 import { debugLog, errorLog, warnLog } from "@/utils/logging";
@@ -120,36 +121,53 @@ function LabelRow({ k, v, index }: { k: string; v: string; index: number }) {
   );
 }
 
-function PortsBlock({ ports }: { ports?: InspectOut["ports"] }) {
+function PortsBlock({ ports }: { ports?: any[] }) {
   const list = ports || [];
   if (!list.length) return <div className="text-sm text-slate-500">No port bindings.</div>;
   return (
     <div className="space-y-1 text-sm">
-      {list.map((p, i) => (
-        <div key={i} className="text-slate-300">
-          {(p.published ? p.published + " → " : "")}
-          {p.target}
-          {p.protocol ? "/" + p.protocol : ""}
-        </div>
-      ))}
+      {list.map((p: any, i) => {
+        // Handle both formats: backend sends {PublicPort, PrivatePort, Type, IP}
+        // or frontend format {published, target, protocol}
+        const published = p.PublicPort || p.published || "";
+        const target = p.PrivatePort || p.target || "";
+        const protocol = p.Type || p.protocol || "tcp";
+        const ip = p.IP || "";
+        
+        return (
+          <div key={i} className="text-slate-300">
+            {ip && ip !== "0.0.0.0" && ip !== "::" ? `${ip}:` : ""}
+            {published && published !== 0 ? `${published} → ` : ""}
+            {target}
+            {protocol ? `/${protocol}` : ""}
+          </div>
+        );
+      })}
     </div>
   );
 }
 
-function VolsBlock({ vols }: { vols?: InspectOut["volumes"] }) {
-  const list = vols || [];
+function VolsBlock({ vols, mounts }: { vols?: InspectOut["volumes"]; mounts?: any[] }) {
+  // Use mounts if available (from backend), otherwise fall back to volumes
+  const list = mounts || vols || [];
   if (!list.length) return <div className="text-sm text-slate-500">No mounts.</div>;
   return (
     <div className="space-y-1">
-      {list.map((m, i) => {
+      {list.map((m: any, i) => {
         const zebra = i % 2 === 0 ? "bg-slate-900/30" : "bg-slate-900/10";
+        // Handle both formats: {Source, Destination} from Docker and {source, target} from frontend
+        const source = m.Source || m.source || "";
+        const target = m.Destination || m.target || "";
+        const mode = m.Mode || m.mode || "";
+        const rw = m.RW !== undefined ? m.RW : m.rw;
+        
         return (
           <div key={i} className={`grid grid-cols-3 gap-3 items-center px-2 py-1.5 rounded ${zebra}`}>
-            <div className="text-slate-300 text-sm font-mono truncate" title={m.source}>{m.source}</div>
+            <div className="text-slate-300 text-sm font-mono truncate" title={source}>{source}</div>
             <div className="text-slate-400 text-sm text-center">mapped →</div>
-            <div className="text-slate-300 text-sm font-mono truncate" title={m.target}>
-              {m.target}
-              {m.mode ? ` (${m.mode}${m.rw === false ? ", ro" : ""})` : (m.rw === false ? " (ro)" : "")}
+            <div className="text-slate-300 text-sm font-mono truncate" title={target}>
+              {target}
+              {mode ? ` (${mode}${rw === false ? ", ro" : ""})` : (rw === false ? " (ro)" : "")}
             </div>
           </div>
         );
@@ -161,23 +179,13 @@ function VolsBlock({ vols }: { vols?: InspectOut["volumes"] }) {
 type NetRow = { name: string; ip?: string; gateway?: string; mac?: string };
 
 function normalizeNetworks(c: InspectOut): NetRow[] {
-  const anyC: any = c as any;
-
-  // Preferred shapes
-  if (Array.isArray(anyC.networks_detail)) {
-    return anyC.networks_detail.map((n: any) => ({
-      name: n.name ?? "",
-      ip: n.ip ?? n.ip_address ?? n.ipv4 ?? "",
-      gateway: n.gateway ?? "",
-      mac: n.mac ?? n.mac_address ?? "",
-    }));
-  }
-  if (anyC.networks_map && typeof anyC.networks_map === "object") {
-    return Object.entries(anyC.networks_map).map(([name, n]: any) => ({
+  // Check if networks is a map (from backend ContainerRow)
+  if (c.networks && typeof c.networks === "object" && !Array.isArray(c.networks)) {
+    return Object.entries(c.networks).map(([name, n]: [string, any]) => ({
       name,
-      ip: n?.ip ?? n?.ip_address ?? n?.IPAddress ?? "",
-      gateway: n?.gateway ?? n?.Gateway ?? "",
-      mac: n?.mac ?? n?.mac_address ?? n?.MacAddress ?? "",
+      ip: n?.IPAddress ?? n?.ip_address ?? n?.ip ?? "",
+      gateway: n?.Gateway ?? n?.gateway ?? "",
+      mac: n?.MacAddress ?? n?.mac_address ?? n?.mac ?? "",
     }));
   }
 
@@ -185,6 +193,7 @@ function normalizeNetworks(c: InspectOut): NetRow[] {
   if (Array.isArray(c.networks)) {
     return (c.networks as string[]).map((name) => ({ name }));
   }
+  
   return [];
 }
 
@@ -225,11 +234,16 @@ function ContainerCard({
 }) {
   const [revealEnvAll, setRevealEnvAll] = useState(false);
 
-  const envEntries = Object.entries(c.env || {});
+  // Parse environment variables from array of "KEY=VALUE" strings
+  const envEntries = (c.env || []).map((envStr: string) => {
+    const idx = envStr.indexOf('=');
+    if (idx === -1) return [envStr, ''];
+    return [envStr.substring(0, idx), envStr.substring(idx + 1)];
+  });
   const labelEntries = Object.entries(c.labels || {}).sort(([a], [b]) => a.localeCompare(b));
   const envCount = envEntries.length;
   const labelCount = labelEntries.length;
-  const volCount = (c.volumes || []).length;
+  const volCount = (c.mounts || c.volumes || []).length;
   const netsCount = normalizeNetworks(c).length;
 
   const statusText = (c as any).state || (c as any).status || "unknown";
@@ -258,44 +272,63 @@ function ContainerCard({
       <CollapsibleSection title="General" defaultOpen={false}>
         <div className="space-y-1">
           <RowShell index={0}>
-            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Created</div>
-            <div className="col-span-9 text-slate-300 text-sm">
-              {(c as any).created || (c as any).created_at
-                ? formatDT((c as any).created || (c as any).created_at)
-                : "—"}
+            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">ID</div>
+            <div className="col-span-9 text-slate-300 text-sm font-mono truncate" title={c.id || (c as any).container_id || ""}>
+              {c.id || (c as any).container_id || "—"}
             </div>
           </RowShell>
           <RowShell index={1}>
-            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Start time</div>
+            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Created</div>
             <div className="col-span-9 text-slate-300 text-sm">
-              {(c as any).started || (c as any).started_at || (c as any).start_time
-                ? formatDT((c as any).started || (c as any).started_at || (c as any).start_time)
+              {(c as any).created || (c as any).created_ts || (c as any).created_at
+                ? formatDT((c as any).created || (c as any).created_ts || (c as any).created_at)
                 : "—"}
             </div>
           </RowShell>
+          <RowShell index={2}>
+            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Status</div>
+            <div className="col-span-9 text-slate-300 text-sm">
+              {(c as any).status || "—"}
+            </div>
+          </RowShell>
           <RowShell index={3}>
+            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">IP Address</div>
+            <div className="col-span-9 text-slate-300 text-sm font-mono">
+              {(c as any).ip_addr || "—"}
+            </div>
+          </RowShell>
+          <RowShell index={4}>
+            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Owner</div>
+            <div className="col-span-9 text-slate-300 text-sm">
+              {(c as any).owner || "—"}
+            </div>
+          </RowShell>
+          <RowShell index={5}>
+            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Compose Project</div>
+            <div className="col-span-9 text-slate-300 text-sm">
+              {(c as any).compose_project || "—"}
+            </div>
+          </RowShell>
+          <RowShell index={6}>
+            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Compose Service</div>
+            <div className="col-span-9 text-slate-300 text-sm">
+              {(c as any).compose_service || "—"}
+            </div>
+          </RowShell>
+          <RowShell index={7}>
             <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Restart policy</div>
             <div className="col-span-9 text-slate-300 text-sm">{c.restart_policy || "—"}</div>
           </RowShell>
-          <RowShell index={4}>
+          <RowShell index={8}>
             <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">CMD</div>
             <div className="col-span-9">
               <ValueBox value={(c.cmd || []).join(" ") || "—"} />
             </div>
           </RowShell>
-          <RowShell index={5}>
+          <RowShell index={9}>
             <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">ENTRYPOINT</div>
             <div className="col-span-9">
               <ValueBox value={(c.entrypoint || []).join(" ") || "—"} />
-            </div>
-          </RowShell>
-          <RowShell index={6}>
-            <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">ID</div>
-            <div
-              className="col-span-9 text-slate-300 text-sm font-mono truncate"
-              title={(c as any).id || (c as any).container_id || ""}
-            >
-              {(c as any).id || (c as any).container_id || "—"}
             </div>
           </RowShell>
         </div>
@@ -353,7 +386,7 @@ function ContainerCard({
 
       {/* Volumes */}
       <CollapsibleSection title="Volumes" count={volCount}>
-        <VolsBlock vols={c.volumes} />
+        <VolsBlock vols={c.volumes} mounts={c.mounts} />
       </CollapsibleSection>
     </div>
   );
@@ -379,6 +412,21 @@ export default function StackDetailView({
   const watchTimer = useRef<number | null>(null);
   const watchUntil = useRef<number>(0);
   const preDeployContainerCount = useRef<number>(0);
+
+  // Confirmation dialog state
+  const [confirmDialog, setConfirmDialog] = useState<{
+    isOpen: boolean;
+    title: string;
+    message: string;
+    variant: 'info' | 'warning' | 'danger' | 'success';
+    onConfirm: () => void;
+  }>({
+    isOpen: false,
+    title: '',
+    message: '',
+    variant: 'info',
+    onConfirm: () => {},
+  });
 
   useEffect(() => { setAutoDevOps(false); }, [stackName]);
 
@@ -534,7 +582,7 @@ export default function StackDetailView({
     let cancel = false;
     (async () => {
       try {
-        const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/enhanced`, { credentials: "include" });
+        const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}`, { credentials: "include" });
         if (!r.ok) { setAutoDevOps(false); return; }
         const j = await r.json();
         
@@ -649,41 +697,13 @@ export default function StackDetailView({
     };
   }, []);
 
-  async function deployNow() {
+  async function deployNow(forceDeployment: boolean = false) {
     if (files.length === 0) { alert("This stack has no files to deploy. Add a compose file or scripts first."); return; }
     
     setDeploying(true);
     setDeployResult(null);
     
     try {
-      // First check if configuration has changed
-      debugLog(`Checking if configuration has changed for stack: ${host.name}/${stackName}`);
-      let forceDeployment = false;
-      
-      const checkResponse = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}/deploy-check`, {
-        method: "POST",
-        credentials: "include"
-      });
-      
-      if (checkResponse.ok) {
-        const checkData = await checkResponse.json();
-        if (checkData.config_unchanged) {
-          // Configuration unchanged - ask user for confirmation
-          const shouldContinue = window.confirm(
-            `Configuration unchanged since ${checkData.last_deploy_time}.\n\nLast deployment: ${checkData.last_deploy_status}\n\nDeploy anyway?`
-          );
-          
-          if (!shouldContinue) {
-            setDeployResult({ success: false, message: "⏭️ Deployment cancelled by user" });
-            setDeploying(false);
-            return;
-          }
-          
-          // User confirmed, so force the deployment
-          forceDeployment = true;
-        }
-      }
-      
       // Start streaming deployment
       setDeployResult({ success: true, message: "⏳ Starting deployment..." });
       
@@ -750,9 +770,34 @@ export default function StackDetailView({
                     deploymentError = true;
                     return; // Exit the loop on error
                   case 'config_unchanged':
-                    // This shouldn't happen since we check above, but handle it gracefully
-                    setDeployResult({ success: false, message: `⏭️ ${eventData.message}` });
-                    deploymentError = true;
+                    // Configuration unchanged - show confirmation dialog
+                    reader.releaseLock(); // Release the reader before showing dialog
+                    setDeploying(false);
+                    
+                    // Parse the additional data from the event (fields are directly on eventData, not nested)
+                    const lastDeployTime = eventData.last_deploy_time ? 
+                      new Date(eventData.last_deploy_time).toLocaleString('en-US', {
+                        month: 'short',
+                        day: 'numeric',
+                        year: 'numeric',
+                        hour: 'numeric',
+                        minute: '2-digit',
+                        hour12: true
+                      }) : 
+                      'unknown';
+                    const lastDeployStatus = eventData.last_deploy_status || 'unknown';
+                    
+                    setConfirmDialog({
+                      isOpen: true,
+                      title: 'Configuration Unchanged',
+                      message: `Configuration unchanged since:\n${lastDeployTime}\n\nLast deployment status: ${lastDeployStatus}\n\nDeploy anyway?`,
+                      variant: 'warning',
+                      onConfirm: async () => {
+                        setConfirmDialog(prev => ({ ...prev, isOpen: false }));
+                        // Retry deployment with force flag
+                        await deployNow(true);
+                      },
+                    });
                     return;
                   default:
                     debugLog('Unknown stream event type:', eventData.type);
@@ -927,7 +972,7 @@ export default function StackDetailView({
                   {/* Deploy sits to the right of New Script (and Delete IaC) */}
                   {hasContent && (
                     <Button
-                      onClick={deployNow}
+                      onClick={() => deployNow()}
                       disabled={deploying}
                       size="sm"
                       className="bg-emerald-800 hover:bg-emerald-900 text-white"
@@ -1012,6 +1057,22 @@ export default function StackDetailView({
           </CardContent>
         </Card>
       )}
+
+      {/* Confirmation Dialog */}
+      <ConfirmDialog
+        isOpen={confirmDialog.isOpen}
+        title={confirmDialog.title}
+        message={confirmDialog.message}
+        variant={confirmDialog.variant}
+        confirmText="Yes, Deploy"
+        cancelText="Cancel"
+        onConfirm={confirmDialog.onConfirm}
+        onCancel={() => {
+          setConfirmDialog(prev => ({ ...prev, isOpen: false }));
+          setDeployResult({ success: false, message: "⏭️ Deployment cancelled by user" });
+          setDeploying(false);
+        }}
+      />
     </div>
   );
 }

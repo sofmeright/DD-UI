@@ -142,8 +142,22 @@ func DeployStack(ctx context.Context, stackID int64) error {
 	}
 	args = append(args, "up", "-d", "--remove-orphans")
 
+	// Create a minimal environment to prevent host environment leakage
+	// Docker Compose should only use env vars from .env files in the staged directory
+	dockerEnv := []string{
+		"PATH=" + os.Getenv("PATH"),  // Need PATH to find docker/sops commands
+		"HOME=" + os.Getenv("HOME"),  // Docker may need HOME for config
+	}
+	
+	// Add SOPS variables if they exist (needed for decryption of env files)
+	if sopsAge := os.Getenv("SOPS_AGE_KEY"); sopsAge != "" {
+		dockerEnv = append(dockerEnv, "SOPS_AGE_KEY="+sopsAge)
+	}
+	if sopsAgeFile := os.Getenv("SOPS_AGE_KEY_FILE"); sopsAgeFile != "" {
+		dockerEnv = append(dockerEnv, "SOPS_AGE_KEY_FILE="+sopsAgeFile)
+	}
+	
 	// Get the host info to set up proper Docker connection
-	var dockerEnv []string
 	if host, herr := getHostForStack(ctx, stackID); herr == nil {
 		dockerURL, _ := DockerURLFor(host)
 		
@@ -153,11 +167,12 @@ func DeployStack(ctx context.Context, stackID int64) error {
 			return err
 		}
 		
-		dockerEnv = append(os.Environ(), "DOCKER_HOST="+dockerURL)
-		common.DebugLog("deploy: using Docker host %s for stack %d", dockerURL, stackID)
+		dockerEnv = append(dockerEnv, "DOCKER_HOST="+dockerURL)
+		common.DebugLog("deploy: using Docker host %s for stack %d with minimal env (no host leakage)", dockerURL, stackID)
 	} else {
 		common.ErrorLog("deploy: failed to get host for stack %d, using default Docker connection: %v", stackID, herr)
-		dockerEnv = os.Environ()
+		// Still use minimal environment even for default connection
+		common.DebugLog("deploy: using default Docker connection with minimal env (no host leakage)")
 	}
 
 	cmd := exec.CommandContext(ctx, "docker", args...)
@@ -183,7 +198,10 @@ func DeployStack(ctx context.Context, stackID int64) error {
 		if host, herr := getHostForStack(ctx, stackID); herr == nil {
 			dockerURL, sshCmd := DockerURLFor(host)
 			if dcli, done, derr := DockerClientForURL(ctx, dockerURL, sshCmd); derr == nil {
-				if cerr := utils.OnSuccessfulDeploymentWithDeps(ctx, common.DB, &funcStackStager{stageFunc: StageStackForCompose}, stackID, rawProjectName, dcli); cerr != nil {
+				stageFunc := func(ctx context.Context, stackID int64) (string, []string, func(), error) {
+					return StageStackForCompose(ctx, stackID)
+				}
+				if cerr := utils.OnSuccessfulDeploymentWithDeps(ctx, common.DB, &funcStackStager{stageFunc: stageFunc}, stackID, rawProjectName, dcli); cerr != nil {
 					common.ErrorLog("deploy: failed to update drift cache: %v", cerr)
 				}
 				if done != nil {
@@ -356,8 +374,22 @@ func DeployStackWithStream(ctx context.Context, stackID int64, eventChannel chan
 	}
 	args = append(args, "up", "-d", "--remove-orphans")
 
+	// Create a minimal environment to prevent host environment leakage
+	// Docker Compose should only use env vars from .env files in the staged directory
+	dockerEnv := []string{
+		"PATH=" + os.Getenv("PATH"),  // Need PATH to find docker/sops commands
+		"HOME=" + os.Getenv("HOME"),  // Docker may need HOME for config
+	}
+	
+	// Add SOPS variables if they exist (needed for decryption of env files)
+	if sopsAge := os.Getenv("SOPS_AGE_KEY"); sopsAge != "" {
+		dockerEnv = append(dockerEnv, "SOPS_AGE_KEY="+sopsAge)
+	}
+	if sopsAgeFile := os.Getenv("SOPS_AGE_KEY_FILE"); sopsAgeFile != "" {
+		dockerEnv = append(dockerEnv, "SOPS_AGE_KEY_FILE="+sopsAgeFile)
+	}
+	
 	// Get the host info to set up proper Docker connection
-	var dockerEnv []string
 	if host, herr := getHostForStack(ctx, stackID); herr == nil {
 		dockerURL, _ := DockerURLFor(host)
 		
@@ -368,13 +400,13 @@ func DeployStackWithStream(ctx context.Context, stackID int64, eventChannel chan
 			return err
 		}
 		
-		dockerEnv = append(os.Environ(), "DOCKER_HOST="+dockerURL)
-		common.DebugLog("deploy: using Docker host %s for stack %d", dockerURL, stackID)
-		sendEvent("info", fmt.Sprintf("Using Docker host: %s", dockerURL), nil)
+		dockerEnv = append(dockerEnv, "DOCKER_HOST="+dockerURL)
+		common.DebugLog("deploy: using Docker host %s for stack %d with minimal env (no host leakage)", dockerURL, stackID)
+		sendEvent("info", fmt.Sprintf("Using Docker host: %s (isolated environment)", dockerURL), nil)
 	} else {
 		common.ErrorLog("deploy: failed to get host for stack %d, using default Docker connection: %v", stackID, herr)
-		dockerEnv = os.Environ()
-		sendEvent("info", "Using default Docker connection", nil)
+		// Still use minimal environment even for default connection
+		sendEvent("info", "Using default Docker connection (isolated environment)", nil)
 	}
 
 	sendEvent("info", fmt.Sprintf("Running: docker %s", strings.Join(args, " ")), nil)
@@ -453,7 +485,10 @@ func DeployStackWithStream(ctx context.Context, stackID int64, eventChannel chan
 		if host, herr := getHostForStack(ctx, stackID); herr == nil {
 			dockerURL, sshCmd := DockerURLFor(host)
 			if dcli, done, derr := DockerClientForURL(ctx, dockerURL, sshCmd); derr == nil {
-				if cerr := utils.OnSuccessfulDeploymentWithDeps(ctx, common.DB, &funcStackStager{stageFunc: StageStackForCompose}, stackID, rawProjectName, dcli); cerr != nil {
+				stageFunc := func(ctx context.Context, stackID int64) (string, []string, func(), error) {
+					return StageStackForCompose(ctx, stackID)
+				}
+				if cerr := utils.OnSuccessfulDeploymentWithDeps(ctx, common.DB, &funcStackStager{stageFunc: stageFunc}, stackID, rawProjectName, dcli); cerr != nil {
 					common.ErrorLog("deploy: failed to update drift cache: %v", cerr)
 				}
 				if done != nil {

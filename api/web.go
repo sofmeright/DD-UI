@@ -22,131 +22,6 @@ import (
 	"dd-ui/services"
 )
 
-// CommentInfo stores information about comments and their positions in dotenv files
-type CommentInfo struct {
-	LineNumber int    `json:"lineNumber"`
-	Content    string `json:"content"`
-}
-
-// DotenvComments stores all comment metadata for a dotenv file
-type DotenvComments struct {
-	Comments []CommentInfo `json:"comments"`
-}
-
-// parseDotenvWithComments extracts comments and their positions, returns cleaned content for SOPS
-func parseDotenvWithComments(content string) (cleanedContent string, comments DotenvComments) {
-	common.DebugLog("SOPS: parseDotenvWithComments called with %d bytes", len(content))
-	
-	// Normalize line endings: convert \r\n to \n and remove standalone \r
-	normalizedContent := strings.ReplaceAll(content, "\r\n", "\n")
-	normalizedContent = strings.ReplaceAll(normalizedContent, "\r", "\n")
-	
-	lines := strings.Split(normalizedContent, "\n")
-	var cleanedLines []string
-	var commentInfos []CommentInfo
-	
-	for i, line := range lines {
-		trimmed := strings.TrimSpace(line)
-		
-		// Track comments and their line numbers (but skip purely empty lines)
-		if strings.HasPrefix(trimmed, "#") {
-			commentInfos = append(commentInfos, CommentInfo{
-				LineNumber: i,
-				Content:    line, // preserve original spacing
-			})
-			continue
-		}
-		
-		// Skip empty lines entirely - don't preserve them as comments
-		if trimmed == "" {
-			continue
-		}
-		
-		// Keep lines that look like KEY=VALUE
-		if strings.Contains(trimmed, "=") {
-			cleanedLines = append(cleanedLines, line)
-		} else {
-			// Treat malformed lines as comments too
-			commentInfos = append(commentInfos, CommentInfo{
-				LineNumber: i,
-				Content:    line,
-			})
-		}
-	}
-	
-	// Check if original content ended with a newline to preserve that behavior
-	cleanedContent = strings.Join(cleanedLines, "\n")
-	if strings.HasSuffix(normalizedContent, "\n") && !strings.HasSuffix(cleanedContent, "\n") {
-		cleanedContent += "\n"
-	}
-	
-	common.DebugLog("SOPS: parseDotenvWithComments returning - original had trailing newline: %v, output has trailing newline: %v", 
-		strings.HasSuffix(normalizedContent, "\n"), strings.HasSuffix(cleanedContent, "\n"))
-		
-	return cleanedContent, DotenvComments{Comments: commentInfos}
-}
-
-// reconstructDotenvWithComments merges decrypted content with preserved comments
-func reconstructDotenvWithComments(cleanContent string, comments DotenvComments) string {
-	if len(comments.Comments) == 0 {
-		return cleanContent
-	}
-	
-	// Normalize line endings in clean content too
-	normalizedClean := strings.ReplaceAll(cleanContent, "\r\n", "\n")
-	normalizedClean = strings.ReplaceAll(normalizedClean, "\r", "\n")
-	
-	// Check if original clean content ended with a newline
-	endsWithNewline := strings.HasSuffix(normalizedClean, "\n")
-	
-	cleanLines := strings.Split(strings.TrimSuffix(normalizedClean, "\n"), "\n")
-	var result []string
-	
-	// Create a map of line numbers to comments for quick lookup
-	commentMap := make(map[int]string)
-	for _, comment := range comments.Comments {
-		commentMap[comment.LineNumber] = comment.Content
-	}
-	
-	// Find the maximum line number to determine final size
-	maxLine := 0
-	for lineNum := range commentMap {
-		if lineNum > maxLine {
-			maxLine = lineNum
-		}
-	}
-	
-	// Reconstruct the file line by line
-	cleanIndex := 0
-	for i := 0; i <= maxLine; i++ {
-		if commentContent, isComment := commentMap[i]; isComment {
-			result = append(result, commentContent)
-		} else if cleanIndex < len(cleanLines) && cleanLines[cleanIndex] != "" {
-			// Only add non-empty clean lines to avoid duplicating empty lines
-			result = append(result, cleanLines[cleanIndex])
-			cleanIndex++
-		} else if cleanIndex < len(cleanLines) {
-			// Skip empty clean lines since they should be represented as comments
-			cleanIndex++
-		}
-	}
-	
-	// Add any remaining clean lines
-	for cleanIndex < len(cleanLines) {
-		if cleanLines[cleanIndex] != "" || cleanIndex == len(cleanLines)-1 {
-			result = append(result, cleanLines[cleanIndex])
-		}
-		cleanIndex++
-	}
-	
-	// Join and preserve original trailing newline behavior
-	reconstructed := strings.Join(result, "\n")
-	if endsWithNewline && !strings.HasSuffix(reconstructed, "\n") {
-		reconstructed += "\n"
-	}
-	
-	return reconstructed
-}
 
 // normalizeFileContent normalizes line endings and handles trailing newlines consistently
 func normalizeFileContent(content string) string {
@@ -299,12 +174,12 @@ func makeRouter() http.Handler {
 	})
 
 	// -------- Auth endpoints (must come BEFORE SPA fallback)
-	// TODO: Implement auth handlers
-	// r.Get("/login", LoginHandler)
-	// r.Get("/auth/login", LoginHandler) // alias
-	// r.Get("/auth/callback", CallbackHandler)
-	// r.Post("/logout", LogoutHandler)
-	// r.Post("/auth/logout", LogoutHandler) // alias
+	r.Get("/login", LoginHandler)
+	r.Get("/auth/login", LoginHandler) // alias
+	r.Get("/auth/callback", CallbackHandler)
+	r.Post("/logout", LogoutHandler)
+	r.Post("/auth/logout", LogoutHandler) // alias
+	r.Get("/api/session", SessionHandler) // Session status endpoint
 
 	// -------- Static SPA (Vite)
 	uiRoot := common.Env("DD_UI_UI_DIR", "/app/ui/dist")

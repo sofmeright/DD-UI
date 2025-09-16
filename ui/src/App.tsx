@@ -38,7 +38,7 @@ export default function App() {
     if (/^\/hosts\/[^/]+\/images/.test(path)) return "images";
     if (/^\/hosts\/[^/]+\/networks/.test(path)) return "networks";
     if (/^\/hosts\/[^/]+\/volumes/.test(path)) return "volumes";
-    if (path === "/cleanup") return "cleanup";
+    if (path === "/cleanup" || /^\/hosts\/[^/]+\/cleanup/.test(path)) return "cleanup";
     return "hosts";
   };
 
@@ -260,7 +260,11 @@ export default function App() {
           if (h) navigate(`/hosts/${encodeURIComponent(h)}/volumes`);
           else navigate('/hosts');
         }}
-        onGoCleanup={() => navigate('/cleanup')}
+        onGoCleanup={() => {
+          const h = getBestHost();
+          if (h) navigate(`/hosts/${encodeURIComponent(h)}/cleanup`);
+          else navigate('/cleanup');
+        }}
       />
 
       {/* Right side: layout unchanged */}
@@ -289,8 +293,9 @@ export default function App() {
             <Route path="/hosts/:hostName/stacks/:stackName" element={<StackDetailPage />} />
             <Route path="/groups" element={<GroupsView hosts={hosts} />} />
             
-            {/* Cleanup route */}
+            {/* Cleanup routes */}
             <Route path="/cleanup" element={<CleanupView hosts={hosts} loading={loading} />} />
+            <Route path="/hosts/:hostName/cleanup" element={<CleanupView hosts={hosts} loading={loading} />} />
             
             {/* Resource routes */}
             <Route path="/hosts/:hostName/images" element={<HostImagesPage />} />

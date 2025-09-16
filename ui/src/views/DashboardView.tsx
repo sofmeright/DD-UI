@@ -77,9 +77,9 @@ export default function DashboardView({ hosts }: { hosts: Host[] }) {
       <div className="flex items-center justify-center min-h-[300px]">
         <div className="text-center space-y-4 max-w-3xl">
           <div className="text-4xl">🚀</div>
-          <div className="text-2xl font-semibold text-white">Welcome to DDUI!</div>
+          <div className="text-2xl font-semibold text-white">Welcome to DD-UI!</div>
           <div className="text-slate-300 leading-relaxed">
-            DDUI is a project that desires to bring the spirit of GitOps and projects like ArgoCD & FluxCD to Docker. 
+            DD-UI is a project that desires to bring the spirit of GitOps and projects like ArgoCD & FluxCD to Docker. 
           </div>
           <div className="text-slate-400 leading-relaxed">
             We feature an automated adoption process that helps any user who is comfortable with docker compose to implement 

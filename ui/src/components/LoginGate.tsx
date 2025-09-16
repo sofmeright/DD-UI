@@ -10,7 +10,7 @@ export default function LoginGate() {
         <CardHeader>
           <CardTitle className="flex items-center gap-2">
             <span className="font-black uppercase tracking-tight leading-none text-slate-200 select-none">
-              <span className="bg-clip-text text-transparent bg-gradient-to-r from-brand to-sky-400">DDUI</span>
+              <span className="bg-clip-text text-transparent bg-gradient-to-r from-brand to-sky-400">DD-UI</span>
             </span>
             <Badge variant="outline">Community</Badge>
           </CardTitle>

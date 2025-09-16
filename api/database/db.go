@@ -1,0 +1,240 @@
+// src/DB.go
+package database
+
+import (
+	"context"
+	"embed"
+	"fmt"
+	"io/fs"
+    "net/url"
+	"os" 
+	"sort"
+	"strconv"
+	"strings"
+	"time"
+
+	"dd-ui/common"
+	"github.com/jackc/pgx/v5/pgxpool"
+)
+
+// Exported pool for handlers.
+// DB is now in common.DB
+
+// ---- ENV helpers ----
+
+// dsnFromEnv builds a libpq keyword connection string so we don't fight URL escaping.
+func dsnFromEnv() string {
+    if s := common.Env("DD_UI_DB_DSN", ""); s != "" {
+        return s
+    }
+    host := common.Env("DD_UI_DB_HOST", "postgres")
+    port := common.Env("DD_UI_DB_PORT", "5432")
+    user := common.Env("DD_UI_DB_USER", "dd-ui")
+
+    // read from secret path if DD_UI_DB_PASS looks like "@/path"
+    passRaw := common.Env("DD_UI_DB_PASS", "")
+    pass, _ := common.ReadSecretMaybeFile(passRaw) // supports "@/path/to/secret"
+    if pass == "" {
+        // optional secondary: explicit file var
+        if pf := common.Env("DD_UI_DB_PASS_FILE", ""); pf != "" {
+            if b, err := os.ReadFile(pf); err == nil {
+                pass = strings.TrimSpace(string(b))
+            }
+        }
+    }
+
+    name := common.Env("DD_UI_DB_NAME", "dd-ui")
+    ssl := common.Env("DD_UI_DB_SSLMODE", "disable")
+
+    return fmt.Sprintf("postgres://%s:%s@%s:%s/%s?sslmode=%s",
+        url.QueryEscape(user),
+        url.QueryEscape(pass),
+        host, port, name, ssl,
+    )
+}
+
+func kv(v string) string {
+    // Single-quote and escape backslash and single quote for libpq.
+    v = strings.ReplaceAll(v, `\`, `\\`)
+    v = strings.ReplaceAll(v, `'`, `\'`)
+    return "'" + v + "'"
+}
+
+func atoiEnv(key, def string) int {
+	if v := common.Env(key, def); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			return n
+		}
+	}
+	n, _ := strconv.Atoi(def)
+	return n
+}
+
+func durEnv(key string, def time.Duration) time.Duration {
+	if v := common.Env(key, ""); v != "" {
+		if d, err := time.ParseDuration(v); err == nil {
+			return d
+		}
+	}
+	return def
+}
+
+// ---- Init / Close ----
+
+func InitDBFromEnv(ctx context.Context) error {
+	dsn := dsnFromEnv()
+	cfg, err := pgxpool.ParseConfig(dsn)
+	if err != nil {
+		return fmt.Errorf("parse dsn: %w", err)
+	}
+
+	// Pool tuning (override via env)
+	cfg.MaxConns = int32(atoiEnv("DD_UI_DB_MAX_CONNS", "20"))
+	minConns := atoiEnv("DD_UI_DB_MIN_CONNS", "2")
+	cfg.MinConns = int32(minConns)
+	cfg.MaxConnLifetime = durEnv("DD_UI_DB_CONN_MAX_LIFETIME", time.Hour)   // recycle long-lived conns
+	cfg.MaxConnIdleTime = durEnv("DD_UI_DB_CONN_MAX_IDLE", 30*time.Minute) // close idles
+	cfg.HealthCheckPeriod = durEnv("DD_UI_DB_HEALTH_PERIOD", 30*time.Second)
+
+	// Dial/connect timeout for new physical conns.
+	// (pgxpool.Config embeds a ConnConfig; ConnectTimeout is honored during new connections)
+	cfg.ConnConfig.ConnectTimeout = durEnv("DD_UI_DB_CONNECT_TIMEOUT", 5*time.Second)
+
+	// Create pool
+	pool, err := pgxpool.NewWithConfig(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("new pool: %w", err)
+	}
+
+	// Quick ping with timeout
+	pingCtx, cancel := context.WithTimeout(ctx, durEnv("DD_UI_DB_PING_TIMEOUT", 5*time.Second))
+	defer cancel()
+	if err := pool.Ping(pingCtx); err != nil {
+		pool.Close()
+		return fmt.Errorf("ping: %w", err)
+	}
+
+	common.DB = pool
+	common.InfoLog("db: connected (max=%d min=%d idle=%s lifetime=%s)",
+		cfg.MaxConns, cfg.MinConns, cfg.MaxConnIdleTime, cfg.MaxConnLifetime)
+
+	// Migrate (opt-out with DD_UI_DB_MIGRATE=false)
+	if strings.ToLower(common.Env("DD_UI_DB_MIGRATE", "true")) == "true" {
+		if err := runMigrations(ctx, common.DB); err != nil {
+			return fmt.Errorf("migrations: %w", err)
+		}
+	}
+
+	return nil
+}
+
+func CloseDB() {
+	if common.DB != nil {
+		common.DB.Close()
+	}
+}
+
+func DBReady() bool { return common.DB != nil }
+
+// ---- Migrations ----
+
+//go:embed migrations/*.sql
+var migrationsFS embed.FS
+
+// runMigrations applies any *.sql in the embedded migrations/ folder that have a
+// version prefix (e.g. 001_init.sql). It uses a DB-wide advisory lock so multiple
+// DDUI instances won't race on startup.
+func runMigrations(ctx context.Context, pool *pgxpool.Pool) error {
+	// Take a global advisory lock (arbitrary constant "DDUI")
+	const migLock int64 = 727171182
+	if _, err := pool.Exec(ctx, `select pg_advisory_lock($1)`, migLock); err != nil {
+		return fmt.Errorf("advisory_lock: %w", err)
+	}
+	defer pool.Exec(context.Background(), `select pg_advisory_unlock($1)`, migLock)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	if _, err := tx.Exec(ctx, `
+		create table if not exists schema_migrations(
+			version int primary key,
+			applied_at timestamptz not null default now()
+		)`); err != nil {
+		return err
+	}
+
+	var current int
+	if err := tx.QueryRow(ctx, `select coalesce(max(version), 0) from schema_migrations`).Scan(&current); err != nil {
+		return err
+	}
+
+	entries, err := migrationsFS.ReadDir("migrations")
+	if err != nil {
+		// If no embedded dir exists, just skip (useful in early dev)
+		if errorsIs(err, fs.ErrNotExist) {
+			common.InfoLog("db: no embedded migrations found (skipping)")
+			return tx.Commit(ctx)
+		}
+		return err
+	}
+
+	type mig struct {
+		v    int
+		name string
+	}
+	var list []mig
+	for _, e := range entries {
+		if e.IsDir() {
+			continue
+		}
+		n := e.Name()
+		if !strings.HasSuffix(n, ".sql") {
+			continue
+		}
+		base := strings.SplitN(n, "_", 2)[0]
+		v, _ := strconv.Atoi(strings.TrimLeft(base, "0"))
+		// Accept "000.sql" or "0_*.sql" as version 0 if desired
+		if v == 0 && base != "0" && base != "000" {
+			continue
+		}
+		if v > current {
+			list = append(list, mig{v: v, name: n})
+		}
+	}
+	if len(list) == 0 {
+		common.InfoLog("db: migrations up-to-date (version=%d)", current)
+		return tx.Commit(ctx)
+	}
+	sort.Slice(list, func(i, j int) bool { return list[i].v < list[j].v })
+
+	for _, m := range list {
+		sqlBytes, err := migrationsFS.ReadFile("migrations/" + m.name)
+		if err != nil {
+			return err
+		}
+		if _, err := tx.Exec(ctx, string(sqlBytes)); err != nil {
+			return fmt.Errorf("%s: %w", m.name, err)
+		}
+		if _, err := tx.Exec(ctx, `insert into schema_migrations(version) values($1)`, m.v); err != nil {
+			return err
+		}
+		common.InfoLog("db: applied migration %s", m.name)
+	}
+
+	return tx.Commit(ctx)
+}
+
+// tiny helper because we don't want to import "errors" all over if already present elsewhere
+func errorsIs(err error, target error) bool {
+	type causer interface{ Is(error) bool }
+	if err == nil {
+		return target == nil
+	}
+	if ce, ok := err.(causer); ok && ce.Is(target) {
+		return true
+	}
+	return err == target
+}

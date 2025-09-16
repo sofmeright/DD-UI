@@ -51,7 +51,7 @@ export default function LeftNav({
               Community Edition
             </Badge>
           </div>
-          <img src="/DDUI-Logo.png" alt="DD-UI" className="h-28 w-28 rounded-md" />
+          <img src="/DD-UI-Logo.png" alt="DD-UI" className="h-28 w-28 rounded-md" />
         </div>
       </div>
 

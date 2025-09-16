@@ -15,7 +15,7 @@ export default function VolumesView({ hosts }: { hosts: Host[] }) {
   // Get host from URL parameter, fallback to localStorage, then first host
   const getInitialHost = () => {
     if (urlHostName) return decodeURIComponent(urlHostName);
-    const stored = localStorage.getItem('ddui_selected_host');
+    const stored = localStorage.getItem('dd_ui_selected_host');
     if (stored && hosts.some(h => h.name === stored)) return stored;
     return hosts[0]?.name || "";
   };
@@ -29,7 +29,7 @@ export default function VolumesView({ hosts }: { hosts: Host[] }) {
   // Handle host change - update URL and localStorage
   const handleHostChange = (newHostName: string) => {
     setHostName(newHostName);
-    localStorage.setItem('ddui_selected_host', newHostName);
+    localStorage.setItem('dd_ui_selected_host', newHostName);
     navigate(`/hosts/${encodeURIComponent(newHostName)}/volumes`);
   };
 
@@ -39,7 +39,7 @@ export default function VolumesView({ hosts }: { hosts: Host[] }) {
       const decodedHost = decodeURIComponent(urlHostName);
       if (decodedHost !== hostName) {
         setHostName(decodedHost);
-        localStorage.setItem('ddui_selected_host', decodedHost);
+        localStorage.setItem('dd_ui_selected_host', decodedHost);
       }
     }
   }, [urlHostName, hostName]);

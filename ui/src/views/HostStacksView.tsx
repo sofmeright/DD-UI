@@ -86,7 +86,7 @@ export default function HostStacksView({
   onOpenStack: (stackName: string) => void;
   onHostChange: (hostName: string) => void;
 }) {
-  debugLog('[DDUI] HostStacksView component mounted for host:', host.name);
+  debugLog('[DD-UI] HostStacksView component mounted for host:', host.name);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [stacks, setStacks] = useState<MergedStack[]>([]);
@@ -231,7 +231,7 @@ export default function HostStacksView({
   async function updateContainerStatus(containerName: string, action?: string) {
     // Prevent duplicate updates for the same container
     if (pendingContainerUpdates.has(containerName)) {
-      debugLog(`[DDUI] Skipping duplicate update for ${containerName}`);
+      debugLog(`[DD-UI] Skipping duplicate update for ${containerName}`);
       return;
     }
     
@@ -262,7 +262,7 @@ export default function HostStacksView({
         });
         
         if (!response.ok) {
-          debugLog(`[DDUI] Failed to fetch container data for ${containerName} (attempt ${attempts})`);
+          debugLog(`[DD-UI] Failed to fetch container data for ${containerName} (attempt ${attempts})`);
           continue;
         }
         
@@ -271,14 +271,14 @@ export default function HostStacksView({
         const updatedContainer = updatedContainers.find(c => c.name === containerName);
         
         if (!updatedContainer) {
-          debugLog(`[DDUI] Container ${containerName} not found (attempt ${attempts})`);
+          debugLog(`[DD-UI] Container ${containerName} not found (attempt ${attempts})`);
           continue;
         }
         
         const currentState = updatedContainer.state;
         const currentStatus = updatedContainer.status || '';
         
-        debugLog(`[DDUI] Container ${containerName} polling (${attempts}/${maxAttempts}) for action '${action || 'unknown'}': ${currentState} | ${currentStatus}`);
+        debugLog(`[DD-UI] Container ${containerName} polling (${attempts}/${maxAttempts}) for action '${action || 'unknown'}': ${currentState} | ${currentStatus}`);
         
         // Always update the UI with current data
         setStacks(prevStacks => 
@@ -310,31 +310,31 @@ export default function HostStacksView({
         // 1. Final/stable states - stop immediately
         if (currentState === 'running' || currentState === 'exited' || 
             currentState === 'dead' || currentState === 'paused') {
-          debugLog(`[DDUI] Container ${containerName} reached stable state: ${currentState}`);
+          debugLog(`[DD-UI] Container ${containerName} reached stable state: ${currentState}`);
           break;
         }
         
         // 2. No state change for 3+ consecutive checks - probably stable
         if (currentState === lastState && attempts >= 8) {
-          debugLog(`[DDUI] Container ${containerName} state unchanged for multiple checks: ${currentState}`);
+          debugLog(`[DD-UI] Container ${containerName} state unchanged for multiple checks: ${currentState}`);
           break;
         }
         
         // 3. Clear transitioning states - keep polling
         if (currentState === 'restarting' || currentState === 'removing' || 
             currentStatus.toLowerCase().includes('starting')) {
-          debugLog(`[DDUI] Container ${containerName} still transitioning, continue polling...`);
+          debugLog(`[DD-UI] Container ${containerName} still transitioning, continue polling...`);
         }
         
         lastState = currentState;
       }
       
       if (attempts >= maxAttempts) {
-        debugLog(`[DDUI] Container ${containerName} polling completed after max attempts`);
+        debugLog(`[DD-UI] Container ${containerName} polling completed after max attempts`);
       }
       
     } catch (error) {
-      debugLog(`[DDUI] Container status update failed for ${containerName}:`, error);
+      debugLog(`[DD-UI] Container status update failed for ${containerName}:`, error);
     } finally {
       // Clean up immediately - the smart polling system will handle regular updates
       setPendingContainerUpdates(prev => {
@@ -346,7 +346,7 @@ export default function HostStacksView({
   }
 
   useEffect(() => {
-    debugLog('[DDUI] HostStacksView useEffect starting for host:', host.name);
+    debugLog('[DD-UI] HostStacksView useEffect starting for host:', host.name);
     let cancel = false;
     
     // Register view for polling boost
@@ -356,9 +356,9 @@ export default function HostStacksView({
           method: 'POST',
           credentials: 'include'
         });
-        debugLog('[DDUI] Registered view boost for host:', host.name);
+        debugLog('[DD-UI] Registered view boost for host:', host.name);
       } catch (e) {
-        debugLog('[DDUI] Failed to register view boost:', e);
+        debugLog('[DD-UI] Failed to register view boost:', e);
       }
     };
     
@@ -369,9 +369,9 @@ export default function HostStacksView({
           method: 'POST',
           credentials: 'include'
         });
-        debugLog('[DDUI] Unregistered view boost for host:', host.name);
+        debugLog('[DD-UI] Unregistered view boost for host:', host.name);
       } catch (e) {
-        debugLog('[DDUI] Failed to unregister view boost:', e);
+        debugLog('[DD-UI] Failed to unregister view boost:', e);
       }
     };
     
@@ -382,7 +382,7 @@ export default function HostStacksView({
       setErr(null);
       try {
         // Progressive loading: Start with container data (fastest)
-        debugLog('[DDUI] Phase 1: Loading containers for host:', host.name);
+        debugLog('[DD-UI] Phase 1: Loading containers for host:', host.name);
         const rc = await fetch(`/api/containers/hosts/${encodeURIComponent(host.name)}`, { credentials: "include" });
         
         if (rc.status === 401) {
@@ -401,11 +401,11 @@ export default function HostStacksView({
         if (!cancel && runtime.length > 0) {
           const basicStacks = createBasicStacksFromContainers(runtime);
           setStacks(basicStacks);
-          debugLog('[DDUI] Phase 1 complete: Showing', basicStacks.length, 'basic stacks');
+          debugLog('[DD-UI] Phase 1 complete: Showing', basicStacks.length, 'basic stacks');
         }
         
         // Phase 2: Load IaC data
-        debugLog('[DDUI] Phase 2: Loading IaC data for host:', host.name);
+        debugLog('[DD-UI] Phase 2: Loading IaC data for host:', host.name);
         const ri = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}`, { credentials: "include" });
         if (ri.status === 401) {
           window.location.replace("/auth/login");
@@ -431,7 +431,7 @@ export default function HostStacksView({
         }
         >();
         try {
-        debugLog('[DDUI] Fetching enhanced-iac data for host:', host.name);
+        debugLog('[DD-UI] Fetching enhanced-iac data for host:', host.name);
         const re = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/enhanced`, {
           credentials: "include",
         });
@@ -458,12 +458,12 @@ export default function HostStacksView({
               })),
             });
           }
-          debugLog('[DDUI] Phase 3: Enhanced data loaded for', items.length, 'stacks');
+          debugLog('[DD-UI] Phase 3: Enhanced data loaded for', items.length, 'stacks');
         } else {
-          warnLog('[DDUI] Enhanced-iac API failed - using basic data:', re.status, re.statusText);
+          warnLog('[DD-UI] Enhanced-iac API failed - using basic data:', re.status, re.statusText);
         }
         } catch (error) {
-        warnLog('[DDUI] Enhanced-iac API error - using basic data:', error);
+        warnLog('[DD-UI] Enhanced-iac API error - using basic data:', error);
         }
 
         // Auto DevOps information is now included in the enhanced-iac endpoint response
@@ -499,7 +499,7 @@ export default function HostStacksView({
         const names = new Set<string>([...rtByStack.keys(), ...iacByStack.keys()]);
         const merged: MergedStack[] = [];
 
-        debugLog('[DDUI] Processing', names.size, 'stacks for host:', host.name);
+        debugLog('[DD-UI] Processing', names.size, 'stacks for host:', host.name);
 
         for (const sname of Array.from(names).sort()) {
         const rcs = rtByStack.get(sname) || [];
@@ -521,7 +521,7 @@ export default function HostStacksView({
         const allRenderedServices = enhancedRenderedServices.length > 0 ? enhancedRenderedServices : basicRenderedServices;
         
         if (sname === 'it-tools') {
-          debugLog(`[DDUI] DETAILED it-tools analysis:`, {
+          debugLog(`[DD-UI] DETAILED it-tools analysis:`, {
             enhanced_data: enh,
             basic_stack_full: is,
             enhanced_rendered_services: enhancedRenderedServices,
@@ -531,7 +531,7 @@ export default function HostStacksView({
           });
         }
         
-        debugLog(`[DDUI] Processing stack: ${sname}`, {
+        debugLog(`[DD-UI] Processing stack: ${sname}`, {
           enhanced_count: enhancedRenderedServices.length,
           basic_count: basicRenderedServices.length,
           raw_count: rawSvcs.length,
@@ -547,7 +547,7 @@ export default function HostStacksView({
         if (allRenderedServices.length > 0) {
           allRenderedServices.forEach((svc, idx) => {
             const hasEncrypted = svc.image && (svc.image.includes('ENC[') || svc.image.includes('${'));
-            debugLog(`[DDUI] ${sname}/${svc.service_name}: ${hasEncrypted ? '🔒' : '✅'} ${svc.image || 'no-image'}`);
+            debugLog(`[DD-UI] ${sname}/${svc.service_name}: ${hasEncrypted ? '🔒' : '✅'} ${svc.image || 'no-image'}`);
           });
         }
         
@@ -625,7 +625,7 @@ export default function HostStacksView({
           });
 
           if (!exists) {
-            debugLog(`[DDUI] Missing service in ${sname}:`, {
+            debugLog(`[DD-UI] Missing service in ${sname}:`, {
               service_name: svc.service_name,
               container_name: svc.container_name,
               image: svc.image,
@@ -637,7 +637,7 @@ export default function HostStacksView({
             // Skip adding missing service rows if they contain encrypted values
             // This indicates we're using raw services when we should be using rendered
             if (svc.image?.includes('ENC[')) {
-              warnLog(`[DDUI] Skipping encrypted missing service ${svc.service_name} - check rendered services`);
+              warnLog(`[DD-UI] Skipping encrypted missing service ${svc.service_name} - check rendered services`);
               continue;
             }
             rows.push({
@@ -686,7 +686,7 @@ export default function HostStacksView({
 
         if (!cancel) {
           setStacks(merged);
-          debugLog('[DDUI] Loaded data for host:', host.name, 'stacks:', merged.length);
+          debugLog('[DD-UI] Loaded data for host:', host.name, 'stacks:', merged.length);
         }
       } catch (e: any) {
         if (!cancel) setErr(e?.message || "Failed to load host stacks");
@@ -710,7 +710,7 @@ export default function HostStacksView({
     
     const pollContainerData = async () => {
       try {
-        debugLog('[DDUI] Polling for container updates...');
+        debugLog('[DD-UI] Polling for container updates...');
         const response = await fetch(`/api/containers/hosts/${encodeURIComponent(host.name)}`, { 
           credentials: "include" 
         });
@@ -736,10 +736,10 @@ export default function HostStacksView({
               })
             }))
           );
-          debugLog('[DDUI] Container states updated from polling');
+          debugLog('[DD-UI] Container states updated from polling');
         }
       } catch (error) {
-        debugLog('[DDUI] Polling error:', error);
+        debugLog('[DD-UI] Polling error:', error);
       }
     };
     

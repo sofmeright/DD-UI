@@ -1,4 +1,4 @@
-// Frontend logging utility that mirrors backend DDUI_LOG_LEVEL system
+// Frontend logging utility that mirrors backend DD_UI_LOG_LEVEL system
 // Maps to the same log levels as src/api/main.go
 
 type LogLevel = "debug" | "info" | "warn" | "error" | "fatal";
@@ -13,11 +13,11 @@ const levelOrder: Record<LogLevel, number> = {
 
 function getLogLevel(): LogLevel {
   // Check runtime config first (from config.js), then build-time env vars
-  const runtimeLevel = (window as any)?.DDUI_CONFIG?.LOG_LEVEL;
+  const runtimeLevel = (window as any)?.DD_UI_CONFIG?.LOG_LEVEL;
   const level = (
     runtimeLevel ||
-    (import.meta.env.VITE_DDUI_LOG_LEVEL as string) ||
-    (import.meta.env.DDUI_LOG_LEVEL as string) ||
+    (import.meta.env.VITE_DD_UI_LOG_LEVEL as string) ||
+    (import.meta.env.DD_UI_LOG_LEVEL as string) ||
     "info"
   ).toLowerCase();
   return (levelOrder[level as LogLevel] !== undefined) ? level as LogLevel : "info";
@@ -37,11 +37,11 @@ export function debugLog(message: string, ...args: any[]): void {
 }
 
 // Always log the current log level on first import for debugging
-const runtimeConfig = (window as any)?.DDUI_CONFIG;
-console.log(`DDUI Frontend Log Level: ${getLogLevel()}`, {
+const runtimeConfig = (window as any)?.DD_UI_CONFIG;
+console.log(`DD-UI Frontend Log Level: ${getLogLevel()}`, {
   runtime_config: runtimeConfig?.LOG_LEVEL,
-  vite_env: import.meta.env.VITE_DDUI_LOG_LEVEL,
-  ddui_env: import.meta.env.DDUI_LOG_LEVEL,
+  vite_env: import.meta.env.VITE_DD_UI_LOG_LEVEL,
+  dd_ui_env: import.meta.env.DD_UI_LOG_LEVEL,
   config_generated: runtimeConfig?.GENERATED_AT
 });
 

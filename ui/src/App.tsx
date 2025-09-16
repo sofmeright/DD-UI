@@ -53,7 +53,7 @@ export default function App() {
     const urlHost = currentHostFromPath();
     if (urlHost) return urlHost;
     
-    const stored = localStorage.getItem('ddui_selected_host');
+    const stored = localStorage.getItem('dd_ui_selected_host');
     if (stored && hosts.some(h => h.name === stored)) return stored;
     
     return hosts[0]?.name || "";

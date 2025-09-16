@@ -1,4 +1,4 @@
-# === DDUI Project .gitignore ===
+# === DD-UI Project .gitignore ===
 
 # Environment and secrets
 .env
@@ -28,8 +28,8 @@ secrets/
 *.dll
 *.so
 *.dylib
-ddui
-ddui.exe
+dd-ui
+dd-ui.exe
 
 # Test binary, built with `go test -c`
 *.test

@@ -1,7 +1,7 @@
 # ============================================================================
-# DDUI Ansible Inventory Sample - Clean & Structured Format
+# DD-UI Ansible Inventory Sample - Clean & Structured Format
 # ============================================================================
-# This inventory template shows the recommended format for DDUI applications.
+# This inventory template shows the recommended format for DD-UI applications.
 # 
 # Features:
 #   - Structured tags and descriptions for hosts and groups

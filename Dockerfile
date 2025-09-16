@@ -18,24 +18,25 @@ RUN npm run build
 
 # --- Go build ---
 FROM golang:1.24-alpine AS api
-WORKDIR /src/api
-COPY src/api/go.mod ./
+WORKDIR /api
+COPY api/go.mod ./
 RUN go mod download
-COPY src/api/ .
+COPY api/ .
 ARG TARGETOS
 ARG TARGETARCH
 RUN go mod tidy
-# fallback to linux/amd64 if buildx args aren’t provided
-RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} go build -o /bin/ddui
+# fallback to linux/amd64 if buildx args aren't provided
+RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH:-amd64} \
+    go build -o /bin/dd-ui .
 
 # --- Runtime ---
 FROM debian:bookworm-slim
 
 LABEL maintainer="SoFMeRight <sofmeright@gmail.com>" \
-      org.opencontainers.image.title="DDUI (Designated Driver UI)" \
-      description="Sometimes you need someone else to take the wheel... DDUI is a declarative, security-first Docker orchestration engine. Please Docker responsibly." \
-      org.opencontainers.image.description="Sometimes you need someone else to take the wheel... DDUI is a declarative, security-first Docker orchestration engine. Please Docker responsibly." \
-      org.opencontainers.image.source="https://github.com/sofmeright/DDUI.git" \
+      org.opencontainers.image.title="DD-UI (Designated Driver UI)" \
+      description="Sometimes you need someone else to take the wheel... DD-UI is a declarative, security-first Docker orchestration engine. Please Docker responsibly." \
+      org.opencontainers.image.description="Sometimes you need someone else to take the wheel... DD-UI is a declarative, security-first Docker orchestration engine. Please Docker responsibly." \
+      org.opencontainers.image.source="https://github.com/sofmeright/DD-UI.git" \
       org.opencontainers.image.licenses="GPL-3.0"
 
 # Base deps (curl for healthcheck + downloads; ssh for DOCKER_HOST=ssh://; tzdata; ca-certs)
@@ -84,18 +85,18 @@ RUN set -eux; \
 RUN docker --version && docker compose version && sops --version
 
 WORKDIR /app
-COPY --from=api /bin/ddui /usr/local/bin/ddui
+COPY --from=api /bin/dd-ui /usr/local/bin/dd-ui
 COPY --from=ui /ui/dist ./ui/dist
 COPY entrypoint.sh /entrypoint.sh
 RUN chmod 755 /entrypoint.sh
 
 # (optional, rootless mode?)
-# RUN useradd -r -u 10001 -g root ddui
-# USER ddui
+# RUN useradd -r -u 10001 -g root dd-ui
+# USER dd-ui
 
 EXPOSE 8080
 HEALTHCHECK --interval=30s --timeout=5s --retries=3 \
   CMD curl -fsSk https://127.0.0.1:443/healthz || exit 1
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["ddui"]
+CMD ["dd-ui"]

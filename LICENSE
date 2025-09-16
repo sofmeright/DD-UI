@@ -1,8 +1,8 @@
 # License
 
 ## Short version
-- **You may use DDUI with all features for non‑commercial purposes** (home, personal, hobbyist, student, research, homelab, community groups without revenue).  
-- **Commercial use requires a commercial license** (including within a business, paid consulting/services, or hosting DDUI for others for a fee).  
+- **You may use DD-UI with all features for non‑commercial purposes** (home, personal, hobbyist, student, research, homelab, community groups without revenue).  
+- **Commercial use requires a commercial license** (including within a business, paid consulting/services, or hosting DD-UI for others for a fee).  
 - Contributions are welcome; unless otherwise agreed in writing, you license your contributions under the same terms (inbound=outbound).  
 - Trademarks and branding are not licensed.  
 - No warranty; liability is limited to the maximum extent permitted by law.  
@@ -20,8 +20,8 @@ The full text of Prosperity 3.0.0 is available from its steward. In case of any 
 
 ---
 
-## DDUI Additional Terms
-These Additional Terms clarify how Prosperity 3.0.0 applies to DDUI and make the open‑core intent explicit.
+## DD-UI Additional Terms
+These Additional Terms clarify how Prosperity 3.0.0 applies to DD-UI and make the open‑core intent explicit.
 
 1. **Full features for non‑commercial users.** All features present in the public repository are available to non‑commercial users under Prosperity 3.0.0, without artificial gating.
 2. **Commercial use.** “Commercial” includes use (i) by or on behalf of a for‑profit entity; (ii) to provide paid services/hosting to others; (iii) in exchange for money or equivalent consideration; or (iv) within any revenue‑generating product or platform. Commercial users must obtain a separate commercial license.

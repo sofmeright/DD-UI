@@ -75,9 +75,15 @@ export default function ConsoleModal({
       term.writeln(`\x1b[38;5;67m[connected]\x1b[0m  shell=${shell}`);
     };
 
-    ws.onclose = () => {
+    ws.onclose = (event) => {
       setStatus("closed");
-      term.writeln(`\r\n\x1b[38;5;203m[disconnected]\x1b[0m`);
+      // Check if it's an auth error (1008 is policy violation, commonly used for auth failures)
+      if (event.code === 1008 || event.reason?.includes('401') || event.reason?.includes('unauthorized')) {
+        term.writeln(`\r\n\x1b[38;5;203m[authentication failed - redirecting to login]\x1b[0m`);
+        setTimeout(() => window.location.replace('/auth/login'), 1500);
+      } else {
+        term.writeln(`\r\n\x1b[38;5;203m[disconnected]\x1b[0m`);
+      }
     };
     ws.onerror = () => {
       setStatus("closed");

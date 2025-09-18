@@ -4,6 +4,7 @@ package services
 import (
 	"context"
 	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
 
@@ -77,50 +78,107 @@ func SetGlobalDevopsApply(ctx context.Context, v *bool) error {
 
 // GetHostDevopsOverride gets the per-host DevOps override setting
 func GetHostDevopsOverride(ctx context.Context, host string) (*bool, error) {
-	var val *bool
-	err := common.DB.QueryRow(ctx, `SELECT auto_apply_override FROM host_settings WHERE host_name=$1`, host).Scan(&val)
-	if err != nil {
-		return nil, nil // treat as absent
+	key := fmt.Sprintf("host:%s:devops_apply", host)
+	if s, ok := GetAppSetting(ctx, key); ok {
+		b := IsTrueish(s)
+		return &b, nil
 	}
-	return val, nil
+	return nil, nil
 }
 
-// SetHostDevopsOverride sets the per-host DevOps override setting
+// SetHostDevopsOverride sets the per-host DevOps override setting  
 func SetHostDevopsOverride(ctx context.Context, host string, v *bool) error {
+	key := fmt.Sprintf("host:%s:devops_apply", host)
 	if v == nil {
-		_, err := common.DB.Exec(ctx, `DELETE FROM host_settings WHERE host_name=$1`, host)
-		return err
+		return DelAppSetting(ctx, key)
 	}
-	_, err := common.DB.Exec(ctx, `
-		INSERT INTO host_settings (host_name, auto_apply_override)
-		VALUES ($1,$2)
-		ON CONFLICT (host_name) DO UPDATE SET auto_apply_override=EXCLUDED.auto_apply_override, updated_at=now()
-	`, host, *v)
-	return err
+	if *v {
+		return SetAppSetting(ctx, key, "true")
+	}
+	return SetAppSetting(ctx, key, "false")
 }
 
 // GetGroupDevopsOverride gets the per-group DevOps override setting
 func GetGroupDevopsOverride(ctx context.Context, group string) (*bool, error) {
-	var val *bool
-	err := common.DB.QueryRow(ctx, `SELECT auto_apply_override FROM group_settings WHERE group_name=$1`, group).Scan(&val)
-	if err != nil {
-		return nil, nil // treat as absent
+	key := fmt.Sprintf("group:%s:devops_apply", group)
+	if s, ok := GetAppSetting(ctx, key); ok {
+		b := IsTrueish(s)
+		return &b, nil
 	}
-	return val, nil
+	return nil, nil
 }
 
 // SetGroupDevopsOverride sets the per-group DevOps override setting
 func SetGroupDevopsOverride(ctx context.Context, group string, v *bool) error {
+	key := fmt.Sprintf("group:%s:devops_apply", group)
 	if v == nil {
-		_, err := common.DB.Exec(ctx, `DELETE FROM group_settings WHERE group_name=$1`, group)
-		return err
+		return DelAppSetting(ctx, key)
 	}
-	_, err := common.DB.Exec(ctx, `
-		INSERT INTO group_settings (group_name, auto_apply_override)
-		VALUES ($1,$2)
-		ON CONFLICT (group_name) DO UPDATE SET auto_apply_override=EXCLUDED.auto_apply_override, updated_at=now()
-	`, group, *v)
-	return err
+	if *v {
+		return SetAppSetting(ctx, key, "true")
+	}
+	return SetAppSetting(ctx, key, "false")
+}
+
+// ShouldAutoApply determines if a stack should be auto-deployed based on hierarchy
+func ShouldAutoApply(ctx context.Context, stackID int64) (bool, error) {
+	// Get stack details
+	var scopeKind, scopeName, stackName string
+	err := common.DB.QueryRow(ctx, `
+		SELECT scope_kind, scope_name, stack_name 
+		FROM iac_stacks 
+		WHERE id = $1
+	`, stackID).Scan(&scopeKind, &scopeName, &stackName)
+	if err != nil {
+		return false, err
+	}
+
+	// 1. Check stack-level override (most specific)
+	if stackOverride, _ := GetStackDevopsOverride(ctx, scopeKind, scopeName, stackName); stackOverride != nil {
+		return *stackOverride, nil
+	}
+
+	// 2. For host stacks, check host-level override
+	if scopeKind == "host" {
+		if hostOverride, _ := GetHostDevopsOverride(ctx, scopeName); hostOverride != nil {
+			return *hostOverride, nil
+		}
+		
+		// 3. Check group-level overrides for this host
+		// Get the groups this host belongs to
+		var groups []string
+		rows, err := common.DB.Query(ctx, `
+			SELECT UNNEST(groups) as group_name 
+			FROM hosts 
+			WHERE name = $1 
+			ORDER BY group_name
+		`, scopeName)
+		if err == nil {
+			defer rows.Close()
+			for rows.Next() {
+				var groupName string
+				if rows.Scan(&groupName) == nil {
+					groups = append(groups, groupName)
+				}
+			}
+		}
+		
+		// Check each group in order (alphabetically sorted for consistency)
+		for _, group := range groups {
+			if groupOverride, _ := GetGroupDevopsOverride(ctx, group); groupOverride != nil {
+				return *groupOverride, nil
+			}
+		}
+	} else if scopeKind == "group" {
+		// For group stacks, just check the group-level override
+		if groupOverride, _ := GetGroupDevopsOverride(ctx, scopeName); groupOverride != nil {
+			return *groupOverride, nil
+		}
+	}
+
+	// 4. Check global setting (DB or environment variable)
+	global, _ := GetGlobalDevopsApply(ctx)
+	return global, nil
 }
 
 // JoinUnder safely joins paths under a root directory, preventing directory traversal

@@ -1,11 +1,15 @@
 // ui/src/views/CleanupView.tsx
 import { useState, useEffect } from "react";
+import { handle401 } from "@/utils/auth";
 import { useParams, useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
+import { handle401 } from "@/utils/auth";
 import { Button } from "@/components/ui/button";
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { handle401 } from "@/utils/auth";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
+import { handle401 } from "@/utils/auth";
 import { 
   Trash2, 
   HardDrive, 
@@ -22,6 +26,7 @@ import {
   Activity
 } from "lucide-react";
 import { Host } from "@/types";
+import { handle401 } from "@/utils/auth";
 import { debugLog } from "@/utils/logging";
 
 // Types for cleanup operations
@@ -192,23 +197,23 @@ export default function CleanupView({
     addEvent(`Starting preview analysis for ${operation}...`, 'info');
     
     try {
-      const endpoint = allHosts 
-        ? `/api/cleanup/global/preview/${operation}`
-        : `/api/cleanup/hosts/${encodeURIComponent(selectedHost)}/preview/${operation}`;
+      const endpoint = allHosts  ? `/api/cleanup/global/preview/${operation}` : `/api/cleanup/hosts/${encodeURIComponent(selectedHost)}/preview/${operation}`;
       
       const response = await fetch(endpoint, {
         credentials: 'include'
       });
+      
+      if (response.status === 401) {
+        handle401();
+        return;
+      }
       
       if (response.ok) {
         const preview = await response.json();
         setSpacePreviews(prev => ({ ...prev, [cacheKey]: preview }));
         
         // Add detailed event about what was found
-        const itemSummary = Object.entries(preview.item_count || {})
-          .filter(([_, count]) => count > 0)
-          .map(([key, count]) => `${count} ${key}`)
-          .join(', ');
+        const itemSummary = Object.entries(preview.item_count || {}) .filter(([_, count]) => count > 0) .map(([key, count]) => `${count} ${key}`) .join(', ');
         
         if (itemSummary) {
           addEvent(`Preview complete: Found ${itemSummary} (${preview.estimated_size || '0B'} total)`, 'success');
@@ -272,9 +277,7 @@ export default function CleanupView({
 
     setIsExecuting(true);
     try {
-      const endpoint = allHosts 
-        ? `/api/cleanup/global/${operation}`
-        : `/api/cleanup/hosts/${encodeURIComponent(selectedHost)}/${operation}`;
+      const endpoint = allHosts  ? `/api/cleanup/global/${operation}` : `/api/cleanup/hosts/${encodeURIComponent(selectedHost)}/${operation}`;
 
       const response = await fetch(endpoint, {
         method: 'POST',
@@ -284,6 +287,11 @@ export default function CleanupView({
         },
         body: JSON.stringify(options),
       });
+
+      if (response.status === 401) {
+        handle401();
+        return;
+      }
 
       if (!response.ok) {
         const errorText = await response.text();

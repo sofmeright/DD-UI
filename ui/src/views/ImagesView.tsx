@@ -5,6 +5,7 @@ import HostPicker from "@/components/HostPicker";
 import SortableHeader from "@/components/SortableHeader";
 import SearchBar from "@/components/SearchBar";
 import { Host } from "@/types";
+import { handle401 } from "@/utils/auth";
 
 type ImageRow = {
   repo: string;
@@ -63,6 +64,10 @@ export default function ImagesView({ hosts }: { hosts: Host[] }) {
       setLoading(true);
       try {
         const r = await fetch(`/api/images/hosts/${encodeURIComponent(hostName)}`, { credentials: "include" });
+        if (r.status === 401) {
+          handle401();
+          return;
+        }
         const j = await r.json();
         setRows((j.images || []) as ImageRow[]);
         setSelected([]); setLastIndex(null);
@@ -153,6 +158,11 @@ export default function ImagesView({ hosts }: { hosts: Host[] }) {
       body,
     });
     
+    if (r.status === 401) {
+      handle401();
+      return;
+    }
+    
     if (!r.ok) {
       const errorText = await r.text().catch(() => "Delete failed");
       alert(errorText);
@@ -178,6 +188,10 @@ export default function ImagesView({ hosts }: { hosts: Host[] }) {
     
     // refresh
     const rr = await fetch(`/api/images/hosts/${encodeURIComponent(hostName)}`, { credentials: "include" });
+    if (rr.status === 401) {
+      handle401();
+      return;
+    }
     const jj = await rr.json();
     setRows((jj.images || []) as ImageRow[]);
     setSelected([]); setLastIndex(null);

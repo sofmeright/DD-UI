@@ -2,6 +2,7 @@
 import { useState, useEffect, useCallback } from "react";
 import { RefreshCw, Loader2, Heart, HeartOff, AlertTriangle } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { handle401 } from "@/utils/auth";
 import { 
   Tooltip, 
   TooltipContent, 
@@ -41,6 +42,11 @@ export default function ContainerHealthBadge({
         `/api/containers/hosts/${encodeURIComponent(hostName)}/${encodeURIComponent(container.name)}`,
         { credentials: "include" }
       );
+      
+      if (response.status === 401) {
+        handle401();
+        return;
+      }
       
       if (!response.ok) {
         throw new Error(`Failed to fetch container status: ${response.statusText}`);

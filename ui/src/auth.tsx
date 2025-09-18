@@ -9,13 +9,11 @@ export function useAuth() {
 
   React.useEffect(() => {
     let alive = true;
-    fetch("/api/session", { credentials: "include" })
-      .then(async (res) => {
+    fetch("/api/session", { credentials: "include" }) .then(async (res) => {
         if (res.status === 401) { if (alive) setState({ user: null, loading: false }); return; }
         const data = await res.json();
         if (alive) setState({ user: data.user ?? null, loading: false });
-      })
-      .catch(() => alive && setState({ user: null, loading: false }));
+      }) .catch(() => alive && setState({ user: null, loading: false }));
     return () => { alive = false; };
   }, []);
 

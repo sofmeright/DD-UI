@@ -1,4 +1,6 @@
 import { Host } from "@/types";
+import { handle401 } from "@/utils/auth";
+import GitSyncToggle from "@/components/GitSyncToggle";
 
 export default function GroupsView({ hosts }: { hosts: Host[] }) {
   return (
@@ -6,6 +8,11 @@ export default function GroupsView({ hosts }: { hosts: Host[] }) {
       {/* Header */}
       <div className="flex items-center gap-4">
         <div className="text-lg font-semibold text-white">Groups</div>
+        
+        {/* Git sync toggle positioned at the end */}
+        <div className="ml-auto">
+          <GitSyncToggle />
+        </div>
       </div>
 
       {/* Coming Soon Placeholder */}

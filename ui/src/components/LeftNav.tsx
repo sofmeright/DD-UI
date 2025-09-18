@@ -14,6 +14,7 @@ export default function LeftNav({
   onGoGroups,
   onGoCleanup,
   onGoLogging,
+  onGoGitSync,
 }: {
   page: string;
   onGoHosts: () => void;
@@ -25,13 +26,12 @@ export default function LeftNav({
   onGoGroups?: () => void;
   onGoCleanup?: () => void;
   onGoLogging?: () => void;
+  onGoGitSync?: () => void;
 }) {
   const item = (id: string, label: string, onClick: () => void) => (
     <button
       className={`w-full text-left px-3 py-2 rounded-lg text-sm transition border ${
-        page === id
-          ? "bg-slate-800/60 border-slate-700 text-white"
-          : "hover:bg-slate-900/40 border-transparent text-slate-300"
+        page === id ? "bg-slate-800/60 border-slate-700 text-white" : "hover:bg-slate-900/40 border-transparent text-slate-300"
       }`}
       onClick={onClick}
     >
@@ -64,6 +64,7 @@ export default function LeftNav({
           </div>
           <nav className="px-2 pb-4 space-y-1">
             {item("dashboard", "Dashboard", onGoDashboard)}
+            {onGoGitSync && item("git", "GitOps", onGoGitSync)}
           </nav>
         </>
       )}

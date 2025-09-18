@@ -1,4 +1,4 @@
-// src/api/routes_gitops.go
+// handlers/devops.go
 package handlers
 
 import (
@@ -10,10 +10,10 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
-// setupGitopsRoutes configures all GitOps (DevOps automation) configuration routes
-func SetupGitopsRoutes(router chi.Router) {
-	router.Route("/gitops", func(r chi.Router) {
-		// Global GitOps configuration
+// SetupDevopsRoutes configures all DevOps automation configuration routes
+func SetupDevopsRoutes(router chi.Router) {
+	router.Route("/devops", func(r chi.Router) {
+		// Global DevOps configuration
 		r.Get("/global", func(w http.ResponseWriter, r *http.Request) {
 			val, src := services.GetGlobalDevopsApply(r.Context())
 			writeJSON(w, http.StatusOK, map[string]any{
@@ -39,7 +39,7 @@ func SetupGitopsRoutes(router chi.Router) {
 			writeJSON(w, http.StatusOK, map[string]any{"auto_deploy": val, "source": src, "status": "ok"})
 		})
 
-		// Host-specific GitOps configuration
+		// Host-specific DevOps configuration
 		r.Route("/hosts/{name}", func(r chi.Router) {
 			// GET host auto-deployment override + effective setting
 			r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -93,9 +93,9 @@ func SetupGitopsRoutes(router chi.Router) {
 				})
 			})
 
-			// Stack-specific GitOps configuration for hosts
+			// Stack-specific DevOps configuration for hosts
 			r.Route("/stacks/{stackname}", func(r chi.Router) {
-				// GET /api/gitops/hosts/{name}/stacks/{stackname}
+				// GET /api/devops/hosts/{name}/stacks/{stackname}
 				r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 					host := chi.URLParam(r, "name")
 					stackName := chi.URLParam(r, "stackname")
@@ -132,7 +132,7 @@ func SetupGitopsRoutes(router chi.Router) {
 					})
 				})
 
-				// PATCH /api/gitops/hosts/{name}/stacks/{stackname}
+				// PATCH /api/devops/hosts/{name}/stacks/{stackname}
 				r.Patch("/", func(w http.ResponseWriter, r *http.Request) {
 					host := chi.URLParam(r, "name")
 					stackName := chi.URLParam(r, "stackname")
@@ -178,7 +178,7 @@ func SetupGitopsRoutes(router chi.Router) {
 			})
 		})
 
-		// Group-specific GitOps configuration
+		// Group-specific DevOps configuration
 		r.Route("/groups/{name}", func(r chi.Router) {
 			// GET group auto-deployment override + effective setting
 			r.Get("/", func(w http.ResponseWriter, r *http.Request) {
@@ -232,9 +232,9 @@ func SetupGitopsRoutes(router chi.Router) {
 				})
 			})
 
-			// Stack-specific GitOps configuration for groups
+			// Stack-specific DevOps configuration for groups
 			r.Route("/stacks/{stackname}", func(r chi.Router) {
-				// GET /api/gitops/groups/{name}/stacks/{stackname}
+				// GET /api/devops/groups/{name}/stacks/{stackname}
 				r.Get("/", func(w http.ResponseWriter, r *http.Request) {
 					group := chi.URLParam(r, "name")
 					stackName := chi.URLParam(r, "stackname")
@@ -271,7 +271,7 @@ func SetupGitopsRoutes(router chi.Router) {
 					})
 				})
 
-				// PATCH /api/gitops/groups/{name}/stacks/{stackname}
+				// PATCH /api/devops/groups/{name}/stacks/{stackname}
 				r.Patch("/", func(w http.ResponseWriter, r *http.Request) {
 					group := chi.URLParam(r, "name")
 					stackName := chi.URLParam(r, "stackname")

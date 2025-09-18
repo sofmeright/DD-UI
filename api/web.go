@@ -73,6 +73,7 @@ func makeRouter() http.Handler {
 		// Everything below requires auth
 		api.Group(func(priv chi.Router) {
 			// Apply auth middleware to all routes in this group
+			common.InfoLog("WEB: Setting up authenticated routes group")
 			priv.Use(middleware.RequireAuth)
 
 
@@ -162,9 +163,12 @@ func makeRouter() http.Handler {
 
 			// SSH operation routes (organized in routes/ssh.go)
 			handlers.SetupSshRoutes(priv)
-
-			// GitOps configuration routes (organized in routes/gitops.go)
-			handlers.SetupGitopsRoutes(priv)
+			
+			// DevOps automation routes (organized in handlers/devops.go)
+			handlers.SetupDevopsRoutes(priv)
+			
+			// Git sync routes (organized in handlers/git_routes.go)
+			handlers.SetupGitSyncRoutes(priv)
 		})
 	})
 

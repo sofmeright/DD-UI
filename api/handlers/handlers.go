@@ -10,7 +10,7 @@ func SetupAllRoutes(router chi.Router) {
 	SetupSystemRoutes(router)
 	SetupDockerRoutes(router)
 	SetupIacRoutes(router)
-	SetupGitopsRoutes(router)
+	SetupDevopsRoutes(router)
 	SetupSshRoutes(router)
 	SetupCleanupRoutes(router)
 }

@@ -40,12 +40,12 @@ LABEL maintainer="SoFMeRight <sofmeright@gmail.com>" \
       org.opencontainers.image.source="https://github.com/sofmeright/DD-UI.git" \
       org.opencontainers.image.licenses="GPL-3.0"
 
-# Base deps (curl for healthcheck + downloads; ssh for DOCKER_HOST=ssh://; tzdata; ca-certs; git for GitSync)
+# Base deps (curl for healthcheck + downloads; ssh for DOCKER_HOST=ssh://; tzdata; ca-certs)
 # Alpine uses musl instead of glibc, avoiding the zlib1g vulnerability
 RUN apk update && \
       apk upgrade && \
       apk add --no-cache \
-      ca-certificates curl openssh-client tzdata bash git rsync && \
+      ca-certificates curl openssh-client tzdata bash && \
       rm -rf /var/cache/apk/*
 
 # --- Docker CLI (static) ---

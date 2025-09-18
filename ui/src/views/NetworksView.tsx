@@ -1,12 +1,9 @@
 // ui/src/views/NetworksView.tsx
 import { useEffect, useMemo, useState } from "react";
-import { handle401 } from "@/utils/auth";
 import { useParams, useNavigate } from "react-router-dom";
 import HostPicker from "@/components/HostPicker";
-import { handle401 } from "@/utils/auth";
 import SortableHeader from "@/components/SortableHeader";
 import SearchBar from "@/components/SearchBar";
-import { handle401 } from "@/utils/auth";
 import { Host } from "@/types";
 
 type NetRow = { name: string; driver: string; scope: string; id: string };
@@ -57,10 +54,6 @@ export default function NetworksView({ hosts }: { hosts: Host[] }) {
       setLoading(true);
       try {
         const r = await fetch(`/api/networks/hosts/${encodeURIComponent(hostName)}`, { credentials: "include" });
-        if (r.status === 401) {
-          handle401();
-          return;
-        }
         const j = await r.json();
         setRows((j.networks || []) as NetRow[]);
         setSelected([]); setLastIndex(null);
@@ -134,20 +127,12 @@ export default function NetworksView({ hosts }: { hosts: Host[] }) {
       headers: { "Content-Type": "application/json" },
       body,
     });
-    if (r.status === 401) {
-      handle401();
-      return;
-    }
     const j = await r.json().catch(() => ({}));
     if (!r.ok) {
       alert(typeof j === "string" ? j : "Delete failed");
     }
     // refresh
     const rr = await fetch(`/api/networks/hosts/${encodeURIComponent(hostName)}`, { credentials: "include" });
-    if (rr.status === 401) {
-      handle401();
-      return;
-    }
     const jj = await rr.json();
     setRows((jj.networks || []) as NetRow[]);
     setSelected([]); setLastIndex(null);

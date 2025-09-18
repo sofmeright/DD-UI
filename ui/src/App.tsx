@@ -13,10 +13,8 @@ import DashboardView from "@/views/DashboardView";
 import GroupsView from "@/views/GroupsView";
 import CleanupView from "@/views/CleanupView";
 import LoggingView from "@/views/LoggingView";
-import GitSyncView from "@/views/GitSyncView";
 import { SessionResp, Host, ApiContainer, IacStack } from "@/types";
 import { computeHostMetrics } from "@/utils/metrics";
-import { setAuthFailureCallback } from "@/utils/auth";
 
 export default function App() {
   const [hosts, setHosts] = useState<Host[]>([]);
@@ -31,35 +29,6 @@ export default function App() {
   const navigate = useNavigate();
   const location = useLocation();
   
-  // Register global auth failure handler
-  useEffect(() => {
-    setAuthFailureCallback(() => {
-      setAuthed(false);
-      setSessionChecked(true);
-    });
-  }, []);
-  
-  // Check authentication on every route change
-  useEffect(() => {
-    // Always check on route changes, even if not currently authed
-    if (!sessionChecked) return;
-    
-    // Verify session is still valid on route changes
-    fetch("/api/session", { credentials: "include" }) .then(r => {
-        if (r.status === 401) {
-          setAuthed(false);
-          setSessionChecked(true);
-          // Force immediate redirect
-          window.location.href = '/auth/login';
-        }
-      }) .catch(() => {
-        // Network error - assume not authenticated
-        setAuthed(false);
-        setSessionChecked(true);
-        window.location.href = '/auth/login';
-      });
-  }, [location.pathname]); // Re-check on every route change
-  
   // Determine current page from URL (for LeftNav highlight)
   const getCurrentPage = () => {
     const path = location.pathname;
@@ -72,7 +41,6 @@ export default function App() {
     if (/^\/hosts\/[^/]+\/volumes/.test(path)) return "volumes";
     if (path === "/cleanup" || /^\/hosts\/[^/]+\/cleanup/.test(path)) return "cleanup";
     if (path === "/logging") return "logging";
-    if (path === "/git") return "git";
     return "hosts";
   };
 
@@ -98,21 +66,10 @@ export default function App() {
     (async () => {
       try {
         const r = await fetch("/api/session", { credentials: "include" });
-        if (r.status === 401) {
-          // Session expired or not authenticated
-          if (!cancel) {
-            setAuthed(false);
-            setSessionChecked(true);
-          }
-          window.location.replace("/auth/login");
-          return;
-        }
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         const data = (await r.json()) as SessionResp;
         if (!cancel) setAuthed(!!data.user);
       } catch {
-        // Network error or other issue
-        if (!cancel) setAuthed(false);
         window.location.replace("/auth/login");
         return;
       } finally {
@@ -141,26 +98,6 @@ export default function App() {
         setLoading(false);
       }
     })();
-  }, [authed]);
-
-  // Periodic session validation (every 30 seconds)
-  useEffect(() => {
-    if (!authed) return;
-    
-    const interval = setInterval(() => {
-      fetch("/api/session", { credentials: "include" }) .then(r => {
-          if (r.status === 401) {
-            setAuthed(false);
-            setSessionChecked(true);
-            clearInterval(interval);
-            window.location.replace("/auth/login");
-          }
-        }) .catch(() => {
-          // Network error - keep trying
-        });
-    }, 30000); // Check every 30 seconds
-    
-    return () => clearInterval(interval);
   }, [authed]);
 
   const filteredHosts = useMemo(() => {
@@ -232,16 +169,10 @@ export default function App() {
     } finally { setScanning(false); }
   }
 
-  // Early return for unauthenticated users
-  if (!sessionChecked) {
-    return <div className="min-h-screen bg-slate-950" />;
-  }
-  
-  if (!authed) {
-    return <LoginGate />;
-  }
+  if (sessionChecked && !authed) return <LoginGate />;
+  if (!sessionChecked) return <div className="min-h-screen bg-slate-950" />;
 
-  // Pages bound to new routes (only rendered when authenticated)
+  // Pages bound to new routes
 
   // Stacks list WITH DROPDOWN (wrap HostStacksView and remount on :hostName to avoid stale data)
   const HostStacksPage = () => {
@@ -348,9 +279,6 @@ export default function App() {
         onGoLogging={() => {
           navigate('/logging');
         }}
-        onGoGitSync={() => {
-          navigate('/git');
-        }}
       />
 
       {/* Right side: layout unchanged */}
@@ -385,9 +313,6 @@ export default function App() {
             
             {/* Logging route */}
             <Route path="/logging" element={<LoggingView />} />
-            
-            {/* Git Sync route */}
-            <Route path="/git" element={<GitSyncView />} />
             
             {/* Resource routes */}
             <Route path="/hosts/:hostName/images" element={<HostImagesPage />} />

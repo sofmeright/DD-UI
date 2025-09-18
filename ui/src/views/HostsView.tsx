@@ -3,11 +3,8 @@ import { useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import SearchBar from "@/components/SearchBar";
-import GitSyncToggle from "@/components/GitSyncToggle";
-import DevOpsToggle from "@/components/DevOpsToggle";
 import { Boxes, Layers, AlertTriangle, XCircle, RefreshCw, Server } from "lucide-react";
 import { Host } from "@/types";
-import { handle401 } from "@/utils/auth";
 
 export default function HostsView({
   metrics, hosts, filteredHosts, loading, err, scanning, onScanAll, onFilter, onOpenHost, refreshMetricsForHosts,
@@ -66,12 +63,6 @@ export default function HostsView({
           <RefreshCw className={`h-4 w-4 mr-1 ${scanning ? "animate-spin" : ""}`} />
           {scanning ? "Scanning…" : "Sync"}
         </Button>
-
-        {/* Toggles positioned at the end */}
-        <div className="ml-auto flex items-center gap-3">
-          <DevOpsToggle level="global" />
-          <GitSyncToggle />
-        </div>
       </div>
 
       <div className="overflow-hidden rounded-xl border border-slate-800">
@@ -83,12 +74,11 @@ export default function HostsView({
               <th className="p-3 text-left">Groups</th>
               <th className="p-3 text-left">Scan</th>
               <th className="p-3 text-left">Status</th>
-              <th className="p-3 text-left">DevOps</th>
             </tr>
           </thead>
           <tbody>
-            {loading && (<tr><td className="p-4 text-slate-500" colSpan={6}>Loading hosts…</td></tr>)}
-            {err && !loading && (<tr><td className="p-4 text-rose-300" colSpan={6}>{err}</td></tr>)}
+            {loading && (<tr><td className="p-4 text-slate-500" colSpan={5}>Loading hosts…</td></tr>)}
+            {err && !loading && (<tr><td className="p-4 text-rose-300" colSpan={5}>{err}</td></tr>)}
             {!loading && filteredHosts.map((h) => (
               <tr key={h.name} className="border-t border-slate-800 hover:bg-slate-900/40">
                 <td className="p-3 font-medium text-slate-200">
@@ -102,11 +92,7 @@ export default function HostsView({
                     variant="outline"
                     className="border-slate-700 text-slate-200 hover:bg-slate-800"
                     onClick={async () => {
-                      const r = await fetch(`/api/scan/host/${encodeURIComponent(h.name)}`, { method: "POST", credentials: "include" });
-                      if (r.status === 401) {
-                        handle401();
-                        return;
-                      }
+                      await fetch(`/api/scan/host/${encodeURIComponent(h.name)}`, { method: "POST", credentials: "include" });
                       await refreshMetricsForHosts([h.name]);
                     }}
                   >
@@ -115,17 +101,10 @@ export default function HostsView({
                   </Button>
                 </td>
                 <td className="p-3"></td>
-                <td className="p-3">
-                  <DevOpsToggle 
-                    level="host" 
-                    hostName={h.name}
-                    className="justify-center"
-                  />
-                </td>
               </tr>
             ))}
             {!loading && filteredHosts.length === 0 && (
-              <tr><td className="p-6 text-center text-slate-500" colSpan={6}>No hosts.</td></tr>
+              <tr><td className="p-6 text-center text-slate-500" colSpan={5}>No hosts.</td></tr>
             )}
           </tbody>
         </table>

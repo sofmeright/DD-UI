@@ -245,9 +245,6 @@ func InitAuthFromEnv() (*scs.SessionManager, error) {
 	
 	// Also initialize the global SessionManager in common package so handlers can use it
 	common.SessionManager = sessionManager
-	
-	infoLog("AUTH: Session manager initialized successfully")
-	infoLog("AUTH: common.SessionManager = %v", common.SessionManager != nil)
 
 	// start background sweeper for server-side id_tokens
 	go func() {
@@ -314,12 +311,7 @@ func CallbackHandler(w http.ResponseWriter, r *http.Request) {
 
 	idt, err := oidcVerifier.Verify(ctx, rawID)
 	if err != nil {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusUnauthorized)
-		json.NewEncoder(w).Encode(map[string]string{
-			"status": "error",
-			"message": "ID token verification failed",
-		})
+		http.Error(w, "id token verify failed", http.StatusUnauthorized)
 		return
 	}
 	if idt.Nonce != nonce {
@@ -424,10 +416,7 @@ func SessionHandler(w http.ResponseWriter, r *http.Request) {
 	exp := sessionManager.GetInt64(r.Context(), "exp")
 
 	if !ok || exp == 0 || time.Now().Unix() > exp {
-		writeJSON(w, http.StatusUnauthorized, map[string]any{
-			"status": "error",
-			"message": "Session expired or invalid. Please log in again.",
-		})
+		writeJSON(w, http.StatusOK, map[string]any{"user": nil})
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"user": u})

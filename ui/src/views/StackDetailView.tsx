@@ -1,25 +1,17 @@
 // ui/src/views/StackDetailView.tsx
 import { useEffect, useRef, useState } from "react";
-import { handle401 } from "@/utils/auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { handle401 } from "@/utils/auth";
 import { Button } from "@/components/ui/button";
 import { Switch } from "@/components/ui/switch";
-import DevOpsToggle from "@/components/DevOpsToggle";
-import { handle401 } from "@/utils/auth";
 import { ArrowLeft, ChevronRight, Eye, EyeOff, RefreshCw, Trash2, Rocket, Square } from "lucide-react";
 import Fact from "@/components/Fact";
-import { handle401 } from "@/utils/auth";
 import MiniEditor from "@/editors/MiniEditor";
 import StatePill from "@/components/StatePill";
-import { handle401 } from "@/utils/auth";
 import ConfirmDialog from "@/components/ConfirmDialog";
 import { ApiContainer, Host, IacFileMeta, InspectOut } from "@/types";
-import { handle401 } from "@/utils/auth";
 import { formatDT } from "@/utils/format";
 import { debugLog, errorLog, warnLog } from "@/utils/logging";
-import { handle401 } from "@/utils/auth";
 
 /* ---------- Shared row primitives (uniform font/spacing/columns) ---------- */
 
@@ -288,7 +280,9 @@ function ContainerCard({
           <RowShell index={1}>
             <div className="col-span-3 text-slate-400 text-xs uppercase tracking-wide">Created</div>
             <div className="col-span-9 text-slate-300 text-sm">
-              {(c as any).created || (c as any).created_ts || (c as any).created_at ? formatDT((c as any).created || (c as any).created_ts || (c as any).created_at) : "—"}
+              {(c as any).created || (c as any).created_ts || (c as any).created_at
+                ? formatDT((c as any).created || (c as any).created_ts || (c as any).created_at)
+                : "—"}
             </div>
           </RowShell>
           <RowShell index={2}>
@@ -409,6 +403,8 @@ export default function StackDetailView({
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
   const [editPath, setEditPath] = useState<string | null>(null);
+  // Remove stackIacId dependency - use stable host.name + stackName instead
+  const [autoDevOps, setAutoDevOps] = useState<boolean>(false);
 
   const [deploying, setDeploying] = useState<boolean>(false);
   const [watching, setWatching] = useState<boolean>(false);
@@ -432,11 +428,11 @@ export default function StackDetailView({
     onConfirm: () => {},
   });
 
+  useEffect(() => { setAutoDevOps(false); }, [stackName]);
 
   async function refreshFiles() {
     // Use new hierarchical endpoint instead of ID-based
     const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}/files`, { credentials: "include" });
-    if (r.status === 401) { handle401(); return; }
     if (!r.ok) return;
     const j = await r.json();
     setFiles(j.files || []);
@@ -446,7 +442,7 @@ export default function StackDetailView({
   async function refreshRuntime(skipInspect = false) {
     try {
       const rc = await fetch(`/api/containers/hosts/${encodeURIComponent(host.name)}`, { credentials: "include" });
-      if (rc.status === 401) { handle401(); return; }
+      if (rc.status === 401) { window.location.replace("/auth/login"); return; }
       const contJson = await rc.json();
       const runtimeAll: ApiContainer[] = (contJson.containers || []) as ApiContainer[];
       debugLog(`=== CONTAINER API DEBUG ===`);
@@ -543,7 +539,6 @@ export default function StackDetailView({
           debugLog(`Fetching inspection data for container "${c.name}" from ${inspectUrl}`);
           const r = await fetch(inspectUrl, { credentials: "include" });
           debugLog(`Inspection response for "${c.name}": status ${r.status} ${r.statusText}`);
-          if (r.status === 401) { handle401(); return; }
           if (!r.ok) {
             debugLog(`Inspection failed for "${c.name}": ${r.status} ${r.statusText}`);
             continue;
@@ -582,6 +577,26 @@ export default function StackDetailView({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [host.name, stackName]);
 
+  // Load EFFECTIVE Auto DevOps using enhanced endpoint (same as Host Stacks view)
+  useEffect(() => {
+    let cancel = false;
+    (async () => {
+      try {
+        const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}`, { credentials: "include" });
+        if (!r.ok) { setAutoDevOps(false); return; }
+        const j = await r.json();
+        
+        // Find our specific stack in the enhanced response (same logic as Host Stacks view)
+        const stacks = j?.stacks || [];
+        const myStack = stacks.find((s: any) => s.name === stackName);
+        
+        if (!cancel) setAutoDevOps(!!myStack?.effective_auto_devops);
+      } catch { 
+        if (!cancel) setAutoDevOps(false);
+      }
+    })();
+    return () => { cancel = true; };
+  }, [host.name, stackName]);
 
   async function ensureStack() {
     // With hierarchical endpoints, we don't need to track stack ID anymore
@@ -605,6 +620,34 @@ export default function StackDetailView({
     setEditPath(null);
   }
 
+  // API function to set Auto DevOps (matches Host Stacks view)
+  async function setAutoDevOpsAPI(enabled: boolean) {
+    const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}`, {
+      method: "PATCH",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auto_devops: enabled }),
+    });
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  }
+
+  // Toggle stack Auto DevOps with proper error handling (matches Host Stacks view)
+  function toggleAutoDevOps(checked: boolean) {
+    if (checked && files.length === 0) {
+      alert("This stack needs compose files or services before Auto DevOps can be enabled. Add content first.");
+      return;
+    }
+    
+    // Optimistic update
+    setAutoDevOps(checked);
+    
+    // API call with rollback on error
+    setAutoDevOpsAPI(checked).catch((err) => {
+      alert(`Failed to update Auto DevOps: ${err?.message || err}`);
+      // Rollback the optimistic update
+      setAutoDevOps(!checked);
+    });
+  }
 
   // Begin/stop short-lived watch that polls runtime so user sees changes roll in.
   function beginWatch(durationMs = 30_000, intervalMs = 5_000) {
@@ -674,11 +717,6 @@ export default function StackDetailView({
         method: "GET",
         credentials: "include"
       });
-      
-      if (response.status === 401) {
-        handle401();
-        return;
-      }
       
       if (!response.ok) {
         throw new Error(`Deploy stream failed: ${response.status} ${response.statusText}`);
@@ -807,12 +845,8 @@ export default function StackDetailView({
         </Button>
         <div className="ml-2 text-lg font-semibold text-white">Stack: {stackName}</div>
         <div className="ml-auto flex items-center gap-3">
-          <DevOpsToggle
-            level="stack"
-            hostName={host.name}
-            stackName={stackName}
-            compact={false}
-          />
+          <span className="text-sm text-slate-300">Auto DevOps</span>
+          <Switch checked={autoDevOps} onCheckedChange={(v) => toggleAutoDevOps(!!v)} />
           {files.length > 0 ? (
             <Button
               onClick={async () => { await refreshRuntime(); await refreshFiles(); }}
@@ -837,7 +871,9 @@ export default function StackDetailView({
 
       {/* Deployment Result Banner */}
       {deployResult && (
-        <div className={`p-4 rounded-lg border ${deployResult.success  ? 'bg-emerald-900/30 border-emerald-700 text-emerald-100'  : 'bg-red-900/30 border-red-700 text-red-100'
+        <div className={`p-4 rounded-lg border ${deployResult.success 
+          ? 'bg-emerald-900/30 border-emerald-700 text-emerald-100' 
+          : 'bg-red-900/30 border-red-700 text-red-100'
         }`}>
           <div className="flex items-center gap-2">
             {deployResult.message === "Deployment initiated..." ? (
@@ -977,7 +1013,6 @@ export default function StackDetailView({
                               variant="ghost"
                               onClick={async () => {
                                 const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}/file?path=${encodeURIComponent(f.rel_path)}`, { method: "DELETE", credentials: "include" });
-                                if (r.status === 401) { handle401(); return; }
                                 if (r.ok) refreshFiles();
                               }}
                               title="Delete"

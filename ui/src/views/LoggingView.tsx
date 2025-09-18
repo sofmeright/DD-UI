@@ -25,7 +25,6 @@ import {
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { debugLog, infoLog, warnLog, errorLog } from "@/utils/logging";
-import { handle401 } from "@/utils/auth";
 
 interface LogEntry {
   id?: number;
@@ -177,15 +176,9 @@ export default function LoggingView() {
 
   // Fetch available log sources
   useEffect(() => {
-    fetch("/api/logs/sources", { credentials: "include" }) .then((res) => {
-        if (res.status === 401) {
-          handle401();
-          return;
-        }
-        if (!res.ok) throw new Error(`HTTP ${res.status}`);
-        return res.json();
-      }) .then((data: LogSource | undefined) => {
-        if (!data) return;
+    fetch("/api/logs/sources")
+      .then((res) => res.json())
+      .then((data: LogSource) => {
         debugLog("Fetched log sources:", {
           hosts: data.hosts?.length || 0,
           stacks: data.stacks?.length || 0,
@@ -194,7 +187,8 @@ export default function LoggingView() {
         setLogSources(data);
         setFilteredStacks(data.stacks || []);
         setFilteredContainers(data.containers || []);
-      }) .catch((err) => {
+      })
+      .catch((err) => {
         errorLog("Failed to fetch log sources:", err);
       });
   }, []);
@@ -209,7 +203,9 @@ export default function LoggingView() {
     } else {
       // Filter stacks based on containers in the selected host
       const stacksInHost = [...new Set(
-        logSources.containers .filter(c => c.host === selectedHost && c.stack) .map(c => c.stack!)
+        logSources.containers
+          .filter(c => c.host === selectedHost && c.stack)
+          .map(c => c.stack!)
       )];
       debugLog("Stacks available for host", selectedHost, ":", stacksInHost);
       setFilteredStacks(stacksInHost);
@@ -259,7 +255,7 @@ export default function LoggingView() {
   }, [selectedStack, selectedHost, logSources]);
 
   // Connect to log stream
-  const connectToLogStream = useCallback(async () => {
+  const connectToLogStream = useCallback(() => {
     debugLog("connectToLogStream called with log levels:", logLevels);
     
     // Disconnect existing stream
@@ -276,21 +272,6 @@ export default function LoggingView() {
       terminalInstance.current.writeln("\x1b[90m" + "=".repeat(80) + "\x1b[0m");
       terminalInstance.current.writeln("");
       terminalInstance.current.writeln("\x1b[33m⚡ Reconnecting with new filters...\x1b[0m");
-    }
-
-    // Preflight auth check before opening EventSource
-    try {
-      const authCheck = await fetch('/api/logs/sources', { 
-        credentials: 'include',
-        method: 'HEAD' 
-      });
-      if (authCheck.status === 401) {
-        handle401();
-        return;
-      }
-    } catch (error) {
-      // Network error on auth check - probably means server is down
-      debugLog("Preflight auth check failed:", error);
     }
 
     // Build filter parameters
@@ -426,15 +407,20 @@ export default function LoggingView() {
         // Update stats only for visible logs
         setStats((prev) => ({
           total: prev.total + 1,
-          byLevel: { ...prev.byLevel,
+          byLevel: {
+            ...prev.byLevel,
             [entry.level]: (prev.byLevel[entry.level] || 0) + 1,
           },
-          byHost: { ...prev.byHost,
+          byHost: {
+            ...prev.byHost,
             [entry.hostname]: (prev.byHost[entry.hostname] || 0) + 1,
           },
-          byStack: entry.stack_name ? { ...prev.byStack,
+          byStack: entry.stack_name
+            ? {
+                ...prev.byStack,
                 [entry.stack_name]: (prev.byStack[entry.stack_name] || 0) + 1,
-              } : prev.byStack,
+              }
+            : prev.byStack,
         }));
 
         // Write to terminal only if visible
@@ -527,9 +513,11 @@ export default function LoggingView() {
     if (selectedContainer !== "all") scopeParts.push(selectedContainer);
     const scopeStr = scopeParts.length > 0 ? `-${scopeParts.join("-")}` : "";
     
-    const content = filteredLogs .map((entry) => {
+    const content = filteredLogs
+      .map((entry) => {
         return `${entry.timestamp} [${entry.level}] ${entry.hostname}/${entry.container_name || entry.service_name}: ${entry.message}`;
-      }) .join("\n");
+      })
+      .join("\n");
 
     const blob = new Blob([content], { type: "text/plain" });
     const url = URL.createObjectURL(blob);
@@ -659,7 +647,9 @@ export default function LoggingView() {
                 <div className="flex items-center gap-2">
                   <Layers className="w-4 h-4" />
                   <span>
-                    {selectedStack === "all"  ? "All Stacks"  : selectedStack}
+                    {selectedStack === "all" 
+                      ? "All Stacks" 
+                      : selectedStack}
                   </span>
                 </div>
                 <ChevronDown className="w-4 h-4" />
@@ -731,7 +721,9 @@ export default function LoggingView() {
                 <div className="flex items-center gap-2">
                   <Box className="w-4 h-4" />
                   <span className="truncate">
-                    {selectedContainer === "all"  ? "All Containers"  : selectedContainer}
+                    {selectedContainer === "all" 
+                      ? "All Containers" 
+                      : selectedContainer}
                   </span>
                 </div>
                 <ChevronDown className="w-4 h-4 flex-shrink-0" />
@@ -877,7 +869,9 @@ export default function LoggingView() {
               onClick={() => setIsFollowing(!isFollowing)}
               className={cn(
                 "px-3 py-1.5 rounded-lg text-sm flex items-center gap-2 transition-colors",
-                isFollowing ? "bg-green-600 hover:bg-green-700 text-white" : "bg-slate-700 hover:bg-slate-600 text-slate-200"
+                isFollowing
+                  ? "bg-green-600 hover:bg-green-700 text-white"
+                  : "bg-slate-700 hover:bg-slate-600 text-slate-200"
               )}
             >
               {isFollowing ? (
@@ -909,7 +903,9 @@ export default function LoggingView() {
               onClick={exportLogs}
               className={cn(
                 "px-3 py-1.5 rounded-lg text-sm flex items-center gap-2 transition-colors",
-                filteredLogs.length === 0 ? "bg-slate-800 text-slate-500 cursor-not-allowed" : "bg-slate-700 hover:bg-slate-600 text-slate-200"
+                filteredLogs.length === 0
+                  ? "bg-slate-800 text-slate-500 cursor-not-allowed"
+                  : "bg-slate-700 hover:bg-slate-600 text-slate-200"
               )}
               disabled={filteredLogs.length === 0}
               title={filteredLogs.length === 0 ? "No visible logs to export" : `Export ${filteredLogs.length} visible logs`}

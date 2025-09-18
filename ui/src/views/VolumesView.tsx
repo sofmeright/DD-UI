@@ -1,12 +1,9 @@
 // ui/src/views/VolumesView.tsx
 import { useEffect, useMemo, useState } from "react";
-import { handle401 } from "@/utils/auth";
 import { useParams, useNavigate } from "react-router-dom";
 import HostPicker from "@/components/HostPicker";
-import { handle401 } from "@/utils/auth";
 import SortableHeader from "@/components/SortableHeader";
 import SearchBar from "@/components/SearchBar";
-import { handle401 } from "@/utils/auth";
 import { Host } from "@/types";
 
 type VolRow = { name: string; driver: string; mountpoint: string; created: string };
@@ -58,10 +55,6 @@ export default function VolumesView({ hosts }: { hosts: Host[] }) {
       setLoading(true);
       try {
         const r = await fetch(`/api/volumes/hosts/${encodeURIComponent(hostName)}`, { credentials: "include" });
-        if (r.status === 401) {
-          handle401();
-          return;
-        }
         const j = await r.json();
         setRows((j.volumes || []) as VolRow[]);
         setSelected([]); setLastIndex(null);
@@ -135,20 +128,12 @@ export default function VolumesView({ hosts }: { hosts: Host[] }) {
       headers: { "Content-Type": "application/json" },
       body,
     });
-    if (r.status === 401) {
-      handle401();
-      return;
-    }
     const j = await r.json().catch(() => ({}));
     if (!r.ok) {
       alert(typeof j === "string" ? j : "Delete failed");
     }
     // refresh
     const rr = await fetch(`/api/volumes/hosts/${encodeURIComponent(hostName)}`, { credentials: "include" });
-    if (rr.status === 401) {
-      handle401();
-      return;
-    }
     const jj = await rr.json();
     setRows((jj.volumes || []) as VolRow[]);
     setSelected([]); setLastIndex(null);

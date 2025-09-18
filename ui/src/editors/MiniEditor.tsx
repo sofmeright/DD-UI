@@ -4,7 +4,6 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Shield, ShieldOff, Eye, EyeOff, Save, Maximize2, Minimize2, AlertTriangle } from "lucide-react";
-import { handle401 } from "@/utils/auth";
 import { Editor } from "@monaco-editor/react";
 import type { IacFileMeta } from "@/types";
 import { errorLog } from "@/utils/logging";
@@ -175,11 +174,6 @@ export default function MiniEditor({
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ path, content: bodyContent, sops: sopsOnSave }),
       });
-
-      if (resp.status === 401) {
-        handle401();
-        return;
-      }
 
       const txt = await resp.text();
       if (!resp.ok) throw new Error(txt || `${resp.status} ${resp.statusText}`);

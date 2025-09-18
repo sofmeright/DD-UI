@@ -86,7 +86,7 @@ func main() {
 	debugLog("Debug logging is enabled")
 
 	// Initialize auth from environment
-	localSessionManager, err := InitAuthFromEnv()
+	sessionManager, err := InitAuthFromEnv()
 	if err != nil {
 		fatalLog("OIDC setup failed: %v", err)
 	}
@@ -104,12 +104,6 @@ func main() {
 	// Start inventory file watcher for auto-reload
 	services.StartInventoryWatcher(ctx)
 
-	// Initialize Git sync service
-	gitSync := services.GetGitSync()
-	if err := gitSync.Initialize(ctx); err != nil {
-		warnLog("Git sync initialization failed (feature disabled): %v", err)
-	}
-
 	// kick off background auto-scanner (Portainer-ish cadence)
 	startAutoScanner(ctx)
 	startIacAutoScanner(ctx)
@@ -118,11 +112,8 @@ func main() {
 	
 	// Wrap router with session middleware
 	var handler http.Handler = r
-	if localSessionManager != nil {
-		infoLog("MAIN: Applying LoadAndSave session middleware")
-		handler = localSessionManager.LoadAndSave(r)
-	} else {
-		errorLog("MAIN: No session manager - LoadAndSave NOT applied!")
+	if sessionManager != nil {
+		handler = sessionManager.LoadAndSave(r)
 	}
 
 	srv := &http.Server{

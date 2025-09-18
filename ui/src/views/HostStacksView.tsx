@@ -1,18 +1,12 @@
 // ui/src/views/HostsStacksView.tsx
 // ui/src/views/HostsStacksView.tsx
 import { useEffect, useState } from "react";
-import { handle401 } from "@/utils/auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
-import { handle401 } from "@/utils/auth";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { handle401 } from "@/utils/auth";
 import { Switch } from "@/components/ui/switch";
 import HostPicker from "@/components/HostPicker";
-import { handle401 } from "@/utils/auth";
-import GitSyncToggle from "@/components/GitSyncToggle";
-import DevOpsToggle from "@/components/DevOpsToggle";
 import {
   ChevronRight,
   FileText,
@@ -35,22 +29,16 @@ import {
   XCircle,
 } from "lucide-react";
 import StatePill from "@/components/StatePill";
-import { handle401 } from "@/utils/auth";
 import DriftBadge from "@/components/DriftBadge";
 import ActionBtn from "@/components/ActionBtn";
-import { handle401 } from "@/utils/auth";
 import LiveLogsModal from "@/components/LiveLogsModal";
 import ConsoleModal from "@/components/ConsoleModal";
-import { handle401 } from "@/utils/auth";
 import SearchBar from "@/components/SearchBar";
 import PortLinks from "@/components/PortLinks";
-import { handle401 } from "@/utils/auth";
 import { ApiContainer, Host, IacService, IacStack, MergedRow, MergedStack } from "@/types";
 import { formatDT, formatPortsLines } from "@/utils/format";
-import { handle401 } from "@/utils/auth";
 import { debugLog, warnLog } from "@/utils/logging";
 import { computeHostMetrics } from "@/utils/metrics";
-import { handle401 } from "@/utils/auth";
 
 // Debounce helper to prevent excessive API calls
 function useDebounce<T extends (...args: any[]) => any>(func: T, delay: number): T {
@@ -142,7 +130,10 @@ export default function HostStacksView({
 
   function matchRow(r: MergedRow, q: string) {
     if (!q) return true;
-    const hay = [r.name, r.state, r.stack, r.imageRun, r.imageIac, r.ip, r.portsText, r.owner] .filter(Boolean) .join(" ") .toLowerCase();
+    const hay = [r.name, r.state, r.stack, r.imageRun, r.imageIac, r.ip, r.portsText, r.owner]
+      .filter(Boolean)
+      .join(" ")
+      .toLowerCase();
     return hay.includes(q.toLowerCase());
   }
 
@@ -162,11 +153,6 @@ export default function HostStacksView({
           body: JSON.stringify({ action }),
         }
       );
-      
-      if (response.status === 401) {
-        handle401();
-        return;
-      }
       
       if (!response.ok) {
         const errorText = await response.text().catch(() => "Action failed");
@@ -281,11 +267,6 @@ export default function HostStacksView({
           credentials: "include" 
         });
         
-        if (response.status === 401) {
-          handle401();
-          return;
-        }
-        
         if (!response.ok) {
           debugLog(`[DD-UI] Failed to fetch container data for ${containerName} (attempt ${attempts})`);
           continue;
@@ -307,12 +288,14 @@ export default function HostStacksView({
         
         // Always update the UI with current data
         setStacks(prevStacks => 
-          prevStacks.map(stack => ({ ...stack,
+          prevStacks.map(stack => ({
+            ...stack,
             rows: stack.rows.map(row => {
               if (row.name === containerName) {
                 const portsLines = formatPortsLines((updatedContainer as any).ports);
                 const portsText = portsLines.join("\n");
-                return { ...row,
+                return {
+                  ...row,
                   state: currentState,
                   status: currentStatus,
                   imageRun: updatedContainer.image,
@@ -375,14 +358,10 @@ export default function HostStacksView({
     // Register view for polling boost
     const registerView = async () => {
       try {
-        const r = await fetch(`/api/view/hosts/${encodeURIComponent(host.name)}/start`, {
+        await fetch(`/api/view/hosts/${encodeURIComponent(host.name)}/start`, {
           method: 'POST',
           credentials: 'include'
         });
-        if (r.status === 401) {
-          handle401();
-          return;
-        }
         debugLog('[DD-UI] Registered view boost for host:', host.name);
       } catch (e) {
         debugLog('[DD-UI] Failed to register view boost:', e);
@@ -392,14 +371,10 @@ export default function HostStacksView({
     // Unregister view for polling boost
     const unregisterView = async () => {
       try {
-        const r = await fetch(`/api/view/hosts/${encodeURIComponent(host.name)}/end`, {
+        await fetch(`/api/view/hosts/${encodeURIComponent(host.name)}/end`, {
           method: 'POST',
           credentials: 'include'
         });
-        if (r.status === 401) {
-          handle401();
-          return;
-        }
         debugLog('[DD-UI] Unregistered view boost for host:', host.name);
       } catch (e) {
         debugLog('[DD-UI] Failed to unregister view boost:', e);
@@ -466,10 +441,6 @@ export default function HostStacksView({
         const re = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}`, {
           credentials: "include",
         });
-        if (re.status === 401) {
-          handle401();
-          return;
-        }
         if (re.ok) {
           const ej = await re.json();
           const items = Array.isArray(ej?.stacks) ? ej.stacks : [];
@@ -548,7 +519,11 @@ export default function HostStacksView({
         // Try rendered_services from enhanced API first, then from basic API (since basic now uses enhanced logic)
         const enhancedRenderedServices = enh?.rendered_services || [];
         // Check both camelCase and snake_case for compatibility
-        const basicRenderedServices = Array.isArray((is as any)?.rendered_services)  ? (is as any).rendered_services  : Array.isArray((is as any)?.renderedServices)  ? (is as any).renderedServices  : [];
+        const basicRenderedServices = Array.isArray((is as any)?.rendered_services) 
+          ? (is as any).rendered_services 
+          : Array.isArray((is as any)?.renderedServices) 
+            ? (is as any).renderedServices 
+            : [];
         const allRenderedServices = enhancedRenderedServices.length > 0 ? enhancedRenderedServices : basicRenderedServices;
         
         if (sname === 'it-tools') {
@@ -588,7 +563,9 @@ export default function HostStacksView({
           image: rv.image,
         }));
         const servicesResolved: Array<{ service_name: string; container_name?: string; image?: string }> =
-          rendered.length > 0 ? rendered : rawSvcs.map((x) => ({
+          rendered.length > 0
+            ? rendered
+            : rawSvcs.map((x) => ({
                 service_name: x.service_name,
                 container_name: x.container_name || undefined,
                 image: x.image || undefined,
@@ -757,22 +734,19 @@ export default function HostStacksView({
           credentials: "include" 
         });
         
-        if (response.status === 401) {
-          handle401();
-          return;
-        }
-        
         if (response.ok) {
           const contJson = await response.json();
           const runtime: ApiContainer[] = (contJson.containers || []) as ApiContainer[];
           
           // Update container states in existing stacks
           setStacks(prevStacks => 
-            prevStacks.map(stack => ({ ...stack,
+            prevStacks.map(stack => ({
+              ...stack,
               rows: stack.rows.map(row => {
                 const updatedContainer = runtime.find(c => c.name === row.name);
                 if (updatedContainer) {
-                  return { ...row,
+                  return {
+                    ...row,
                     state: updatedContainer.state || row.state,
                     status: updatedContainer.status || row.status,
                   };
@@ -838,11 +812,6 @@ export default function HostStacksView({
         }),
       });
       
-      if (r.status === 401) {
-        handle401();
-        return;
-      }
-      
       if (!r.ok) {
         // Try to get error message from response body
         let errorMessage = `${r.status} ${r.statusText}`;
@@ -862,6 +831,32 @@ export default function HostStacksView({
     }
   }
 
+  async function setAutoDevOps(stackName: string, enabled: boolean) {
+    const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}`, {
+      method: "PATCH",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ auto_devops: enabled }),
+    });
+    if (!r.ok) throw new Error(`${r.status} ${r.statusText}`);
+  }
+
+  function handleToggleAuto(sIndex: number, enabled: boolean) {
+    const s = stacks[sIndex];
+    if (!s.iacId || !s.hasContent) {
+      if (enabled) {
+        alert("This stack needs compose files or services before Auto DevOps can be enabled. Add content first.");
+      }
+      return;
+    }
+    setStacks((prev) => prev.map((row, i) => (i === sIndex ? { ...row, autoDevOps: enabled } : row)));
+    setAutoDevOps(s.name, enabled).catch((err) => {
+      alert(`Failed to update Auto DevOps: ${err?.message || err}`);
+      setStacks((prev) =>
+        prev.map((row, i) => (i === sIndex ? { ...row, autoDevOps: !enabled } : row))
+      );
+    });
+  }
 
   async function deleteStackAt(index: number) {
     const s = stacks[index];
@@ -876,7 +871,9 @@ export default function HostStacksView({
     const originalStack = { ...s };
     setStacks((prev) =>
       prev.map((row, i) =>
-        i === index ? { ...row,
+        i === index
+          ? {
+              ...row,
               iacId: undefined,
               hasIac: false,
               iacEnabled: false,
@@ -885,7 +882,8 @@ export default function HostStacksView({
               sops: false,
               drift: "unknown" as const,
               hasContent: false,
-            } : row
+            }
+          : row
       )
     );
 
@@ -894,11 +892,6 @@ export default function HostStacksView({
         method: "DELETE", 
         credentials: "include" 
       });
-      
-      if (r.status === 401) {
-        handle401();
-        return;
-      }
       
       if (!r.ok) {
         // Revert optimistic update on failure
@@ -982,7 +975,9 @@ export default function HostStacksView({
       {notification && (
         <div className="fixed top-4 right-4 z-50 max-w-md">
           <div className={`rounded-lg border p-4 shadow-lg backdrop-blur-sm ${
-            notification.type === 'success'  ? 'bg-emerald-950/90 border-emerald-800/50 text-emerald-200'  : 'bg-red-950/90 border-red-800/50 text-red-200'
+            notification.type === 'success' 
+              ? 'bg-emerald-950/90 border-emerald-800/50 text-emerald-200' 
+              : 'bg-red-950/90 border-red-800/50 text-red-200'
           }`}>
             <div className="flex items-center gap-2">
               {notification.type === 'success' ? (
@@ -1046,14 +1041,7 @@ export default function HostStacksView({
         <Button onClick={createStackFlow} variant="outline" className="border-slate-700 text-slate-200">
           New Stack
         </Button>
-        
-        {/* Toggles positioned at the end */}
-        <div className="ml-auto flex items-center gap-3">
-          <DevOpsToggle level="host" hostName={host.name} />
-          <GitSyncToggle />
-        </div>
       </div>
-      <div className="text-xs text-slate-400 mt-1">Tip: click the stack title to open the full compare & editor view.</div>
 
       {loading && (
         <div className="space-y-3">
@@ -1089,15 +1077,17 @@ export default function HostStacksView({
         </div>
       )}
 
-      {stacks .filter((s) => {
+      {stacks
+        .filter((s) => {
           // Hide stack cards if search is active and no containers match
           if (!hostQuery.trim()) return true;
           const matchingRows = s.rows.filter((r) => matchRow(r, hostQuery));
           return matchingRows.length > 0;
-        }) .map((s, idx) => (
+        })
+        .map((s, idx) => (
         <Card key={`${host.name}:${s.name}`} className="bg-slate-900/50 border-slate-800 rounded-xl">
-          <CardHeader className="py-2 flex flex-row items-center justify-between">
-            <div className="space-y-1 flex-1">
+          <CardHeader className="pb-2 flex flex-row items-center justify-between">
+            <div className="space-y-1">
               <CardTitle className="text-xl text-white">
                 <button className="hover:underline" onClick={() => onOpenStack(s.name)}>
                   {s.name}
@@ -1120,35 +1110,40 @@ export default function HostStacksView({
                 ) : (
                   <Badge variant="outline" className="border-slate-700 text-slate-300">No IaC</Badge>
                 )}
-                {s.iacId && (
-                  <button 
-                    title="Delete IaC for this stack" 
-                    onClick={() => deleteStackAt(idx)}
-                    disabled={deletingStacks.has(idx)}
-                    className={`h-[22px] w-[22px] flex items-center justify-center bg-slate-900/80 border border-slate-700 rounded-full hover:bg-rose-900/40 hover:border-rose-700 transition-colors ${deletingStacks.has(idx) ? "opacity-50" : ""}`}
-                  >
-                    {deletingStacks.has(idx) ? (
-                      <Loader2 className="h-3 w-3 text-rose-400 animate-spin" />
-                    ) : (
-                      <Trash2 className="h-3 w-3 text-rose-400" />
-                    )}
-                  </button>
-                )}
               </div>
             </div>
-            <div className="flex items-center">
-              <DevOpsToggle
-                level="stack"
-                hostName={host}
-                stackName={s.name}
-                compact={false}
+            <div className="flex items-center gap-2">
+              <label htmlFor={`auto-${idx}`} className="text-sm text-slate-300">
+                Auto DevOps
+              </label>
+              <Switch
+                id={`auto-${idx}`}
+                checked={!!s.autoDevOps}
+                onCheckedChange={(v) => handleToggleAuto(idx, !!v)}
+                disabled={!s.iacId || !s.hasContent}
               />
+              {s.iacId && (
+                <Button 
+                  size="icon" 
+                  variant="ghost" 
+                  title="Delete IaC for this stack" 
+                  onClick={() => deleteStackAt(idx)}
+                  disabled={deletingStacks.has(idx)}
+                  className={deletingStacks.has(idx) ? "opacity-50" : ""}
+                >
+                  {deletingStacks.has(idx) ? (
+                    <Loader2 className="h-4 w-4 text-rose-300 animate-spin" />
+                  ) : (
+                    <Trash2 className="h-4 w-4 text-rose-300" />
+                  )}
+                </Button>
+              )}
             </div>
           </CardHeader>
           <CardContent className="pt-0">
             <div className="overflow-hidden rounded-lg border border-slate-800">
               <div className="overflow-x-auto">
-                <table className="w-full text-sm table-auto">
+                <table className="w-full text-xs table-auto">
                   <thead className="bg-slate-900/70 text-slate-300">
                     <tr className="whitespace-nowrap">
                       <th className="px-2 py-2 text-left min-w-[120px] w-[20%]">Name</th>
@@ -1162,7 +1157,9 @@ export default function HostStacksView({
                     </tr>
                   </thead>
                 <tbody>
-                  {s.rows .filter((r) => matchRow(r, hostQuery)) .map((r) => {
+                  {s.rows
+                    .filter((r) => matchRow(r, hostQuery))
+                    .map((r) => {
                       const st = (r.state || "").toLowerCase();
                       const isRunning =
                         st.includes("running") || st.includes("up") || st.includes("healthy") || st.includes("restarting");
@@ -1291,10 +1288,6 @@ export default function HostStacksView({
                                           `/api/containers/hosts/${encodeURIComponent(host.name)}/${encodeURIComponent(r.name)}/stats`,
                                           { credentials: "include" }
                                         );
-                                        if (r2.status === 401) {
-                                          handle401();
-                                          return;
-                                        }
                                         const txt = await r2.text();
                                         setInfoModal({ title: `${r.name} (stats)`, text: txt || "(no data)" });
                                       } catch {
@@ -1324,6 +1317,7 @@ export default function HostStacksView({
                 </table>
               </div>
             </div>
+            <div className="pt-2 text-xs text-slate-400">Tip: click the stack title to open the full compare & editor view.</div>
           </CardContent>
         </Card>
       ))}

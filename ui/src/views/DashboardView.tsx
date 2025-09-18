@@ -3,7 +3,6 @@ import MetricCard from "@/components/MetricCard";
 import { Boxes, Layers, AlertTriangle, XCircle, Server } from "lucide-react";
 import { Host, ApiContainer, IacStack } from "@/types";
 import { computeHostMetrics } from "@/utils/metrics";
-import { handle401 } from "@/utils/auth";
 
 export default function DashboardView({ hosts }: { hosts: Host[] }) {
   const [metricsCache, setMetricsCache] = useState<Record<string, { stacks: number; containers: number; drift: number; errors: number }>>({});
@@ -25,7 +24,7 @@ export default function DashboardView({ hosts }: { hosts: Host[] }) {
               fetch(`/api/iac/hosts/${encodeURIComponent(name)}`, { credentials: "include" }),
             ]);
             if (rc.status === 401 || ri.status === 401) { 
-              handle401(); 
+              window.location.replace("/auth/login"); 
               return; 
             }
             const contJson = await rc.json();

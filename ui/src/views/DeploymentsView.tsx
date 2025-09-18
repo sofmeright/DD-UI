@@ -6,7 +6,6 @@ import { Input } from "@/components/ui/input";
 import MetricCard from "@/components/MetricCard";
 import { Boxes, Layers, AlertTriangle, XCircle, RefreshCw } from "lucide-react";
 import { Host } from "@/types";
-import { handle401 } from "@/utils/auth";
 
 export default function DeploymentsView({
   metrics, hosts, filteredHosts, loading, err, scanning, onScanAll, onFilter, onOpenHost, refreshMetricsForHosts,
@@ -80,11 +79,7 @@ export default function DeploymentsView({
                     variant="outline"
                     className="border-slate-700 text-slate-200 hover:bg-slate-800"
                     onClick={async () => {
-                      const r = await fetch(`/api/scan/host/${encodeURIComponent(h.name)}`, { method: "POST", credentials: "include" });
-                      if (r.status === 401) {
-                        handle401();
-                        return;
-                      }
+                      await fetch(`/api/scan/host/${encodeURIComponent(h.name)}`, { method: "POST", credentials: "include" });
                       await refreshMetricsForHosts([h.name]);
                     }}
                   >

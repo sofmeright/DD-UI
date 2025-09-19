@@ -137,7 +137,7 @@ export default function CleanupView({
   // Get host from URL parameter, fallback to localStorage, then first host
   const getInitialHost = () => {
     if (urlHostName) return decodeURIComponent(urlHostName);
-    const saved = localStorage.getItem("selectedHost");
+    const saved = localStorage.getItem("dd_ui_selected_host");
     if (saved && hosts.some(h => h.name === saved)) return saved;
     return hosts.length > 0 ? hosts[0].name : '';
   };
@@ -165,7 +165,7 @@ export default function CleanupView({
   // Handle host selection change
   const handleHostChange = (newHost: string) => {
     setSelectedHost(newHost);
-    localStorage.setItem("selectedHost", newHost);
+    localStorage.setItem("dd_ui_selected_host", newHost);
     // Navigate to the new URL
     navigate(`/hosts/${encodeURIComponent(newHost)}/cleanup`);
   };

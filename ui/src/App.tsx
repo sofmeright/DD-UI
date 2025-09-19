@@ -182,7 +182,7 @@ export default function App() {
         try {
           const [rc, ri] = await Promise.all([
             fetch(`/api/containers/hosts/${encodeURIComponent(name)}`, { credentials: "include" }),
-            fetch(`/api/iac/hosts/${encodeURIComponent(name)}`, { credentials: "include" }),
+            fetch(`/api/iac/scopes/${encodeURIComponent(name)}`, { credentials: "include" }),
           ]);
           if (rc.status === 401 || ri.status === 401) { window.location.replace("/auth/login"); return; }
           const contJson = await rc.json();

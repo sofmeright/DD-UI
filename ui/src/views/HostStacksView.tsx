@@ -1,6 +1,6 @@
 // ui/src/views/HostsStacksView.tsx
 // ui/src/views/HostsStacksView.tsx
-import { useEffect, useState } from "react";
+import React, { useEffect, useState } from "react";
 import { handle401 } from "@/utils/auth";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
@@ -9,12 +9,14 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { handle401 } from "@/utils/auth";
 import { Switch } from "@/components/ui/switch";
-import HostPicker from "@/components/HostPicker";
+import EnhancedHostPicker, { PickerOption } from "@/components/EnhancedHostPicker";
 import { handle401 } from "@/utils/auth";
 import GitSyncToggle from "@/components/GitSyncToggle";
 import DevOpsToggle from "@/components/DevOpsToggle";
 import {
   ChevronRight,
+  ChevronUp,
+  ChevronDown,
   FileText,
   Activity,
   Search,
@@ -33,6 +35,8 @@ import {
   Layers,
   AlertTriangle,
   XCircle,
+  Server,
+  Users,
 } from "lucide-react";
 import StatePill from "@/components/StatePill";
 import { handle401 } from "@/utils/auth";
@@ -45,6 +49,7 @@ import { handle401 } from "@/utils/auth";
 import SearchBar from "@/components/SearchBar";
 import PortLinks from "@/components/PortLinks";
 import { handle401 } from "@/utils/auth";
+import NewStackDialog from "@/components/NewStackDialog";
 import { ApiContainer, Host, IacService, IacStack, MergedRow, MergedStack } from "@/types";
 import { formatDT, formatPortsLines } from "@/utils/format";
 import { handle401 } from "@/utils/auth";
@@ -103,6 +108,27 @@ export default function HostStacksView({
   onOpenStack: (stackName: string) => void;
   onHostChange: (hostName: string) => void;
 }) {
+  // Extract unique groups from all hosts
+  const allGroups = React.useMemo(() => {
+    const groupSet = new Set<string>();
+    hosts.forEach(h => {
+      if (h.groups) {
+        h.groups.forEach(g => groupSet.add(g));
+      }
+    });
+    return Array.from(groupSet).sort();
+  }, [hosts]);
+  
+  // Extract unique tags from all hosts
+  const allTags = React.useMemo(() => {
+    const tagSet = new Set<string>();
+    hosts.forEach(h => {
+      if (h.tags) {
+        h.tags.forEach(t => tagSet.add(t));
+      }
+    });
+    return Array.from(tagSet).sort();
+  }, [hosts]);
   debugLog('[DD-UI] HostStacksView component mounted for host:', host.name);
   const [loading, setLoading] = useState(true);
   const [err, setErr] = useState<string | null>(null);
@@ -110,6 +136,102 @@ export default function HostStacksView({
   const [hostQuery, setHostQuery] = useState("");
   const [deletingStacks, setDeletingStacks] = useState<Set<number>>(new Set());
   const [hostMetrics, setHostMetrics] = useState<{ stacks: number; containers: number; drift: number; errors: number }>({ stacks: 0, containers: 0, drift: 0, errors: 0 });
+  const [showNewStackDialog, setShowNewStackDialog] = useState(false);
+  // Restore host memory feature - use same key as other views
+  const getInitialHost = (): string => {
+    // First check localStorage for synchronization from other views
+    const savedHost = localStorage.getItem('dd_ui_selected_host');
+    if (savedHost && hosts.some(h => h.name === savedHost)) {
+      // Sync URL if needed
+      if (savedHost !== host.name) {
+        requestAnimationFrame(() => onHostChange(savedHost));
+      }
+      return savedHost;
+    }
+    // Fall back to the passed host prop
+    return host.name || '';
+  };
+  
+  // Independent state for host and group selection
+  const [selectedHost, setSelectedHost] = useState<string>(getInitialHost());
+  const [selectedGroup, setSelectedGroup] = useState<string>(''); // Empty means no group filter
+  const [activeSelector, setActiveSelector] = useState<'host' | 'group'>('host'); // Track which selector is active
+  
+  // Derive viewMode from the combination of selectedHost, selectedGroup, and activeSelector
+  const viewMode = React.useMemo((): PickerOption => {
+    // Group selector is active and has a selection
+    if (activeSelector === 'group' && selectedGroup) {
+      return { type: 'group', value: `group:${selectedGroup}`, label: selectedGroup };
+    }
+    // Host selector is active
+    if (activeSelector === 'host') {
+      if (selectedHost) {
+        return { type: 'host', value: `host:${selectedHost}`, label: selectedHost };
+      } else {
+        // "All Hosts" is selected
+        return { type: 'all', value: 'all', label: 'All' };
+      }
+    }
+    // Group selector is active but "All Groups" is selected - this shouldn't show anything special
+    // Just fall back to showing all hosts
+    return { type: 'all', value: 'all', label: 'All' };
+  }, [selectedHost, selectedGroup, activeSelector]);
+  
+  // Sync selectedHost with localStorage when it changes
+  useEffect(() => {
+    if (selectedHost) {
+      localStorage.setItem('dd_ui_selected_host', selectedHost);
+      // Only navigate if the URL doesn't match
+      if (selectedHost !== host.name) {
+        onHostChange(selectedHost);
+      }
+    } else {
+      // Don't remove from localStorage when selecting "All" - let user's last specific host persist
+    }
+  }, [selectedHost, host.name, onHostChange]);
+  
+  // Listen for localStorage changes from other views
+  useEffect(() => {
+    const checkStorage = () => {
+      const savedHost = localStorage.getItem('dd_ui_selected_host');
+      if (savedHost && hosts.some(h => h.name === savedHost)) {
+        // Only sync if we're not actively using the host selector for "All Hosts"
+        // and we're not in group mode
+        if (savedHost !== selectedHost && activeSelector !== 'group' && selectedHost !== '') {
+          // Don't override if user explicitly selected "All Hosts" (empty string)
+          setSelectedHost(savedHost);
+        }
+      }
+    };
+    
+    // Check on mount and when returning to this view
+    checkStorage();
+    
+    // Listen for storage events (from other tabs)
+    window.addEventListener('storage', checkStorage);
+    
+    // Also check periodically when the tab is visible
+    // BUT only if we haven't explicitly selected "All Hosts"
+    const intervalId = setInterval(() => {
+      if (document.visibilityState === 'visible' && selectedHost !== '') {
+        checkStorage();
+      }
+    }, 1000);
+    
+    return () => {
+      window.removeEventListener('storage', checkStorage);
+      clearInterval(intervalId);
+    };
+  }, [hosts, selectedHost, activeSelector]);
+  const [strictScope, setStrictScope] = useState<boolean>(false); // Show all stacks by default
+  const [selectedTags, setSelectedTags] = useState<string[]>([]);
+  
+  // Sorting and filtering states
+  const [sortBy, setSortBy] = useState<'host' | 'name' | 'created' | 'modified' | 'owner'>('name');
+  const [sortDirection, setSortDirection] = useState<'asc' | 'desc'>('asc');
+  const [filterState, setFilterState] = useState<string>(''); // empty means all
+  const [filterOwner, setFilterOwner] = useState<string>(''); // empty means all
+  const [filterAllowedUsers, setFilterAllowedUsers] = useState<string>(''); // empty means all
   
   // Performance optimization: debounced sync to prevent excessive API calls
   const debouncedSync = useDebounce(onSync, 300);
@@ -126,8 +248,8 @@ export default function HostStacksView({
   } | null>(null);
 
   // Live logs & console wiring
-  const [streamLogs, setStreamLogs] = useState<{ ctr: string } | null>(null);
-  const [consoleTarget, setConsoleTarget] = useState<{ ctr: string; cmd?: string } | null>(null);
+  const [streamLogs, setStreamLogs] = useState<{ ctr: string; host?: string } | null>(null);
+  const [consoleTarget, setConsoleTarget] = useState<{ ctr: string; cmd?: string; host?: string } | null>(null);
 
   // Lightweight info modal
   const [infoModal, setInfoModal] = useState<{ title: string; text: string } | null>(null);
@@ -146,15 +268,86 @@ export default function HostStacksView({
     return hay.includes(q.toLowerCase());
   }
 
-  async function doCtrAction(ctr: string, action: string) {
-    const actionKey = `${ctr}-${action}`;
+  // Calculate metrics for currently visible/filtered stacks
+  function calculateFilteredMetrics() {
+    const filteredStacks = stacks.filter((s) => {
+      // Apply strict scope filter
+      if (strictScope) {
+        // For host filter, only show host-scoped stacks for that host
+        if (selectedHost && (s.scopeKind !== 'host' || s.scopeName !== selectedHost)) {
+          return false;
+        }
+        // For group filter, only show group-scoped stacks for that group
+        if (selectedGroup && (s.scopeKind !== 'group' || s.scopeName !== selectedGroup)) {
+          return false;
+        }
+      }
+      
+      // Apply state filter (only if not 'All States')
+      if (filterState && filterState !== '') {
+        const hasMatchingState = s.rows.some(r => {
+          const state = (r.state || '').toLowerCase();
+          if (filterState === 'running') return state.includes('running') || state.includes('up') || state.includes('healthy');
+          if (filterState === 'stopped') return state.includes('exited') || state.includes('stopped') || state.includes('down') || state === 'created';
+          if (filterState === 'paused') return state.includes('paused');
+          if (filterState === 'missing') return state.includes('missing') || state === 'missing';
+          return false;
+        });
+        if (!hasMatchingState) return false;
+      }
+      
+      // Apply owner filter
+      if (filterOwner) {
+        const hasMatchingOwner = s.rows.some(r => 
+          (r.owner || '').toLowerCase().includes(filterOwner.toLowerCase())
+        );
+        if (!hasMatchingOwner) return false;
+      }
+      
+      // Apply allowed users filter (placeholder for now)
+      if (filterAllowedUsers) {
+        // This would need implementation based on host/group metadata
+        // For now, don't filter by this
+      }
+      
+      // Hide stack cards if search is active and no containers match
+      if (!hostQuery.trim()) return true;
+      const matchingRows = s.rows.filter((r) => matchRow(r, hostQuery));
+      return matchingRows.length > 0;
+    });
+
+    return {
+      stacks: filteredStacks.length,
+      containers: filteredStacks.reduce((sum, s) => {
+        // Count only visible containers for each stack
+        const visibleContainers = hostQuery.trim() 
+          ? s.rows.filter((r) => matchRow(r, hostQuery))
+          : s.rows;
+        return sum + visibleContainers.length;
+      }, 0),
+      drift: filteredStacks.filter(s => s.drift === 'drift').length,
+      errors: filteredStacks.reduce((sum, s) => {
+        const visibleContainers = hostQuery.trim() 
+          ? s.rows.filter((r) => matchRow(r, hostQuery))
+          : s.rows;
+        return sum + visibleContainers.filter(r => r.state === 'exited' || r.state === 'dead').length;
+      }, 0),
+    };
+  }
+
+  async function doCtrAction(ctr: string, action: string, targetHost?: string) {
+    // Use provided targetHost or fall back to host.name
+    const hostToUse = targetHost || host.name;
+    
+    // Include host in the action key to differentiate containers with same name on different hosts
+    const actionKey = `${hostToUse}-${ctr}-${action}`;
     
     // Set loading state
     setActionLoading(prev => new Set(prev).add(actionKey));
     
     try {
       const response = await fetch(
-        `/api/containers/hosts/${encodeURIComponent(host.name)}/${encodeURIComponent(ctr)}/action`,
+        `/api/containers/hosts/${encodeURIComponent(hostToUse)}/${encodeURIComponent(ctr)}/action`,
         {
           method: "POST",
           credentials: "include",
@@ -180,7 +373,7 @@ export default function HostStacksView({
       });
 
       // Smart update: Only refresh container data, not full page sync
-      await updateContainerStatus(ctr, action);
+      await updateContainerStatus(ctr, action, hostToUse);
       
     } catch (e) {
       // Show error notification
@@ -198,12 +391,12 @@ export default function HostStacksView({
     }
   }
 
-  function openLiveLogs(ctr: string) {
-    setStreamLogs({ ctr });
+  function openLiveLogs(ctr: string, targetHost?: string) {
+    setStreamLogs({ ctr, host: targetHost });
   }
   
   // Helper function to create basic stacks from containers only (fast initial render)
-  function createBasicStacksFromContainers(runtime: ApiContainer[]): MergedStack[] {
+  function createBasicStacksFromContainers(runtime: ApiContainer[], hostName?: string): MergedStack[] {
     const rtByStack = new Map<string, ApiContainer[]>();
     
     for (const c of runtime) {
@@ -224,11 +417,14 @@ export default function HostStacksView({
           imageRun: c.image,
           imageIac: undefined,
           created: formatDT(c.created_ts),
+          modified: formatDT(c.updated_at),
           ip: c.ip_addr,
           portsText,
           ports: (c as any).ports,
           owner: c.owner || "—",
-        };
+          // Add the actual host for this container so actions work correctly
+          actualHost: hostName,
+        } as any;
       });
       
       return {
@@ -248,14 +444,20 @@ export default function HostStacksView({
   }
 
   // Enhanced container status update with reliable polling for state transitions
-  async function updateContainerStatus(containerName: string, action?: string) {
-    // Prevent duplicate updates for the same container
-    if (pendingContainerUpdates.has(containerName)) {
-      debugLog(`[DD-UI] Skipping duplicate update for ${containerName}`);
+  async function updateContainerStatus(containerName: string, action?: string, targetHost?: string) {
+    // Use provided targetHost or fall back to host.name
+    const hostToUse = targetHost || host.name;
+    
+    // Use host+container as the key to prevent duplicate updates for the same container ON THE SAME HOST
+    const updateKey = `${hostToUse}-${containerName}`;
+    
+    // Prevent duplicate updates for the same container on the same host
+    if (pendingContainerUpdates.has(updateKey)) {
+      debugLog(`[DD-UI] Skipping duplicate update for ${containerName} on ${hostToUse}`);
       return;
     }
     
-    setPendingContainerUpdates(prev => new Set(prev).add(containerName));
+    setPendingContainerUpdates(prev => new Set(prev).add(updateKey));
     
     try {
       const maxAttempts = 20;
@@ -277,7 +479,7 @@ export default function HostStacksView({
         await new Promise(resolve => setTimeout(resolve, delay));
         
         // Fetch container data
-        const response = await fetch(`/api/containers/hosts/${encodeURIComponent(host.name)}`, { 
+        const response = await fetch(`/api/containers/hosts/${encodeURIComponent(hostToUse)}`, { 
           credentials: "include" 
         });
         
@@ -305,11 +507,12 @@ export default function HostStacksView({
         
         debugLog(`[DD-UI] Container ${containerName} polling (${attempts}/${maxAttempts}) for action '${action || 'unknown'}': ${currentState} | ${currentStatus}`);
         
-        // Always update the UI with current data
+        // Always update the UI with current data - ONLY for the specific container on the specific host
         setStacks(prevStacks => 
           prevStacks.map(stack => ({ ...stack,
             rows: stack.rows.map(row => {
-              if (row.name === containerName) {
+              // MUST check both container name AND host to avoid updating wrong containers
+              if (row.name === containerName && (row as any).actualHost === hostToUse) {
                 const portsLines = formatPortsLines((updatedContainer as any).ports);
                 const portsText = portsLines.join("\n");
                 return { ...row,
@@ -317,6 +520,7 @@ export default function HostStacksView({
                   status: currentStatus,
                   imageRun: updatedContainer.image,
                   created: formatDT(updatedContainer.created_ts),
+                  modified: formatDT(updatedContainer.updated_at),
                   ip: updatedContainer.ip_addr,
                   portsText,
                   ports: (updatedContainer as any).ports,
@@ -357,23 +561,31 @@ export default function HostStacksView({
       }
       
     } catch (error) {
-      debugLog(`[DD-UI] Container status update failed for ${containerName}:`, error);
+      debugLog(`[DD-UI] Container status update failed for ${containerName} on ${hostToUse}:`, error);
     } finally {
       // Clean up immediately - the smart polling system will handle regular updates
       setPendingContainerUpdates(prev => {
         const next = new Set(prev);
-        next.delete(containerName);
+        next.delete(updateKey); // Use the same host+container key we used to track it
         return next;
       });
     }
   }
 
+  // Data loading happens automatically via the useEffect when dependencies change
+  
   useEffect(() => {
-    debugLog('[DD-UI] HostStacksView useEffect starting for host:', host.name);
+    debugLog('[DD-UI] HostStacksView useEffect starting, viewMode:', viewMode);
     let cancel = false;
     
-    // Register view for polling boost
+    // For group view, we need to fetch data differently
+    const isGroupView = viewMode.type === 'group';
+    const isAllView = viewMode.type === 'all';
+    const scopeName = viewMode.type === 'group' ? viewMode.value.replace('group:', '') : host.name;
+    
+    // Register view for polling boost (only for single host view)
     const registerView = async () => {
+      if (viewMode.type !== 'host') return;
       try {
         const r = await fetch(`/api/view/hosts/${encodeURIComponent(host.name)}/start`, {
           method: 'POST',
@@ -391,6 +603,7 @@ export default function HostStacksView({
     
     // Unregister view for polling boost
     const unregisterView = async () => {
+      if (viewMode.type !== 'host') return;
       try {
         const r = await fetch(`/api/view/hosts/${encodeURIComponent(host.name)}/end`, {
           method: 'POST',
@@ -406,52 +619,17 @@ export default function HostStacksView({
       }
     };
     
-    registerView(); // Start view boost
+    registerView(); // Start view boost if needed
     
     (async () => {
       setLoading(true);
       setErr(null);
-      try {
-        // Progressive loading: Start with container data (fastest)
-        debugLog('[DD-UI] Phase 1: Loading containers for host:', host.name);
-        const rc = await fetch(`/api/containers/hosts/${encodeURIComponent(host.name)}`, { credentials: "include" });
-        
-        if (rc.status === 401) {
-          window.location.replace("/auth/login");
-          return;
-        }
-        
-        if (!rc.ok) {
-          throw new Error(`Failed to load containers: ${rc.status} ${rc.statusText}`);
-        }
-        
-        const contJson = await rc.json();
-        const runtime: ApiContainer[] = (contJson.containers || []) as ApiContainer[];
-        
-        // Show basic container data immediately (before expensive IaC calls)
-        if (!cancel && runtime.length > 0) {
-          const basicStacks = createBasicStacksFromContainers(runtime);
-          setStacks(basicStacks);
-          debugLog('[DD-UI] Phase 1 complete: Showing', basicStacks.length, 'basic stacks');
-        }
-        
-        // Phase 2: Load IaC data
-        debugLog('[DD-UI] Phase 2: Loading IaC data for host:', host.name);
-        const ri = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}`, { credentials: "include" });
-        if (ri.status === 401) {
-          window.location.replace("/auth/login");
-          return;
-        }
-        
-        if (!ri.ok) {
-          throw new Error(`Failed to load IaC data: ${ri.status} ${ri.statusText}`);
-        }
-        
-        const iacJson = await ri.json();
-        const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
-
-        // Enhanced drift/runtime (source drift, rendered services, & config-hash from backend)
-        const enhancedByName = new Map<
+      
+      // Declare variables at top level for use in common code
+      let merged: MergedStack[] = [];
+      let runtime: ApiContainer[] = [];
+      let iacStacks: IacStack[] = [];
+      const enhancedByName = new Map<
         string,
         {
           drift_detected: boolean;
@@ -460,276 +638,252 @@ export default function HostStacksView({
           containers?: Array<{ name: string; config_hash?: string }>;
           rendered_services?: Array<{ service_name: string; container_name?: string; image?: string }>;
         }
-        >();
-        try {
-        debugLog('[DD-UI] Fetching enhanced-iac data for host:', host.name);
-        const re = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}`, {
-          credentials: "include",
-        });
-        if (re.status === 401) {
-          handle401();
-          return;
-        }
-        if (re.ok) {
-          const ej = await re.json();
-          const items = Array.isArray(ej?.stacks) ? ej.stacks : [];
-          for (const s of items) {
-            const nm = (s?.name || s?.stack_name || "").toString();
-            if (!nm) continue;
-            const ctrs = Array.isArray(s?.containers) ? s.containers : [];
-            const rsv = Array.isArray(s?.rendered_services) ? s.rendered_services : [];
-            enhancedByName.set(nm, {
-              drift_detected: !!s?.drift_detected,
-              drift_reason: s?.drift_reason || "",
-              effective_auto_devops: !!s?.effective_auto_devops,
-              containers: ctrs.map((c: any) => ({
-                name: (c?.name || "").toString(),
-                config_hash: (c?.config_hash || "").toString(),
-              })),
-              rendered_services: rsv.map((rv: any) => ({
-                service_name: (rv?.service_name || "").toString(),
-                container_name: (rv?.container_name || "").toString() || undefined,
-                image: (rv?.image || "").toString() || undefined,
-              })),
-            });
+      >();
+      
+      try {
+        // Determine which hosts to fetch based on view mode and filters
+        let hostsToFetch: Host[] = [];
+        
+        if (isAllView) {
+          // For All view, get all hosts (filtered by tags if applicable)
+          debugLog('[DD-UI] All view - fetching all hosts');
+          
+          // Build query params for host filtering
+          const hostParams = new URLSearchParams();
+          if (selectedTags.length > 0) {
+            selectedTags.forEach(tag => hostParams.append('tags', tag));
           }
-          debugLog('[DD-UI] Phase 3: Enhanced data loaded for', items.length, 'stacks');
+          
+          const hostsResponse = await fetch(`/api/hosts?${hostParams.toString()}`, { credentials: 'include' });
+          if (hostsResponse.status === 401) {
+            window.location.replace("/auth/login");
+            return;
+          }
+          
+          if (hostsResponse.ok) {
+            const hostsData = await hostsResponse.json();
+            const items = Array.isArray(hostsData.items) ? hostsData.items : [];
+            hostsToFetch = items.map((h: any) => ({ 
+              name: h.name, 
+              address: h.addr ?? h.address ?? "", 
+              groups: h.groups ?? [] 
+            }));
+          }
+          
+          debugLog('[DD-UI] Will fetch data for', hostsToFetch.length, 'hosts');
+          
+        } else if (isGroupView) {
+          // For Group view, get hosts that are members of the group
+          debugLog('[DD-UI] Group view - fetching hosts for group:', selectedGroup);
+          
+          const groupResponse = await fetch(`/api/groups/${encodeURIComponent(selectedGroup)}/hosts`, { 
+            credentials: 'include' 
+          });
+          
+          if (groupResponse.status === 401) {
+            window.location.replace("/auth/login");
+            return;
+          }
+          
+          if (groupResponse.ok) {
+            const groupHosts = await groupResponse.json();
+            // The response should be an array of host names
+            const hostNames = Array.isArray(groupHosts) ? groupHosts : [];
+            
+            // Now get the full host details for each
+            if (hostNames.length > 0) {
+              const allHostsResponse = await fetch('/api/hosts', { credentials: 'include' });
+              if (allHostsResponse.ok) {
+                const allHostsData = await allHostsResponse.json();
+                const items = Array.isArray(allHostsData.items) ? allHostsData.items : [];
+                
+                // Filter to just the hosts in this group
+                hostsToFetch = items
+                  .filter((h: any) => hostNames.includes(h.name))
+                  .map((h: any) => ({ 
+                    name: h.name, 
+                    address: h.addr ?? h.address ?? "", 
+                    groups: h.groups ?? [] 
+                  }));
+              }
+            }
+          }
+          
+          debugLog('[DD-UI] Will fetch data for', hostsToFetch.length, 'group member hosts');
+          
         } else {
-          warnLog('[DD-UI] Enhanced-iac API failed - using basic data:', re.status, re.statusText);
-        }
-        } catch (error) {
-        warnLog('[DD-UI] Enhanced-iac API error - using basic data:', error);
-        }
-
-        // Auto DevOps information is now included in the enhanced-iac endpoint response
-
-        // Build IaC maps (RAW names)
-        const iacByStack = new Map<string, IacStack>();
-        for (const s of iacStacks) iacByStack.set(s.name, s);
-
-        // Map label->raw so runtime buckets land under the IaC stack
-        const labelToRaw = new Map<string, string>();
-        for (const s of iacStacks) {
-        labelToRaw.set(sanitizeLabel(s.name), s.name);
-        }
-
-        // Bucket runtime by RAW stack name when we can map; else by label
-        const rtByStack = new Map<string, ApiContainer[]>();
-        for (const c of runtime) {
-        const label = (c.compose_project || c.stack || "(none)").trim() || "(none)";
-        const key = label !== "(none)" ? labelToRaw.get(sanitizeLabel(label)) || label : label;
-        if (!rtByStack.has(key)) rtByStack.set(key, []);
-        rtByStack.get(key)!.push(c);
-        }
-
-        // config-hash by container name (from enhanced) — keep using this map
-        const cfgHashByName = new Map<string, string>();
-        for (const [, e] of enhancedByName.entries()) {
-        for (const c of e.containers || []) {
-          if (c?.name && c?.config_hash) cfgHashByName.set(c.name, c.config_hash);
-        }
-        }
-
-        // Union of names (normalized)
-        const names = new Set<string>([...rtByStack.keys(), ...iacByStack.keys()]);
-        const merged: MergedStack[] = [];
-
-        debugLog('[DD-UI] Processing', names.size, 'stacks for host:', host.name);
-
-        for (const sname of Array.from(names).sort()) {
-        const rcs = rtByStack.get(sname) || [];
-        const is = iacByStack.get(sname);
-
-        // Prefer fully-rendered (post-SOPS, post-interpolation) services from enhanced API.
-        const enh = enhancedByName.get(sname);
-        // Fallback to DB services only if nothing rendered
-        const rawSvcs: IacService[] = Array.isArray(is?.services) ? (is!.services as IacService[]) : [];
-        
-        // Try rendered_services from enhanced API first, then from basic API (since basic now uses enhanced logic)
-        const enhancedRenderedServices = enh?.rendered_services || [];
-        // Check both camelCase and snake_case for compatibility
-        const basicRenderedServices = Array.isArray((is as any)?.rendered_services)  ? (is as any).rendered_services  : Array.isArray((is as any)?.renderedServices)  ? (is as any).renderedServices  : [];
-        const allRenderedServices = enhancedRenderedServices.length > 0 ? enhancedRenderedServices : basicRenderedServices;
-        
-        if (sname === 'it-tools') {
-          debugLog(`[DD-UI] DETAILED it-tools analysis:`, {
-            enhanced_data: enh,
-            basic_stack_full: is,
-            enhanced_rendered_services: enhancedRenderedServices,
-            basic_rendered_services: basicRenderedServices,
-            all_rendered_services: allRenderedServices,
-            raw_services: rawSvcs
-          });
+          // Single host view - just fetch that host
+          const targetHost = selectedHost || host.name;
+          hostsToFetch = [host];
+          debugLog('[DD-UI] Single host view for:', targetHost);
         }
         
-        debugLog(`[DD-UI] Processing stack: ${sname}`, {
-          enhanced_count: enhancedRenderedServices.length,
-          basic_count: basicRenderedServices.length,
-          raw_count: rawSvcs.length,
-          using_enhanced: enhancedRenderedServices.length > 0,
-          has_rendered_services: (is as any)?.rendered_services !== undefined,
-          has_renderedServices: (is as any)?.renderedServices !== undefined,
-          basic_stack_data: is ? Object.keys(is) : [],
-          enhanced_api_data: enh ? Object.keys(enh) : [],
-          basic_rendered_services_sample: basicRenderedServices.slice(0, 1),
-          enhanced_rendered_services_sample: enhancedRenderedServices.slice(0, 1)
-        });
-        
-        if (allRenderedServices.length > 0) {
-          allRenderedServices.forEach((svc, idx) => {
-            const hasEncrypted = svc.image && (svc.image.includes('ENC[') || svc.image.includes('${'));
-            debugLog(`[DD-UI] ${sname}/${svc.service_name}: ${hasEncrypted ? '🔒' : '✅'} ${svc.image || 'no-image'}`);
-          });
-        }
-        
-        const rendered = allRenderedServices.map((rv: any) => ({
-          service_name: rv.service_name,
-          container_name: rv.container_name,
-          image: rv.image,
-        }));
-        const servicesResolved: Array<{ service_name: string; container_name?: string; image?: string }> =
-          rendered.length > 0 ? rendered : rawSvcs.map((x) => ({
-                service_name: x.service_name,
-                container_name: x.container_name || undefined,
-                image: x.image || undefined,
-              }));
-
-        const hasIac = !!is && (servicesResolved.length > 0 || !!is.compose);
-        const hasContent = !!is && (!!is.compose || servicesResolved.length > 0);
-
-        const rows: MergedRow[] = [];
-        const projectLabel = sanitizeLabel(sname);
-
-        function guessServiceFromContainerName(containerName: string, projectLabel: string): string | undefined {
-          let base = containerName.replace(/[-_]\d+$/, "");
-          if (base.startsWith(projectLabel + "-")) return base.slice(projectLabel.length + 1);
-          if (base.startsWith(projectLabel + "_")) return base.slice(projectLabel.length + 1);
-          return undefined;
-        }
-
-        function desiredImageFor(c: ApiContainer): string | undefined {
-          if (servicesResolved.length === 0) return undefined;
-          const reported = (c as any).compose_service as string | undefined;
-          const guessed = reported || guessServiceFromContainerName(c.name, c.compose_project || projectLabel);
-          const svc = servicesResolved.find(
-            (x) =>
-              (guessed && x.service_name === guessed) ||
-              (!!x.container_name && x.container_name === c.name)
-          );
-          return svc?.image || undefined;
-        }
-
-        // Runtime rows
-        for (const c of rcs) {
-          const portsLines = formatPortsLines((c as any).ports);
-          const portsText = portsLines.join("\n");
-          const _desired = desiredImageFor(c);
-
-          rows.push({
-            name: c.name,
-            state: c.state,
-            status: c.status,
-            stack: sname,
-            imageRun: c.image,
-            imageIac: undefined, // we do NOT compare images for drift on existing rows
-            created: formatDT(c.created_ts),
-            ip: c.ip_addr,
-            portsText,
-            ports: (c as any).ports, // Include raw ports data for PortLinks component
-            owner: c.owner || "—",
-            // @ts-ignore
-            _desiredImage: _desired,
-          } as any);
-        }
-
-        // Missing service rows (only when not found in runtime)
-        for (const svc of servicesResolved) {
-          const exists = (rcs || []).some((c) => {
-            if (svc.container_name) {
-              return c.name === svc.container_name;
+        // Now fetch data symmetrically for all determined hosts
+        if (hostsToFetch.length > 0) {
+          debugLog('[DD-UI] Starting parallel data fetch for', hostsToFetch.length, 'hosts');
+          
+          // Fetch container and IaC data for all hosts in parallel
+          const hostDataPromises = hostsToFetch.map(async (fetchHost) => {
+            try {
+              const [containerResponse, iacResponse] = await Promise.all([
+                fetch(`/api/containers/hosts/${encodeURIComponent(fetchHost.name)}`, { credentials: 'include' }),
+                fetch(`/api/iac/scopes/${encodeURIComponent(fetchHost.name)}`, { credentials: 'include' })
+              ]);
+              
+              if (containerResponse.status === 401 || iacResponse.status === 401) {
+                window.location.replace("/auth/login");
+                return null;
+              }
+              
+              const containerData = containerResponse.ok ? await containerResponse.json() : { containers: [] };
+              const iacData = iacResponse.ok ? await iacResponse.json() : { stacks: [] };
+              
+              return {
+                host: fetchHost,
+                containers: containerData.containers || [],
+                iacStacks: iacData.stacks || []
+              };
+            } catch (e) {
+              debugLog('[DD-UI] Error fetching data for host', fetchHost.name, ':', e);
+              return {
+                host: fetchHost,
+                containers: [],
+                iacStacks: []
+              };
             }
-            const reported = (c as any).compose_service as string | undefined;
-            const guessed = reported || guessServiceFromContainerName(c.name, c.compose_project || projectLabel);
-            return guessed === svc.service_name;
           });
-
-          if (!exists) {
-            debugLog(`[DD-UI] Missing service in ${sname}:`, {
-              service_name: svc.service_name,
-              container_name: svc.container_name,
-              image: svc.image,
-              is_encrypted: svc.image?.includes('ENC['),
-              using_rendered: rendered.length > 0,
-              rendered_count: rendered.length,
-              raw_count: rawSvcs.length
-            });
-            // Skip adding missing service rows if they contain encrypted values
-            // This indicates we're using raw services when we should be using rendered
-            if (svc.image?.includes('ENC[')) {
-              warnLog(`[DD-UI] Skipping encrypted missing service ${svc.service_name} - check rendered services`);
-              continue;
+          
+          const allHostData = await Promise.all(hostDataPromises);
+          const validHostData = allHostData.filter(d => d !== null);
+          
+          debugLog('[DD-UI] Received data for', validHostData.length, 'hosts');
+          
+          // Now merge all the data into our unified view
+          const allStacks: MergedStack[] = [];
+          
+          for (const hostData of validHostData) {
+            if (!hostData) continue;
+            
+            const { host: dataHost, containers, iacStacks: hostIacStacks } = hostData;
+            
+            // Process this host's data using existing merge logic
+            const hostRuntime = containers as ApiContainer[];
+            const hostIac = hostIacStacks as IacStack[];
+            
+            // Build enhanced map for this host
+            const hostEnhanced = new Map<string, any>();
+            for (const s of hostIac) {
+              if (s.name) {
+                debugLog(`[DD-UI] IaC stack ${s.name} drift data:`, {
+                  drift_detected: s.drift_detected,
+                  drift_reason: s.drift_reason,
+                  stack_data: s
+                });
+                hostEnhanced.set(s.name, {
+                  drift_detected: s.drift_detected || false,
+                  drift_reason: s.drift_reason || "",
+                  effective_auto_devops: s.effective_auto_devops || false,
+                  containers: s.containers || [],
+                  rendered_services: s.rendered_services || []
+                });
+              }
             }
-            rows.push({
-              name: svc.container_name || svc.service_name,
-              state: "missing",
-              stack: sname,
-              imageRun: undefined,
-              imageIac: svc.image, // <- resolved (post-SOPS, post-interpolation)
-              created: "—",
-              ip: "—",
-              portsText: "—",
-              ports: [], // No ports for missing services
-              owner: "—",
-            });
+            
+            // Merge containers and IaC for this host
+            const hostMerged = createBasicStacksFromContainers(hostRuntime, dataHost.name);
+            
+            // Set default scope information for ALL stacks from this host
+            for (const stack of hostMerged) {
+              // Default scope is the host we're currently processing
+              stack.scopeKind = 'host';
+              stack.scopeName = dataHost.name;
+              // Track the actual physical host for Docker operations
+              stack.actualHost = dataHost.name;
+            }
+            
+            // Enhance with IaC data
+            for (const stack of hostMerged) {
+              const iac = hostIac.find(i => i.name === stack.name);
+              if (iac) {
+                stack.iacId = iac.id;
+                stack.hasIac = true;
+                stack.iacEnabled = iac.iac_enabled || false;
+                stack.autoDevOps = iac.auto_devops || false;
+                stack.pullPolicy = iac.pull_policy;
+                stack.sops = iac.sops_status === 'all';
+                stack.deployKind = iac.deploy_kind || 'compose';
+                stack.hasContent = iac.has_content || false;
+                
+                // Add scope information for All/Group views
+                stack.scopeKind = iac.scope_kind;
+                stack.scopeName = iac.scope_name || dataHost.name;
+                // Keep tracking the actual host (doesn't change even for group stacks)
+                stack.actualHost = dataHost.name;
+                
+                // Add drift info
+                const enh = hostEnhanced.get(stack.name);
+                if (enh) {
+                  stack.drift = enh.drift_detected ? 'drift' : 'in_sync';
+                  stack.driftReason = enh.drift_reason;
+                  debugLog(`[DD-UI] Updated drift for stack ${stack.name}: ${stack.drift}`);
+                } else {
+                  debugLog(`[DD-UI] No enhanced data found for stack ${stack.name}, keeping drift: ${stack.drift}`);
+                }
+              }
+            }
+            
+            // Add IaC stacks that have no runtime containers
+            for (const iac of hostIac) {
+              if (!hostMerged.find(s => s.name === iac.name)) {
+                const enh = hostEnhanced.get(iac.name);
+                hostMerged.push({
+                  name: iac.name,
+                  drift: enh?.drift_detected ? 'drift' : 'in_sync',
+                  driftReason: enh?.drift_reason,
+                  iacEnabled: iac.iac_enabled || false,
+                  autoDevOps: iac.auto_devops || false,
+                  pullPolicy: iac.pull_policy,
+                  sops: iac.sops_status === 'all',
+                  deployKind: iac.deploy_kind || 'compose',
+                  rows: [],
+                  iacId: iac.id,
+                  hasIac: true,
+                  hasContent: iac.has_content || false,
+                  scopeKind: iac.scope_kind,
+                  scopeName: iac.scope_name || dataHost.name,
+                  actualHost: dataHost.name,
+                });
+              }
+            }
+            
+            // Add all this host's stacks to our combined list
+            allStacks.push(...hostMerged);
           }
-        }
-
-        let stackDrift: "in_sync" | "drift" | "unknown" = "unknown";
-        if (enh) {
-          stackDrift = enh.drift_detected ? "drift" : "in_sync";
-        } else if (hasIac) {
-          stackDrift = "unknown";
-        }
-
-        const effectiveAuto = enh?.effective_auto_devops ? true : false;
-
-        const mergedRow: MergedStack = {
-          name: sname,
-          drift: stackDrift,
-          iacEnabled: hasIac ? (is as any)?.iac_enabled || false : false,  // Keep original iacEnabled
-          autoDevOps: effectiveAuto,  // Separate Auto DevOps property
-          pullPolicy: hasIac ? is?.pull_policy : undefined,
-          sops: hasIac ? is?.sops_status === "all" : false,
-          deployKind: hasIac ? is?.deploy_kind || "compose" : sname === "(none)" ? "unmanaged" : "unmanaged",
-          rows,
-          iacId: (is as any)?.id,
-          hasIac,
-          hasContent,
-        };
-
-        // @ts-ignore tooltip reason
-        if (enh?.drift_reason) (mergedRow as any).driftReason = enh.drift_reason;
-
-        merged.push(mergedRow);
-        }
-
-        if (!cancel) {
+          
+          // Set the final merged stacks
+          merged = allStacks;
           setStacks(merged);
-          debugLog('[DD-UI] Loaded data for host:', host.name, 'stacks:', merged.length);
           
-          // Count actual drift from backend's drift_detected field
-          let driftCount = 0;
-          for (const [, enh] of enhancedByName) {
-            if (enh.drift_detected === true) {
-              driftCount++;
-            }
-          }
-          
-          // Compute metrics for this host
-          const metrics = computeHostMetrics(runtime, iacStacks);
-          metrics.drift = driftCount; // Override with backend's drift detection
+          // Calculate metrics
+          const metrics = {
+            stacks: merged.length,
+            containers: merged.reduce((sum, s) => sum + s.rows.length, 0),
+            drift: merged.filter(s => s.drift === 'drift').length,
+            errors: merged.filter(s => s.rows.some(r => r.state === 'exited' || r.state === 'dead')).length,
+          };
           setHostMetrics(metrics);
+          
+          debugLog('[DD-UI] Metrics calculated:', metrics);
+          debugLog('[DD-UI] Processed', merged.length, 'total stacks across all hosts');
+          setLoading(false);
+          
+        } else {
+          // No hosts to fetch - show empty state
+          setStacks([]);
+          setHostMetrics({ stacks: 0, containers: 0, drift: 0, errors: 0 });
+          setLoading(false);
         }
+        // Unified API has been removed - using individual host fetching above
       } catch (e: any) {
         if (!cancel) setErr(e?.message || "Failed to load host stacks");
       } finally {
@@ -741,7 +895,10 @@ export default function HostStacksView({
       cancel = true;
       unregisterView(); // End view boost
     };
-  }, [host.name]);
+  }, [host.name, viewMode, selectedTags, strictScope, selectedHost, selectedGroup]);
+  
+  // No need for complex localStorage checking - host prop already handles it
+
 
   // Periodic polling to refresh container states
   useEffect(() => {
@@ -752,37 +909,65 @@ export default function HostStacksView({
     
     const pollContainerData = async () => {
       try {
-        debugLog('[DD-UI] Polling for container updates...');
-        const response = await fetch(`/api/containers/hosts/${encodeURIComponent(host.name)}`, { 
-          credentials: "include" 
+        // Get all unique actual hosts from the stacks
+        const uniqueHosts = new Set<string>();
+        stacks.forEach(stack => {
+          if (stack.actualHost) {
+            uniqueHosts.add(stack.actualHost);
+          }
         });
         
-        if (response.status === 401) {
-          handle401();
-          return;
+        // If no hosts found, fall back to current host
+        if (uniqueHosts.size === 0) {
+          uniqueHosts.add(host.name);
         }
         
-        if (response.ok) {
-          const contJson = await response.json();
-          const runtime: ApiContainer[] = (contJson.containers || []) as ApiContainer[];
-          
-          // Update container states in existing stacks
-          setStacks(prevStacks => 
-            prevStacks.map(stack => ({ ...stack,
-              rows: stack.rows.map(row => {
-                const updatedContainer = runtime.find(c => c.name === row.name);
+        debugLog('[DD-UI] Polling for container updates from hosts:', Array.from(uniqueHosts));
+        
+        // Fetch containers from all actual hosts with host tracking
+        const containersByHost = new Map<string, ApiContainer[]>();
+        for (const hostName of uniqueHosts) {
+          try {
+            const response = await fetch(`/api/containers/hosts/${encodeURIComponent(hostName)}`, { 
+              credentials: "include" 
+            });
+            
+            if (response.status === 401) {
+              handle401();
+              return;
+            }
+            
+            if (response.ok) {
+              const contJson = await response.json();
+              const runtime: ApiContainer[] = (contJson.containers || []) as ApiContainer[];
+              containersByHost.set(hostName, runtime);
+            }
+          } catch (err) {
+            debugLog(`[DD-UI] Failed to poll host ${hostName}:`, err);
+          }
+        }
+        
+        // Update container states in existing stacks
+        setStacks(prevStacks => 
+          prevStacks.map(stack => ({ ...stack,
+            rows: stack.rows.map(row => {
+              // CRITICAL: Must check both container name AND actualHost to avoid updating wrong containers
+              const rowHost = (row as any).actualHost;
+              if (rowHost && containersByHost.has(rowHost)) {
+                const hostContainers = containersByHost.get(rowHost) || [];
+                const updatedContainer = hostContainers.find(c => c.name === row.name);
                 if (updatedContainer) {
                   return { ...row,
                     state: updatedContainer.state || row.state,
                     status: updatedContainer.status || row.status,
                   };
                 }
-                return row;
-              })
-            }))
-          );
-          debugLog('[DD-UI] Container states updated from polling');
-        }
+              }
+              return row;
+            })
+          }))
+        );
+        debugLog('[DD-UI] Container states updated from polling');
       } catch (error) {
         debugLog('[DD-UI] Polling error:', error);
       }
@@ -805,62 +990,13 @@ export default function HostStacksView({
     return /[^A-Za-z0-9 _-]/.test(s);
   }
 
-  async function createStackFlow() {
-    const existing = new Set(stacks.map((s) => s.name));
-    let name = prompt("New stack name:");
-    if (!name) return;
-    name = name.trim();
-    if (!name) return;
-
-    if (existing.has(name)) {
-      alert("A stack with that name already exists.");
-      return;
-    }
-
-    if (hasUnsupportedChars(name)) {
-      const preview = dockerSanitizePreview(name);
-      const ok = confirm(
-        `Heads up: Docker Compose will normalize this name for the project label.\n` +
-          `You entered:  "${name}"\n` +
-          `Compose uses: "${preview}"\n\nProceed with "${name}"?`
-      );
-      if (!ok) return;
-    }
-
-    try {
-      const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks`, {
-        method: "POST",
-        credentials: "include",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          stack_name: name, // store EXACT name as entered; Compose sanitizes at deploy
-          iac_enabled: false,
-        }),
-      });
-      
-      if (r.status === 401) {
-        handle401();
-        return;
-      }
-      
-      if (!r.ok) {
-        // Try to get error message from response body
-        let errorMessage = `${r.status} ${r.statusText}`;
-        try {
-          const errorText = await r.text();
-          if (errorText) errorMessage = errorText;
-        } catch {
-          // Ignore JSON parsing errors for error responses
-        }
-        throw new Error(errorMessage);
-      }
-      
-      const j = await r.json();
-      onOpenStack(name, j.id);
-    } catch (e: any) {
-      alert(e?.message || "Failed to create stack");
-    }
-  }
+  const handleStackCreated = (scopeKind: string, scopeName: string, stackName: string) => {
+    // Navigate to the stack editor
+    onOpenStack(stackName);
+    // The stacks will automatically refresh via the useEffect
+    // Close the dialog
+    setShowNewStackDialog(false);
+  };
 
 
   async function deleteStackAt(index: number) {
@@ -890,7 +1026,7 @@ export default function HostStacksView({
     );
 
     try {
-      const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(s.name)}`, { 
+      const r = await fetch(`/api/iac/scopes/${encodeURIComponent(s.scope_name || host.name)}/stacks/${encodeURIComponent(s.name)}`, { 
         method: "DELETE", 
         credentials: "include" 
       });
@@ -942,12 +1078,12 @@ export default function HostStacksView({
     <div className="space-y-4">
       {/* Streaming Logs Modal */}
       {streamLogs && (
-        <LiveLogsModal host={host.name} container={streamLogs.ctr} onClose={() => setStreamLogs(null)} />
+        <LiveLogsModal host={streamLogs.host || host.name} container={streamLogs.ctr} onClose={() => setStreamLogs(null)} />
       )}
 
       {/* Console Modal */}
       {consoleTarget && (
-        <ConsoleModal host={host.name} container={consoleTarget.ctr} onClose={() => setConsoleTarget(null)} />
+        <ConsoleModal host={consoleTarget.host || host.name} container={consoleTarget.ctr} onClose={() => setConsoleTarget(null)} />
       )}
 
       {/* Info Modal */}
@@ -1005,47 +1141,142 @@ export default function HostStacksView({
         </div>
       )}
 
-      <div className="flex items-center gap-4">
-        <div className="text-lg font-semibold text-white">Stacks</div>
-        <HostPicker hosts={hosts} activeHost={host.name} setActiveHost={onHostChange} />
+      <div className="flex items-start gap-4 flex-wrap">
+        <div className="text-lg font-semibold text-white self-center">Stacks</div>
         
-        {/* Small square metric cards for selected host */}
-        <div className="flex items-center gap-2">
-          <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
-            <Boxes className="h-4 w-4 text-slate-400" />
-            <span className="text-sm text-slate-300">{hostMetrics.stacks}</span>
+        {/* Host Filter Section */}
+        <div className="flex flex-col gap-1 border-l border-slate-700 pl-4">
+          <div className="flex items-center gap-2">
+            <Server className="h-4 w-4 text-slate-400" />
+            <select
+              className="bg-slate-800 border border-slate-700 text-slate-200 px-3 py-1 rounded-md text-sm min-w-[150px]"
+              value={selectedHost}
+              onChange={(e) => {
+                setSelectedHost(e.target.value);
+                setSelectedGroup(''); // Clear group when selecting host
+                setActiveSelector('host'); // Mark host selector as active
+                // localStorage sync and viewMode update are handled by useEffects
+              }}
+            >
+              <option value="">All Hosts</option>
+              {hosts.map(h => (
+                <option key={h.name} value={h.name}>{h.name}</option>
+              ))}
+            </select>
           </div>
-          <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
-            <Layers className="h-4 w-4 text-slate-400" />
-            <span className="text-sm text-slate-300">{hostMetrics.containers}</span>
-          </div>
-          <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
-            <AlertTriangle className="h-4 w-4 text-amber-400" />
-            <span className="text-sm text-amber-400">{hostMetrics.drift}</span>
-          </div>
-          <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
-            <XCircle className="h-4 w-4 text-rose-400" />
-            <span className="text-sm text-rose-400">{hostMetrics.errors}</span>
+          <div className="flex items-center gap-2 pl-6">
+            <Switch
+              checked={strictScope}
+              onCheckedChange={setStrictScope}
+              className="data-[state=checked]:bg-emerald-600 h-4 w-8"
+            />
+            <label className="text-xs text-slate-400">
+              IAC scoped only
+            </label>
           </div>
         </div>
         
-        <SearchBar 
-          value={hostQuery}
-          onChange={setHostQuery}
-          placeholder="Search stacks, services, containers..."
-          className="w-96"
-        />
-        <Button onClick={onSync} className="bg-[#310937] hover:bg-[#2a0830] text-white" disabled={loading}>
-          {loading ? (
-            <Loader2 className="h-4 w-4 mr-1 animate-spin" />
-          ) : (
-            <RefreshCw className="h-4 w-4 mr-1" />
-          )} 
-          {loading ? "Syncing..." : "Sync"}
-        </Button>
-        <Button onClick={createStackFlow} variant="outline" className="border-slate-700 text-slate-200">
-          New Stack
-        </Button>
+        {/* Group Filter Section */}
+        <div className="flex flex-col gap-1 border-l border-slate-700 pl-4">
+          <div className="flex items-center gap-2">
+            <Users className="h-4 w-4 text-slate-400" />
+            <select
+              className="bg-slate-800 border border-slate-700 text-slate-200 px-3 py-1 rounded-md text-sm min-w-[150px]"
+              value={selectedGroup}
+              onChange={(e) => {
+                setSelectedGroup(e.target.value);
+                setSelectedHost(''); // Clear host when selecting group - they're mutually exclusive
+                setActiveSelector('group'); // Mark group selector as active
+                // viewMode is automatically updated via useMemo
+              }}
+            >
+              <option value="">All Groups</option>
+              {allGroups.map(g => (
+                <option key={g} value={g}>{g}</option>
+              ))}
+            </select>
+          </div>
+          <div className="flex items-center gap-2 pl-6">
+            <Switch
+              checked={strictScope && selectedGroup !== ''}
+              disabled={!selectedGroup}
+              onCheckedChange={setStrictScope}
+              className="data-[state=checked]:bg-emerald-600 h-4 w-8"
+            />
+            <label className="text-xs text-slate-400">
+              IAC scoped only
+            </label>
+          </div>
+        </div>
+        
+        {/* Tag Filter */}
+        {allTags.length > 0 && (
+          <div className="flex flex-col gap-1">
+            <label className="text-xs text-slate-400">Filter by Tags</label>
+            <div className="relative">
+              <select
+                multiple
+                value={selectedTags}
+                onChange={(e) => {
+                  const selected = Array.from(e.target.selectedOptions, option => option.value);
+                  setSelectedTags(selected);
+                }}
+                className="bg-slate-900 text-slate-200 border border-slate-700 rounded-lg px-3 py-1.5 pr-8 text-sm w-48"
+                style={{ minHeight: '36px', maxHeight: '120px' }}
+              >
+                {allTags.map(tag => (
+                  <option key={tag} value={tag}>{tag}</option>
+                ))}
+              </select>
+              {selectedTags.length > 0 && (
+                <button
+                  onClick={() => {
+                    setSelectedTags([]);
+                  }}
+                  className="absolute right-2 top-2 text-slate-400 hover:text-slate-200"
+                >
+                  ×
+                </button>
+              )}
+            </div>
+            {selectedTags.length > 0 && (
+              <div className="flex flex-wrap gap-1 mt-1">
+                {selectedTags.map(tag => (
+                  <span key={tag} className="px-2 py-0.5 bg-slate-800 text-slate-300 text-xs rounded">
+                    {tag}
+                  </span>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+        
+        {/* Status metric cards for currently visible stacks */}
+        <div className="flex items-center gap-2">
+          {(() => {
+            const filteredMetrics = calculateFilteredMetrics();
+            return (
+              <>
+                <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
+                  <Layers className="h-4 w-4 text-slate-400" />
+                  <span className="text-sm text-slate-300">{filteredMetrics.stacks}</span>
+                </div>
+                <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
+                  <Boxes className="h-4 w-4 text-slate-400" />
+                  <span className="text-sm text-slate-300">{filteredMetrics.containers}</span>
+                </div>
+                <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
+                  <AlertTriangle className="h-4 w-4 text-amber-400" />
+                  <span className="text-sm text-amber-400">{filteredMetrics.drift}</span>
+                </div>
+                <div className="px-3 py-2 bg-slate-900/60 border border-slate-800 rounded-lg flex items-center gap-2">
+                  <XCircle className="h-4 w-4 text-rose-400" />
+                  <span className="text-sm text-rose-400">{filteredMetrics.errors}</span>
+                </div>
+              </>
+            );
+          })()}
+        </div>
         
         {/* Toggles positioned at the end */}
         <div className="ml-auto flex items-center gap-3">
@@ -1053,6 +1284,101 @@ export default function HostStacksView({
           <GitSyncToggle />
         </div>
       </div>
+      
+      {/* Sort and Filter Controls */}
+      <div className="flex items-center gap-3 mt-3 mb-1">
+          {/* Sort By */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-400">Sort By:</span>
+            <select
+              value={sortBy}
+              onChange={(e) => setSortBy(e.target.value as typeof sortBy)}
+              className="bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1 text-xs"
+            >
+              {viewMode.type === 'all' && <option value="host">Host</option>}
+              <option value="name">Name</option>
+              <option value="created">Created</option>
+              <option value="modified">Modified</option>
+              <option value="owner">Owner</option>
+            </select>
+            <button
+              onClick={() => setSortDirection(sortDirection === 'asc' ? 'desc' : 'asc')}
+              className="bg-slate-800 hover:bg-slate-700 text-slate-200 p-1 rounded transition-colors flex items-center justify-center"
+              title={sortDirection === 'asc' ? 'Ascending' : 'Descending'}
+            >
+              {sortDirection === 'asc' ? <ChevronDown className="h-4 w-4" /> : <ChevronUp className="h-4 w-4" />}
+            </button>
+          </div>
+          
+          {/* Filter By */}
+          <div className="flex items-center gap-2">
+            <span className="text-xs text-slate-400">Filter By:</span>
+            
+            {/* State Filter */}
+            <select
+              value={filterState}
+              onChange={(e) => setFilterState(e.target.value)}
+              className="bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1 text-xs"
+            >
+              <option value="">All States</option>
+              <option value="running">Running</option>
+              <option value="stopped">Stopped</option>
+              <option value="paused">Paused</option>
+              <option value="missing">Missing</option>
+            </select>
+            
+            {/* Owner Filter */}
+            <input
+              type="text"
+              placeholder="Owner..."
+              value={filterOwner}
+              onChange={(e) => setFilterOwner(e.target.value)}
+              className="bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1 text-xs w-24"
+            />
+            
+            {/* Allowed Users Filter */}
+            <input
+              type="text"
+              placeholder="Allowed Users..."
+              value={filterAllowedUsers}
+              onChange={(e) => setFilterAllowedUsers(e.target.value)}
+              className="bg-slate-900 text-slate-200 border border-slate-700 rounded px-2 py-1 text-xs w-32"
+            />
+            
+            {/* Search, Sync, and New Stack moved here */}
+            <SearchBar 
+              value={hostQuery}
+              onChange={setHostQuery}
+              placeholder="Search stacks, services, containers..."
+              className="w-96"
+            />
+            <Button onClick={onSync} className="bg-[#310937] hover:bg-[#2a0830] text-white text-xs py-1 px-2" disabled={loading}>
+              {loading ? (
+                <Loader2 className="h-3 w-3 mr-1 animate-spin" />
+              ) : (
+                <RefreshCw className="h-3 w-3 mr-1" />
+              )} 
+              {loading ? "Syncing..." : "Sync"}
+            </Button>
+            <Button onClick={() => setShowNewStackDialog(true)} variant="outline" className="border-slate-700 text-slate-200 text-xs py-1 px-2">
+              New Stack
+            </Button>
+            
+            {(filterState || filterOwner || filterAllowedUsers) && (
+              <button
+                onClick={() => {
+                  setFilterState('');
+                  setFilterOwner('');
+                  setFilterAllowedUsers('');
+                }}
+                className="text-slate-400 hover:text-slate-200 text-xs"
+              >
+                Clear
+              </button>
+            )}
+          </div>
+        </div>
+      
       <div className="text-xs text-slate-400 mt-1">Tip: click the stack title to open the full compare & editor view.</div>
 
       {loading && (
@@ -1064,21 +1390,39 @@ export default function HostStacksView({
           </div>
           {stacks.length === 0 && (
             <div className="space-y-3">
-              {/* Skeleton loading cards */}
-              {[1, 2, 3].map(i => (
-                <Card key={i} className="bg-slate-900/50 border-slate-800 rounded-xl animate-pulse">
-                  <CardHeader className="pb-2">
-                    <div className="h-6 bg-slate-700 rounded w-32"></div>
-                    <div className="flex gap-2 mt-2">
-                      <div className="h-4 bg-slate-700 rounded w-16"></div>
-                      <div className="h-4 bg-slate-700 rounded w-20"></div>
-                    </div>
+              {loading ? (
+                /* Skeleton loading cards */
+                [1, 2, 3].map(i => (
+                  <Card key={i} className="bg-slate-900/50 border-slate-800 rounded-xl animate-pulse">
+                    <CardHeader className="pb-2">
+                      <div className="h-6 bg-slate-700 rounded w-32"></div>
+                      <div className="flex gap-2 mt-2">
+                        <div className="h-4 bg-slate-700 rounded w-16"></div>
+                        <div className="h-4 bg-slate-700 rounded w-20"></div>
+                      </div>
                   </CardHeader>
                   <CardContent>
                     <div className="h-24 bg-slate-800 rounded"></div>
                   </CardContent>
                 </Card>
-              ))}
+                ))
+              ) : (
+                /* No data message */
+                <Card className="bg-slate-900/50 border-slate-800 rounded-xl">
+                  <CardContent className="py-8 text-center">
+                    <div className="text-slate-400">
+                      {viewMode.type === 'all' ? 
+                        'No stacks found across all hosts' : 
+                        `No stacks found for ${viewMode.label}`}
+                    </div>
+                    {err && (
+                      <div className="mt-2 text-sm text-rose-400">
+                        Error: {err}
+                      </div>
+                    )}
+                  </CardContent>
+                </Card>
+              )}
             </div>
           )}
         </div>
@@ -1089,19 +1433,136 @@ export default function HostStacksView({
         </div>
       )}
 
-      {stacks .filter((s) => {
+      {stacks
+        .filter((s) => {
+          // Apply strict scope filter
+          if (strictScope) {
+            // For host filter, only show host-scoped stacks for that host
+            if (selectedHost && (s.scopeKind !== 'host' || s.scopeName !== selectedHost)) {
+              return false;
+            }
+            // For group filter, only show group-scoped stacks for that group
+            if (selectedGroup && (s.scopeKind !== 'group' || s.scopeName !== selectedGroup)) {
+              return false;
+            }
+          }
+          
+          // Apply state filter (only if not 'All States')
+          if (filterState && filterState !== '') {
+            const hasMatchingState = s.rows.some(r => {
+              const state = (r.state || '').toLowerCase();
+              if (filterState === 'running') return state.includes('running') || state.includes('up') || state.includes('healthy');
+              if (filterState === 'stopped') return state.includes('exited') || state.includes('stopped') || state.includes('down') || state === 'created';
+              if (filterState === 'paused') return state.includes('paused');
+              if (filterState === 'missing') return state.includes('missing') || state === 'missing';
+              return false;
+            });
+            if (!hasMatchingState) return false;
+          }
+          
+          // Apply owner filter
+          if (filterOwner) {
+            const hasMatchingOwner = s.rows.some(r => 
+              (r.owner || '').toLowerCase().includes(filterOwner.toLowerCase())
+            );
+            if (!hasMatchingOwner) return false;
+          }
+          
+          // Apply allowed users filter (this would need to come from host/group metadata)
+          // For now, this is a placeholder as allowed users aren't tracked at stack level
+          if (filterAllowedUsers) {
+            // TODO: Implement when allowed users data is available at stack level
+          }
+          
           // Hide stack cards if search is active and no containers match
           if (!hostQuery.trim()) return true;
           const matchingRows = s.rows.filter((r) => matchRow(r, hostQuery));
           return matchingRows.length > 0;
-        }) .map((s, idx) => (
-        <Card key={`${host.name}:${s.name}`} className="bg-slate-900/50 border-slate-800 rounded-xl">
+        })
+        .sort((a, b) => {
+          let compareValue = 0;
+          
+          switch (sortBy) {
+            case 'host':
+              compareValue = (a.scopeName || '').localeCompare(b.scopeName || '');
+              break;
+            case 'name':
+              compareValue = a.name.localeCompare(b.name);
+              break;
+            case 'created':
+              // Get earliest created timestamp from containers
+              const aCreated = Math.min(...a.rows.map(r => {
+                const timestamp = Date.parse(r.created || '0');
+                return isNaN(timestamp) ? Infinity : timestamp;
+              }));
+              const bCreated = Math.min(...b.rows.map(r => {
+                const timestamp = Date.parse(r.created || '0');
+                return isNaN(timestamp) ? Infinity : timestamp;
+              }));
+              compareValue = aCreated - bCreated;
+              break;
+            case 'modified':
+              // Get latest modified timestamp from containers (for now use created as proxy)
+              const aModified = Math.max(...a.rows.map(r => {
+                const timestamp = Date.parse(r.created || '0');
+                return isNaN(timestamp) ? 0 : timestamp;
+              }));
+              const bModified = Math.max(...b.rows.map(r => {
+                const timestamp = Date.parse(r.created || '0');
+                return isNaN(timestamp) ? 0 : timestamp;
+              }));
+              compareValue = bModified - aModified; // Most recent first
+              break;
+            case 'owner':
+              // Get most common owner from containers
+              const getOwner = (stack: MergedStack) => {
+                const owners = stack.rows.map(r => r.owner || '—').filter(o => o !== '—');
+                return owners.length > 0 ? owners[0] : '—';
+              };
+              compareValue = getOwner(a).localeCompare(getOwner(b));
+              break;
+          }
+          
+          // Apply sort direction
+          return sortDirection === 'asc' ? compareValue : -compareValue;
+        })
+        .map((s, idx) => (
+        <Card key={`${s.actualHost || s.scopeName || host.name}:${s.name}`} className="bg-slate-900/50 border-slate-800 rounded-xl">
           <CardHeader className="py-2 flex flex-row items-center justify-between">
             <div className="space-y-1 flex-1">
-              <CardTitle className="text-xl text-white">
-                <button className="hover:underline" onClick={() => onOpenStack(s.name)}>
+              <CardTitle className="text-xl text-white flex items-center gap-3">
+                <button className="hover:underline" onClick={() => {
+                  // Navigate to the stack's actual host if different from current
+                  if (s.scopeName && s.scopeName !== host.name) {
+                    onHostChange(s.scopeName);
+                    setTimeout(() => onOpenStack(s.name), 100);
+                  } else {
+                    onOpenStack(s.name);
+                  }
+                }}>
                   {s.name}
                 </button>
+                {/* Scope badge for mixed view */}
+                {viewMode.type === 'all' && (
+                  <Badge 
+                    variant="outline" 
+                    className={s.scopeKind === 'group' 
+                      ? "border-blue-600 bg-blue-900/20 text-blue-300" 
+                      : "border-green-600 bg-green-900/20 text-green-300"}
+                  >
+                    {s.scopeKind === 'group' ? (
+                      <><Users className="h-3 w-3 mr-1" />GROUP: {s.scopeName}</>
+                    ) : (
+                      <><Server className="h-3 w-3 mr-1" />HOST: {s.scopeName}</>
+                    )}
+                  </Badge>
+                )}
+                {/* Group badge when viewing a specific group */}
+                {viewMode.type === 'group' && (
+                  <Badge className="border-blue-600 bg-blue-900/20 text-blue-300" variant="outline">
+                    <Users className="h-3 w-3 mr-1" />GROUP STACK
+                  </Badge>
+                )}
               </CardTitle>
               <div className="flex items-center gap-2">
                 <span title={(s as any).driftReason || ""}>{DriftBadge(s.drift)}</span>
@@ -1135,11 +1596,22 @@ export default function HostStacksView({
                   </button>
                 )}
               </div>
+              {/* Show which hosts are running this group stack */}
+              {viewMode.type === 'group' && s.runningOnHosts && s.runningOnHosts.length > 0 && (
+                <div className="flex items-center gap-2 mt-1">
+                  <span className="text-xs text-slate-400">Running on:</span>
+                  {s.runningOnHosts.map((hostName: string) => (
+                    <Badge key={hostName} variant="outline" className="border-slate-600 text-slate-300 text-xs">
+                      <Server className="h-3 w-3 mr-1" />{hostName}
+                    </Badge>
+                  ))}
+                </div>
+              )}
             </div>
             <div className="flex items-center">
               <DevOpsToggle
                 level="stack"
-                hostName={host}
+                hostName={s.scopeName || host}
                 stackName={s.name}
                 compact={false}
               />
@@ -1151,14 +1623,15 @@ export default function HostStacksView({
                 <table className="w-full text-sm table-auto">
                   <thead className="bg-slate-900/70 text-slate-300">
                     <tr className="whitespace-nowrap">
-                      <th className="px-2 py-2 text-left min-w-[120px] w-[20%]">Name</th>
-                      <th className="px-2 py-2 text-left min-w-[80px] w-[12%]">State</th>
-                      <th className="px-2 py-2 text-left min-w-[150px] w-[25%]">Image</th>
-                      <th className="px-2 py-2 text-left min-w-[100px] w-[15%]">Published Ports</th>
-                      <th className="px-2 py-2 text-left min-w-[120px] w-[15%]">Actions</th>
-                      <th className="px-2 py-2 text-left min-w-[80px] w-[8%] hidden sm:table-cell">Created</th>
-                      <th className="px-2 py-2 text-left min-w-[90px] w-[10%] hidden md:table-cell">IP</th>
-                      <th className="px-2 py-2 text-left min-w-[80px] w-[8%] hidden lg:table-cell pr-4">Owner</th>
+                      <th className="px-2 py-2 text-left min-w-[100px] max-w-[150px] w-[13.3%]">Name</th>
+                      <th className="px-2 py-2 text-left min-w-[40px] w-[3.85%]">State</th>
+                      <th className="px-2 py-2 text-left min-w-[100px] max-w-[140px] w-[13.35%]">Image</th>
+                      <th className="px-2 py-2 text-left min-w-[60px] w-[6%]">Ports</th>
+                      <th className="px-2 py-2 text-left w-[280px] max-w-[280px]">Actions</th>
+                      <th className="px-2 py-2 text-left w-[90px] max-w-[90px] hidden sm:table-cell">Created</th>
+                      <th className="px-2 py-2 text-left w-[90px] max-w-[90px] hidden sm:table-cell">Modified</th>
+                      <th className="px-2 py-2 text-left w-[100px] max-w-[100px] hidden md:table-cell">IP</th>
+                      <th className="px-2 py-2 text-left w-[80px] max-w-[80px] hidden lg:table-cell pr-4">Owner</th>
                     </tr>
                   </thead>
                 <tbody>
@@ -1169,18 +1642,24 @@ export default function HostStacksView({
                       const isPaused = st.includes("paused");
                       return (
                         <tr key={r.name} className="border-t border-slate-800 hover:bg-slate-900/40 align-top">
-                          <td className="px-2 py-1.5 font-medium text-slate-200 truncate">{r.name}</td>
-                          <td className="px-2 py-1.5 text-slate-300">
-                            <StatePill state={r.state} status={r.status} />
+                          <td className="px-2 py-1.5 font-medium text-slate-200 max-w-[150px]">
+                            <div className="truncate" title={r.name}>
+                              {r.name}
+                            </div>
                           </td>
-                          <td className="px-2 py-1.5 text-slate-300">
+                          <td className="px-2 py-1.5 text-slate-300 min-w-[40px] max-w-[80px]">
+                            <div className="truncate">
+                              <StatePill state={r.state} status={r.status} />
+                            </div>
+                          </td>
+                          <td className="px-2 py-1.5 text-slate-300 max-w-[140px]">
                             <div className="flex items-center gap-2">
                               <div className="truncate" title={r.imageRun || ""}>
                                 {r.imageRun || "—"}
                               </div>
                               {r.imageIac && r.state === "missing" && (
                                 <>
-                                  <ChevronRight className="h-4 w-4 text-slate-500" />
+                                  <ChevronRight className="h-4 w-4 text-slate-500 flex-shrink-0" />
                                   <div className="truncate text-slate-300" title={r.imageIac}>
                                     {r.imageIac}
                                   </div>
@@ -1188,21 +1667,37 @@ export default function HostStacksView({
                               )}
                             </div>
                           </td>
-                          <td className="px-2 py-1.5 text-slate-300 align-top">
+                          <td className="px-2 py-1.5 text-slate-300 align-top min-w-[60px]">
                             <div className="truncate">
                               <PortLinks 
                                 ports={r.ports || []} 
-                                hostAddress={host.address || host.name}
+                                hostAddress={
+                                  // In unified view, use the container's actual host
+                                  (r as any).actualHost ? 
+                                    (hosts.find(h => h.name === (r as any).actualHost)?.address || (r as any).actualHost) :
+                                  // Fall back to stack scope or current host
+                                  s.scopeName ? 
+                                    (hosts.find(h => h.name === s.scopeName)?.address || s.scopeName) : 
+                                    (host.address || host.name)
+                                }
                                 className="leading-tight"
                               />
                             </div>
                           </td>
-                          <td className="px-2 py-1">
-                            <div className="flex items-center gap-1 whitespace-nowrap py-0.5">
+                          <td className="px-2 py-1 w-[280px] max-w-[280px]">
+                            <div className="inline-flex items-center gap-0 whitespace-nowrap py-1 px-1.5 bg-slate-900/40 rounded-md border border-slate-800/50 w-auto">
                               {r.state === "missing" ? (
                                 // For missing services, only show inspect action
                                 <>
-                                  <ActionBtn title="Inspect" icon={Search} onClick={() => onOpenStack(s.name)} />
+                                  <ActionBtn title="Inspect" icon={Search} onClick={() => {
+                                    // Navigate to the stack's actual host if different from current
+                                    if (s.scopeName && s.scopeName !== host.name) {
+                                      onHostChange(s.scopeName);
+                                      setTimeout(() => onOpenStack(s.name), 100);
+                                    } else {
+                                      onOpenStack(s.name);
+                                    }
+                                  }} />
                                   <span className="text-slate-500 text-xs ml-2">Service not running</span>
                                 </>
                               ) : (
@@ -1214,8 +1709,8 @@ export default function HostStacksView({
                                       title="Start" 
                                       icon={Play} 
                                       color="green" 
-                                      onClick={() => doCtrAction(r.name, "start")}
-                                      loading={actionLoading.has(`${r.name}-start`)}
+                                      onClick={() => doCtrAction(r.name, "start", (r as any).actualHost || (r as any).hostName || undefined)}
+                                      loading={actionLoading.has(`${(r as any).actualHost || (r as any).hostName || host.name}-${r.name}-start`)}
                                     />
                                   )}
                                   {isRunning && (
@@ -1223,8 +1718,8 @@ export default function HostStacksView({
                                       title="Stop" 
                                       icon={Square} 
                                       color="yellow" 
-                                      onClick={() => doCtrAction(r.name, "stop")}
-                                      loading={actionLoading.has(`${r.name}-stop`)}
+                                      onClick={() => doCtrAction(r.name, "stop", (r as any).actualHost || (r as any).hostName || undefined)}
+                                      loading={actionLoading.has(`${(r as any).actualHost || (r as any).hostName || host.name}-${r.name}-stop`)}
                                     />
                                   )}
                                   {(isRunning || isPaused) && (
@@ -1232,8 +1727,8 @@ export default function HostStacksView({
                                       title="Restart"
                                       icon={RotateCw}
                                       color="blue"
-                                      onClick={() => doCtrAction(r.name, "restart")}
-                                      loading={actionLoading.has(`${r.name}-restart`)}
+                                      onClick={() => doCtrAction(r.name, "restart", (r as any).actualHost || (r as any).hostName || undefined)}
+                                      loading={actionLoading.has(`${(r as any).actualHost || (r as any).hostName || host.name}-${r.name}-restart`)}
                                     />
                                   )}
                                   {isRunning && !isPaused && (
@@ -1241,8 +1736,8 @@ export default function HostStacksView({
                                       title="Pause" 
                                       icon={Pause} 
                                       color="yellow" 
-                                      onClick={() => doCtrAction(r.name, "pause")}
-                                      loading={actionLoading.has(`${r.name}-pause`)}
+                                      onClick={() => doCtrAction(r.name, "pause", (r as any).actualHost || (r as any).hostName || undefined)}
+                                      loading={actionLoading.has(`${(r as any).actualHost || (r as any).hostName || host.name}-${r.name}-pause`)}
                                     />
                                   )}
                                   {isPaused && (
@@ -1250,8 +1745,8 @@ export default function HostStacksView({
                                       title="Resume"
                                       icon={PlayCircle}
                                       color="green"
-                                      onClick={() => doCtrAction(r.name, "unpause")}
-                                      loading={actionLoading.has(`${r.name}-unpause`)}
+                                      onClick={() => doCtrAction(r.name, "unpause", (r as any).actualHost || (r as any).hostName || undefined)}
+                                      loading={actionLoading.has(`${(r as any).actualHost || (r as any).hostName || host.name}-${r.name}-unpause`)}
                                     />
                                   )}
 
@@ -1261,25 +1756,25 @@ export default function HostStacksView({
                                     title="Kill" 
                                     icon={ZapOff} 
                                     color="red" 
-                                    onClick={() => doCtrAction(r.name, "kill")}
-                                    loading={actionLoading.has(`${r.name}-kill`)}
+                                    onClick={() => doCtrAction(r.name, "kill", (r as any).actualHost || (r as any).hostName || undefined)}
+                                    loading={actionLoading.has(`${(r as any).actualHost || (r as any).hostName || host.name}-${r.name}-kill`)}
                                   />
                                   <ActionBtn 
                                     title="Remove" 
                                     icon={Trash2} 
                                     color="red" 
-                                    onClick={() => doCtrAction(r.name, "remove")}
-                                    loading={actionLoading.has(`${r.name}-remove`)}
+                                    onClick={() => doCtrAction(r.name, "remove", (r as any).actualHost || (r as any).hostName || undefined)}
+                                    loading={actionLoading.has(`${(r as any).actualHost || (r as any).hostName || host.name}-${r.name}-remove`)}
                                   />
 
-                                  <span className="mx-1 h-4 w-px bg-slate-700/60" />
+                                  <span className="mx-1.5 h-4 w-px bg-slate-700/60" />
 
                                   {/* Group 3: Information/Monitoring (logs, console, stats, inspect) */}
-                                  <ActionBtn title="Logs" icon={FileText} onClick={() => openLiveLogs(r.name)} />
+                                  <ActionBtn title="Logs" icon={FileText} onClick={() => openLiveLogs(r.name, (r as any).actualHost || (r as any).hostName || undefined)} />
                                   <ActionBtn
                                     title="Console"
                                     icon={Terminal}
-                                    onClick={() => setConsoleTarget({ ctr: r.name })}
+                                    onClick={() => setConsoleTarget({ ctr: r.name, host: (r as any).actualHost || (r as any).hostName || undefined })}
                                     disabled={!isRunning}
                                   />
                                   <ActionBtn
@@ -1287,8 +1782,9 @@ export default function HostStacksView({
                                     icon={Activity}
                                     onClick={async () => {
                                       try {
+                                        const targetHost = (r as any).actualHost || (r as any).hostName || host.name;
                                         const r2 = await fetch(
-                                          `/api/containers/hosts/${encodeURIComponent(host.name)}/${encodeURIComponent(r.name)}/stats`,
+                                          `/api/containers/hosts/${encodeURIComponent(targetHost)}/${encodeURIComponent(r.name)}/stats`,
                                           { credentials: "include" }
                                         );
                                         if (r2.status === 401) {
@@ -1302,20 +1798,33 @@ export default function HostStacksView({
                                       }
                                     }}
                                   />
-                                  <ActionBtn title="Inspect" icon={Search} onClick={() => onOpenStack(s.name)} />
+                                  <ActionBtn title="Inspect" icon={Search} onClick={() => {
+                                    // Navigate to the stack's actual host if different from current
+                                    if (s.scopeName && s.scopeName !== host.name) {
+                                      onHostChange(s.scopeName);
+                                      setTimeout(() => onOpenStack(s.name), 100);
+                                    } else {
+                                      onOpenStack(s.name);
+                                    }
+                                  }} />
                                 </>
                               )}
                             </div>
                           </td>
                           <td className="px-2 py-1.5 text-slate-300 hidden sm:table-cell">{r.created || "—"}</td>
+                          <td className="px-2 py-1.5 text-slate-300 hidden sm:table-cell">{r.modified || "—"}</td>
                           <td className="px-2 py-1.5 text-slate-300 hidden md:table-cell">{r.ip || "—"}</td>
-                          <td className="px-2 py-1.5 text-slate-300 hidden lg:table-cell pr-4">{r.owner || "—"}</td>
+                          <td className="px-2 py-1.5 text-slate-300 hidden lg:table-cell pr-4 max-w-[100px]">
+                            <div className="truncate" title={r.owner || "—"}>
+                              {r.owner || "—"}
+                            </div>
+                          </td>
                         </tr>
                       );
                     })}
                   {(!s.rows || s.rows.filter((r) => matchRow(r, hostQuery)).length === 0) && (
                     <tr>
-                      <td className="p-3 text-slate-500" colSpan={8}>
+                      <td className="p-3 text-slate-500" colSpan={9}>
                         No containers or services.
                       </td>
                     </tr>
@@ -1337,6 +1846,15 @@ export default function HostStacksView({
           <span className="px-2 py-1 rounded bg-slate-800/60 border border-slate-700">Obscured paths</span>
         </CardContent>
       </Card>
+
+      <NewStackDialog
+        open={showNewStackDialog}
+        onClose={() => setShowNewStackDialog(false)}
+        onStackCreated={handleStackCreated}
+        hosts={hosts}
+        defaultHost={host.name}
+        defaultScopeKind="host"
+      />
     </div>
   );
 }

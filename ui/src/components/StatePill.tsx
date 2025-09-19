@@ -59,8 +59,11 @@ export default function StatePill({ state, status, health }: { state?: string; s
     }
     
     return (
-      <span className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${classes}`}>
-        {displayText}
+      <span 
+        className={`inline-flex items-center px-2.5 py-0.5 rounded-full text-xs font-medium border ${classes} max-w-full`}
+        title={displayText}
+      >
+        <span className="truncate">{displayText}</span>
       </span>
     );
   }

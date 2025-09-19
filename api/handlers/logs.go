@@ -81,7 +81,8 @@ func HandleLogStream(w http.ResponseWriter, r *http.Request) {
 		delete(logSubscribers, subID)
 		subMutex.Unlock()
 		close(logChan)
-		common.DebugLog("Log stream subscriber %s disconnected", subID)
+		// Don't log disconnections as they're normal and create noise
+		// common.DebugLog("Log stream subscriber %s disconnected", subID)
 	}()
 
 	// Send initial connection message
@@ -198,7 +199,8 @@ func streamContainerLogs(ctx context.Context, cli *client.Client, hostName strin
 		serviceName = containerName
 	}
 
-	common.DebugLog("Starting log stream for container %s on host %s", containerName, hostName)
+	// Log at startup only, not for every message
+	common.DebugLog("Starting log stream for container %s on host %s (stack: %s)", containerName, hostName, stackName)
 
 	options := container.LogsOptions{
 		ShowStdout: true,
@@ -220,18 +222,18 @@ func streamContainerLogs(ctx context.Context, cli *client.Client, hostName strin
 	for {
 		select {
 		case <-ctx.Done():
-			// Context canceled is expected when client disconnects
-			common.DebugLog("Log stream context canceled for container %s on host %s", containerName, hostName)
+			// Context canceled is expected when client disconnects - don't log this as it creates noise
+			// common.DebugLog("Log stream context canceled for container %s on host %s", containerName, hostName)
 			return
 		default:
 			n, err := reader.Read(buf)
 			if err != nil {
 				if err == io.EOF {
-					// EOF is normal when container stops or logs end
-					common.DebugLog("Log stream ended for container %s on host %s", containerName, hostName)
+					// EOF is normal when container stops or logs end - only log at trace level
+					// common.DebugLog("Log stream ended for container %s on host %s", containerName, hostName)
 				} else if ctx.Err() != nil {
-					// Context was canceled - this is expected, don't log as error
-					common.DebugLog("Log stream canceled for container %s on host %s", containerName, hostName)
+					// Context was canceled - this is expected, don't log
+					// common.DebugLog("Log stream canceled for container %s on host %s", containerName, hostName)
 				} else {
 					// This is an actual error
 					common.ErrorLog("Error reading logs from %s on host %s: %v", containerName, hostName, err)
@@ -314,6 +316,21 @@ func broadcastLog(entry LogEntry) {
 
 // matchesFilter checks if a log entry matches the given filter
 func matchesFilter(entry LogEntry, filter LogFilter) bool {
+	// Special handling: when filtering for a specific container that's NOT dd-ui-app,
+	// filter out DD-UI's debug logs about stream management to reduce noise
+	if len(filter.Containers) > 0 && !contains(filter.Containers, "dd-ui-app") {
+		// Check if this is DD-UI's stream management noise
+		if entry.ContainerName == "dd-ui-app" && 
+		   (strings.Contains(entry.Message, "Log stream canceled") ||
+		    strings.Contains(entry.Message, "Log stream ended") ||
+		    strings.Contains(entry.Message, "Log stream context canceled") ||
+		    strings.Contains(entry.Message, "subscriber") ||
+		    strings.Contains(entry.Message, "Starting log stream for container")) {
+			// Filter out these noise messages when viewing other containers
+			return false
+		}
+	}
+	
 	// Check levels
 	if len(filter.Levels) > 0 && !contains(filter.Levels, entry.Level) {
 		return false
@@ -330,7 +347,7 @@ func matchesFilter(entry LogEntry, filter LogFilter) bool {
 	}
 	
 	// Check stacks
-	if len(filter.StackNames) > 0 && !contains(filter.StackNames, entry.StackName) {
+	if len(filter.StackNames) > 0 && entry.StackName != "" && !contains(filter.StackNames, entry.StackName) {
 		return false
 	}
 	
@@ -452,18 +469,24 @@ func HandleGetLogSources(w http.ResponseWriter, r *http.Request) {
 		sources.Hosts = append(sources.Hosts, h.Name)
 	}
 
-	// Get containers from all hosts
+	// Get containers from all hosts with timeout
 	ctx := context.Background()
 	for _, host := range hosts {
 		hostRow := database.HostRow{Name: host.Name, Addr: host.Addr, Vars: host.Vars}
 		cli, err := services.DockerClientForHost(hostRow)
 		if err != nil {
+			common.DebugLog("Skipping unreachable host %s for log sources: %v", host.Name, err)
 			continue
 		}
 		defer cli.Close()
 
-		containers, err := cli.ContainerList(ctx, container.ListOptions{All: false})
+		// Use timeout for container list to avoid hanging on slow hosts
+		listCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
+		containers, err := cli.ContainerList(listCtx, container.ListOptions{All: false})
+		cancel()
+		
 		if err != nil {
+			common.DebugLog("Failed to list containers on %s for log sources: %v", host.Name, err)
 			continue
 		}
 

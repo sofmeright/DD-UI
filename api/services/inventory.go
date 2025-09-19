@@ -23,8 +23,22 @@ var (
 )
 
 func InitInventory() error {
-	p := common.Env("DD_UI_INVENTORY_PATH", "")
+	// Build path from IAC root and inventory file
+	iacRoot := common.Env("DD_UI_IAC_ROOT", "/data")
+	invFile := common.Env("DD_UI_INVENTORY_FILE", "")
+	
+	var p string
+	if invFile != "" {
+		// Use explicit inventory file path relative to IAC root
+		p = iacRoot + "/" + invFile
+		if _, err := os.Stat(p); err != nil {
+			common.ErrorLog("Specified inventory file not found: %s", p)
+			p = ""
+		}
+	}
+	
 	if p == "" {
+		// Fall back to searching for inventory file
 		p = findInventoryPath()
 		if p == "" {
 			// Try a few times in case the mount is slow
@@ -37,11 +51,12 @@ func InitInventory() error {
 				}
 			}
 			if p == "" {
-				return errors.New("no inventory file found; set DD_UI_INVENTORY_PATH or mount /data/inventory")
+				return errors.New("no inventory file found; set DD_UI_INVENTORY_FILE or place at $DD_UI_IAC_ROOT/ansible/inventory.yaml")
 			}
 		}
 	}
 	invPath = p
+	common.InfoLog("Using inventory file: %s", invPath)
 	return loadInventory(invPath)
 }
 
@@ -70,7 +85,18 @@ func GetHosts() []common.Host {
 }
 
 func findInventoryPath() string {
-	cands := []string{"/data/inventory", "/data/inventory.yml", "/data/inventory.yaml"}
+	iacRoot := common.Env("DD_UI_IAC_ROOT", "/data")
+	
+	// Check new default location first
+	cands := []string{
+		iacRoot + "/ansible/inventory.yaml",
+		iacRoot + "/ansible/inventory.yml", 
+		iacRoot + "/ansible/inventory",
+		// Fallback to old locations for backward compatibility
+		iacRoot + "/inventory",
+		iacRoot + "/inventory.yml",
+		iacRoot + "/inventory.yaml",
+	}
 	for _, c := range cands {
 		if fi, err := os.Stat(c); err == nil && !fi.IsDir() {
 			return c

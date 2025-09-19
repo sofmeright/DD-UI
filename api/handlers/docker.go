@@ -83,14 +83,36 @@ func SetupDockerRoutes(router chi.Router) {
 // -------- Container Handlers --------
 
 // handleContainersList lists all containers for a specific host
+// This now fetches LIVE data from Docker and updates the database
 func handleContainersList(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
 	hostname := chi.URLParam(r, "hostname")
-	containers, err := database.ListContainersByHost(r.Context(), hostname)
+	
+	// Check if we want cached data (for performance)
+	if r.URL.Query().Get("cached") == "true" {
+		containers, err := database.ListContainersByHost(ctx, hostname)
+		if err != nil {
+			http.Error(w, fmt.Sprintf("failed to list containers: %v", err), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]any{"containers": containers, "cached": true})
+		return
+	}
+	
+	// Fetch LIVE data - trigger a scan to update database
+	_, err := services.ScanHostContainers(ctx, hostname)
+	if err != nil {
+		common.WarnLog("Failed to scan host %s: %v", hostname, err)
+		// Fall back to cached data if scan fails
+	}
+	
+	// Now return the fresh data from database
+	containers, err := database.ListContainersByHost(ctx, hostname)
 	if err != nil {
 		http.Error(w, fmt.Sprintf("failed to list containers: %v", err), http.StatusInternalServerError)
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]any{"containers": containers})
+	writeJSON(w, http.StatusOK, map[string]any{"containers": containers, "live": true})
 }
 
 // handleContainerGet returns details for a single container

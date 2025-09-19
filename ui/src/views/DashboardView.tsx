@@ -22,7 +22,7 @@ export default function DashboardView({ hosts }: { hosts: Host[] }) {
           try {
             const [rc, ri] = await Promise.all([
               fetch(`/api/containers/hosts/${encodeURIComponent(name)}`, { credentials: "include" }),
-              fetch(`/api/iac/hosts/${encodeURIComponent(name)}`, { credentials: "include" }),
+              fetch(`/api/iac/scopes/${encodeURIComponent(name)}`, { credentials: "include" }),
             ]);
             if (rc.status === 401 || ri.status === 401) { 
               handle401(); 
@@ -77,8 +77,8 @@ export default function DashboardView({ hosts }: { hosts: Host[] }) {
       {/* Full-size metric cards */}
       <div className="grid md:grid-cols-5 gap-4">
         <MetricCard title="Hosts" value={metrics.hosts} icon={Server} />
-        <MetricCard title="Stacks" value={metrics.stacks} icon={Boxes} />
-        <MetricCard title="Containers" value={metrics.containers} icon={Layers} />
+        <MetricCard title="Stacks" value={metrics.stacks} icon={Layers} />
+        <MetricCard title="Containers" value={metrics.containers} icon={Boxes} />
         <MetricCard title="Drift" value={<span className="text-amber-400">{metrics.drift}</span>} icon={AlertTriangle} />
         <MetricCard title="Errors" value={<span className="text-rose-400">{metrics.errors}</span>} icon={XCircle} />
       </div>

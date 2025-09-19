@@ -1,9 +1,20 @@
 // ui/src/types.ts
 
 export type Host = {
+    id?: number; // For backward compatibility
     name: string;
-    address?: string;
+    addr?: string;
+    address?: string; // Backward compatibility alias
+    vars?: Record<string, any>;
     groups?: string[];
+    tags?: string[];
+    description?: string;
+    alt_name?: string;
+    tenant?: string;
+    allowed_users?: string[];
+    owner?: string;
+    env?: Record<string, string>;
+    labels?: Record<string, string>; // For compatibility
 };
 
 
@@ -113,6 +124,7 @@ export type MergedRow = {
     imageRun?: string;
     imageIac?: string;
     created?: string;
+    modified?: string;
     ip?: string;
     portsText?: string; // Keep for backward compatibility
     ports?: any; // Raw ports data for PortLinks component
@@ -132,4 +144,8 @@ export type MergedStack = {
     rows: MergedRow[];
     hasIac: boolean;
     hasContent?: boolean;
+    scopeKind?: string;  // 'host' or 'group'
+    scopeName?: string;  // The host or group name
+    actualHost?: string;  // The actual physical host where containers are running (for Docker API calls)
+    runningOnHosts?: string[];  // For group stacks, which hosts are running it
 };

@@ -19,9 +19,10 @@ func StartInventoryWatcher(ctx context.Context) {
 	}
 	watcherRunning = true
 	
-	// Get initial mod time
-	if invPath != "" {
-		if stat, err := os.Stat(invPath); err == nil {
+	// Get initial mod time from InventoryManager
+	invMgr := GetInventoryManager()
+	if invMgr.path != "" {
+		if stat, err := os.Stat(invMgr.path); err == nil {
 			lastModTime = stat.ModTime()
 		}
 	}
@@ -46,24 +47,34 @@ func StartInventoryWatcher(ctx context.Context) {
 }
 
 func checkAndReloadInventory() {
-	if invPath == "" {
+	// Reload both the old inventory system and the new InventoryManager
+	invMgr := GetInventoryManager()
+	if invMgr.path == "" {
 		return
 	}
 	
-	stat, err := os.Stat(invPath)
+	stat, err := os.Stat(invMgr.path)
 	if err != nil {
-		common.DebugLog("Inventory watcher: failed to stat %s: %v", invPath, err)
+		common.DebugLog("Inventory watcher: failed to stat %s: %v", invMgr.path, err)
 		return
 	}
 	
 	modTime := stat.ModTime()
 	if modTime.After(lastModTime) {
 		common.InfoLog("Inventory file changed, reloading...")
-		if err := ReloadInventory(); err != nil {
-			common.ErrorLog("Failed to reload inventory: %v", err)
+		
+		// Reload the new InventoryManager
+		if err := invMgr.Reload(); err != nil {
+			common.ErrorLog("Failed to reload InventoryManager: %v", err)
 		} else {
-			common.InfoLog("Inventory reloaded successfully")
-			lastModTime = modTime
+			common.InfoLog("InventoryManager reloaded successfully")
 		}
+		
+		// Also reload the old inventory system for backward compatibility
+		if err := ReloadInventory(); err != nil {
+			common.ErrorLog("Failed to reload old inventory: %v", err)
+		}
+		
+		lastModTime = modTime
 	}
 }

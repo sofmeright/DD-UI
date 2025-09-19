@@ -75,6 +75,7 @@ export default function LoggingView() {
   const [searchQuery, setSearchQuery] = useState("");
   const [isFollowing, setIsFollowing] = useState(true);
   const [isConnected, setIsConnected] = useState(false);
+  const isFollowingRef = useRef(true);  // Track current following state for closures
   const [logBuffer, setLogBuffer] = useState<LogEntry[]>([]);
   const [filteredLogs, setFilteredLogs] = useState<LogEntry[]>([]); // Track filtered logs separately
   const [stats, setStats] = useState<LogStats>({
@@ -260,22 +261,52 @@ export default function LoggingView() {
 
   // Connect to log stream
   const connectToLogStream = useCallback(async () => {
-    debugLog("connectToLogStream called with log levels:", logLevels);
+    debugLog("connectToLogStream called with filters:", {
+      host: selectedHost,
+      stack: selectedStack,
+      container: selectedContainer,
+      levels: logLevels,
+      search: searchQuery
+    });
     
     // Disconnect existing stream
     if (eventSourceRef.current) {
       debugLog("Closing existing log stream connection");
       eventSourceRef.current.close();
+      eventSourceRef.current = null;
     }
 
-    // Clear filtered logs and terminal when reconnecting with new filters
+    // Clear everything when reconnecting with new filters
     setFilteredLogs([]);
+    setLogBuffer([]);  // Also clear the buffer to prevent stale data
+    
+    // Reset stats since we're changing scope
+    setStats({
+      total: 0,
+      byLevel: {},
+      byHost: {},
+      byStack: {},
+    });
+    
     if (terminalInstance.current) {
       terminalInstance.current.clear();
       terminalInstance.current.writeln("\x1b[36m📊 DD-UI Logging System\x1b[0m");
       terminalInstance.current.writeln("\x1b[90m" + "=".repeat(80) + "\x1b[0m");
       terminalInstance.current.writeln("");
-      terminalInstance.current.writeln("\x1b[33m⚡ Reconnecting with new filters...\x1b[0m");
+      terminalInstance.current.writeln("\x1b[33m⚡ Connecting with filters...\x1b[0m");
+      
+      // Show active filters for clarity
+      const activeFilters = [];
+      if (selectedHost !== "all") activeFilters.push(`Host: ${selectedHost}`);
+      if (selectedStack !== "all") activeFilters.push(`Stack: ${selectedStack}`);
+      if (selectedContainer !== "all") activeFilters.push(`Container: ${selectedContainer}`);
+      if (searchQuery) activeFilters.push(`Search: "${searchQuery}"`);
+      
+      if (activeFilters.length > 0) {
+        terminalInstance.current.writeln("\x1b[90mActive filters: " + activeFilters.join(", ") + "\x1b[0m");
+      } else {
+        terminalInstance.current.writeln("\x1b[90mShowing all logs\x1b[0m");
+      }
     }
 
     // Preflight auth check before opening EventSource
@@ -353,12 +384,13 @@ export default function LoggingView() {
       
       // Only log as error if it's not a normal close
       if (eventSource.readyState === EventSource.CLOSED) {
-        debugLog("Log stream connection closed, will reconnect");
+        debugLog("Log stream connection closed");
       } else {
-        warnLog("Log stream connection interrupted, will reconnect");
+        warnLog("Log stream connection error, readyState:", eventSource.readyState);
       }
       
-      if (terminalInstance.current) {
+      // Don't show reconnect message if we're not following anymore
+      if (terminalInstance.current && isFollowingRef.current) {
         terminalInstance.current.writeln(
           "\x1b[33m⟳ Connection interrupted. Reconnecting in 3 seconds...\x1b[0m"
         );
@@ -366,36 +398,51 @@ export default function LoggingView() {
       
       // Close the current connection
       eventSource.close();
+      eventSourceRef.current = null;
       
-      setTimeout(() => {
-        if (isFollowing) {
-          connectToLogStream();
-        }
-      }, 3000);
+      // Only reconnect if still following (check the ref, not the stale closure)
+      if (isFollowingRef.current) {
+        setTimeout(() => {
+          // Double-check we're still following (user might have toggled it)
+          if (isFollowingRef.current && !eventSourceRef.current) {
+            connectToLogStream();
+          }
+        }, 3000);
+      }
     };
 
     eventSourceRef.current = eventSource;
-  }, [selectedHost, selectedStack, selectedContainer, logLevels, searchQuery, isFollowing]);
+  }, [selectedHost, selectedStack, selectedContainer, logLevels, searchQuery]);
 
-  // Check if a log entry matches current filters (for client-side filtering)
+  // Check if a log entry matches current filters (for client-side validation)
   const matchesCurrentFilters = useCallback((entry: LogEntry) => {
+    // Since backend is already filtering, this is just a safety check
+    // to prevent displaying logs that shouldn't be shown due to race conditions
+    
     // Check log levels
-    if (!logLevels.includes(entry.level)) {
+    if (logLevels.length > 0 && !logLevels.includes(entry.level)) {
+      debugLog("Filtering out log due to level mismatch:", entry.level, "not in", logLevels);
       return false;
     }
     
     // Check host
     if (selectedHost !== "all" && entry.hostname !== selectedHost) {
+      debugLog("Filtering out log due to host mismatch:", entry.hostname, "!=", selectedHost);
       return false;
     }
     
-    // Check stack
+    // Check stack - handle both null/undefined and empty string
     if (selectedStack !== "all" && entry.stack_name !== selectedStack) {
-      return false;
+      // Allow logs without stack_name if they match container directly
+      if (entry.stack_name || selectedContainer === "all") {
+        debugLog("Filtering out log due to stack mismatch:", entry.stack_name, "!=", selectedStack);
+        return false;
+      }
     }
     
     // Check container
     if (selectedContainer !== "all" && entry.container_name !== selectedContainer) {
+      debugLog("Filtering out log due to container mismatch:", entry.container_name, "!=", selectedContainer);
       return false;
     }
     
@@ -410,84 +457,92 @@ export default function LoggingView() {
   // Process and display log entry
   const processLogEntry = useCallback(
     (entry: LogEntry) => {
-      // Update full buffer
-      setLogBuffer((prev) => {
+      // Backend is already filtering, so we just display what we receive
+      // No need for client-side filtering since the backend handles it
+      
+      // Update filtered logs (these are already filtered by backend)
+      setFilteredLogs((prev) => {
         const updated = [...prev, entry].slice(-1000); // Keep last 1000 entries
         return updated;
       });
 
-      // Update filtered logs if it matches current filters
-      if (matchesCurrentFilters(entry)) {
-        setFilteredLogs((prev) => {
-          const updated = [...prev, entry].slice(-1000); // Keep last 1000 filtered entries
-          return updated;
-        });
+      // Update stats for ALL received logs (already filtered by backend)
+      setStats((prev) => ({
+        total: prev.total + 1,
+        byLevel: { ...prev.byLevel,
+          [entry.level]: (prev.byLevel[entry.level] || 0) + 1,
+        },
+        byHost: { ...prev.byHost,
+          [entry.hostname]: (prev.byHost[entry.hostname] || 0) + 1,
+        },
+        byStack: entry.stack_name ? { ...prev.byStack,
+              [entry.stack_name]: (prev.byStack[entry.stack_name] || 0) + 1,
+            } : prev.byStack,
+      }));
 
-        // Update stats only for visible logs
-        setStats((prev) => ({
-          total: prev.total + 1,
-          byLevel: { ...prev.byLevel,
-            [entry.level]: (prev.byLevel[entry.level] || 0) + 1,
-          },
-          byHost: { ...prev.byHost,
-            [entry.hostname]: (prev.byHost[entry.hostname] || 0) + 1,
-          },
-          byStack: entry.stack_name ? { ...prev.byStack,
-                [entry.stack_name]: (prev.byStack[entry.stack_name] || 0) + 1,
-              } : prev.byStack,
-        }));
+      // Write to terminal
+      if (terminalInstance.current) {
+        const timestamp = new Date(entry.timestamp).toLocaleTimeString();
+        const levelColor = {
+          ERROR: "\x1b[31m", // Red
+          WARN: "\x1b[33m",  // Yellow
+          INFO: "\x1b[32m",  // Green
+          DEBUG: "\x1b[36m", // Cyan
+        }[entry.level] || "\x1b[37m"; // Default white
 
-        // Write to terminal only if visible
-        if (terminalInstance.current) {
-          const timestamp = new Date(entry.timestamp).toLocaleTimeString();
-          const levelColor = {
-            ERROR: "\x1b[31m", // Red
-            WARN: "\x1b[33m",  // Yellow
-            INFO: "\x1b[32m",  // Green
-            DEBUG: "\x1b[36m", // Cyan
-          }[entry.level] || "\x1b[37m"; // Default white
+        const levelIcon = {
+          ERROR: "✗",
+          WARN: "⚠",
+          INFO: "ℹ",
+          DEBUG: "⚡",
+        }[entry.level] || "•";
 
-          const levelIcon = {
-            ERROR: "✗",
-            WARN: "⚠",
-            INFO: "ℹ",
-            DEBUG: "⚡",
-          }[entry.level] || "•";
-
-          const line = `${timestamp} ${levelColor}${levelIcon} [${entry.level}]\x1b[0m \x1b[90m${entry.hostname}/${entry.container_name || entry.service_name}:\x1b[0m ${entry.message}`;
-          terminalInstance.current.writeln(line);
-        }
+        const line = `${timestamp} ${levelColor}${levelIcon} [${entry.level}]\x1b[0m \x1b[90m${entry.hostname}/${entry.container_name || entry.service_name}:\x1b[0m ${entry.message}`;
+        terminalInstance.current.writeln(line);
       }
     },
-    [matchesCurrentFilters]
+    [] // No dependencies needed since backend does filtering
   );
 
-  // Start/stop following logs and reconnect when filters change
+  // Update ref when isFollowing changes
   useEffect(() => {
-    if (isFollowing) {
-      connectToLogStream();
-    } else {
+    isFollowingRef.current = isFollowing;
+  }, [isFollowing]);
+
+  // Single effect to manage log streaming based on following state and filters
+  useEffect(() => {
+    // If not following, close any existing connection
+    if (!isFollowing) {
+      debugLog("Pausing log stream");
       if (eventSourceRef.current) {
         eventSourceRef.current.close();
         eventSourceRef.current = null;
+        setIsConnected(false);
       }
+      return;
     }
 
+    // If following, start/restart the connection
+    debugLog("Starting/restarting log stream with isFollowing:", isFollowing);
+    
+    // Use a small delay to debounce rapid changes
+    const timer = setTimeout(() => {
+      // Double-check we're still following after the delay
+      if (isFollowingRef.current) {
+        connectToLogStream();
+      }
+    }, 250);
+
+    // Cleanup function
     return () => {
-      if (eventSourceRef.current) {
+      clearTimeout(timer);
+      if (eventSourceRef.current && !isFollowingRef.current) {
         eventSourceRef.current.close();
+        eventSourceRef.current = null;
       }
     };
-  }, [isFollowing, connectToLogStream]);
-
-  // Reconnect when log levels change
-  useEffect(() => {
-    debugLog("Log levels changed:", logLevels);
-    if (isFollowing && eventSourceRef.current) {
-      debugLog("Reconnecting due to log level change");
-      connectToLogStream();
-    }
-  }, [logLevels, isFollowing, connectToLogStream]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [isFollowing, selectedHost, selectedStack, selectedContainer, logLevels, searchQuery]);  // All dependencies that should trigger reconnect
 
   // Clear terminal and filtered logs only
   const clearTerminal = () => {
@@ -869,7 +924,7 @@ export default function LoggingView() {
       </div>
 
       {/* Main Content */}
-      <div className="flex-1 flex flex-col">
+      <div className="flex-1 flex flex-col overflow-hidden">
         {/* Toolbar */}
         <div className="flex items-center justify-between p-3 border-b border-slate-800 bg-slate-900/50">
           <div className="flex items-center gap-2">
@@ -954,7 +1009,7 @@ export default function LoggingView() {
         </div>
 
         {/* Terminal */}
-        <div className="flex-1 bg-slate-950 p-2">
+        <div className="flex-1 bg-slate-950 p-2 overflow-hidden">
           <div ref={terminalRef} className="h-full" />
         </div>
       </div>

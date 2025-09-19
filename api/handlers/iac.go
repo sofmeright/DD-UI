@@ -26,38 +26,136 @@ import (
 // - Batch operations and scanning
 func SetupIacRoutes(router chi.Router) {
 	router.Route("/iac", func(r chi.Router) {
-		// Host-scoped IAC endpoints
-		r.Route("/hosts/{hostname}", func(r chi.Router) {
+		// Scope-based IAC endpoints (works for both hosts and groups)
+		r.Route("/scopes/{scopename}", func(r chi.Router) {
 			r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-				hostname := chi.URLParam(r, "hostname")
-				common.DebugLog("Basic-IAC request for host: %s (using enhanced logic)", hostname)
-				items, err := services.ListEnhancedIacStacksForHost(r.Context(), hostname)
-				if err != nil {
-					common.DebugLog("Basic-IAC (enhanced) failed for host %s: %v", hostname, err)
-					http.Error(w, err.Error(), http.StatusBadRequest)
-					return
+				scopeName := chi.URLParam(r, "scopename")
+				common.DebugLog("IAC request for scope: %s", scopeName)
+				
+				// Determine if this is a host or group
+				invMgr := services.GetInventoryManager()
+				hosts, _ := invMgr.GetHosts()
+				groups, _ := invMgr.GetGroups()
+				
+				var isHost bool
+				var targetGroup *services.InventoryGroup
+				
+				// Check if it's a host
+				for _, h := range hosts {
+					if h.Name == scopeName {
+						isHost = true
+						break
+					}
 				}
-				common.DebugLog("Basic-IAC (enhanced) returning %d stacks for host %s", len(items), hostname)
-				for i, stack := range items {
-					common.DebugLog("Response stack[%d]: %s has %d services, %d rendered_services, compose=%v", i, stack.Name, len(stack.Services), len(stack.RenderedServices), stack.Compose != "")
-					if len(stack.RenderedServices) > 0 {
-						common.DebugLog("  Stack %s using RENDERED services (decrypted):", stack.Name)
-						for j, rs := range stack.RenderedServices {
-							common.DebugLog("    rendered_service[%d]: image=%s", j, rs.Image)
-						}
-					} else {
-						common.DebugLog("  Stack %s using raw services:", stack.Name)
-						for j, s := range stack.Services {
-							common.DebugLog("    service[%d]: image=%s", j, s.Image)
+				
+				// Check if it's a group
+				if !isHost {
+					for _, g := range groups {
+						if g.Name == scopeName {
+							targetGroup = &g
+							break
 						}
 					}
 				}
-				writeJSON(w, http.StatusOK, map[string]any{"stacks": items})
+				
+				if !isHost && targetGroup == nil {
+					http.Error(w, "Scope not found", http.StatusNotFound)
+					return
+				}
+				
+				// If it's a host, return host-scoped stacks
+				if isHost {
+					// Check if cached data is requested
+					useCached := r.URL.Query().Get("cached") == "true"
+					
+					// If not using cached, trigger IaC scan to get fresh file data
+					if !useCached {
+						_, _, scanErr := services.ScanIacLocal(r.Context())
+						if scanErr != nil {
+							common.WarnLog("Failed to scan IaC files: %v", scanErr)
+							// Continue with cached data if scan fails
+						}
+					}
+					
+					items, err := services.ListEnhancedIacStacksForHost(r.Context(), scopeName)
+					if err != nil {
+						common.DebugLog("Failed to get stacks for host %s: %v", scopeName, err)
+						http.Error(w, err.Error(), http.StatusBadRequest)
+						return
+					}
+					
+					// Filter to only host-scoped stacks
+					filtered := make([]services.EnhancedIacStackOut, 0)
+					for _, stack := range items {
+						if stack.ScopeKind == "host" && stack.ScopeName == scopeName {
+							filtered = append(filtered, stack)
+						}
+					}
+					
+					common.DebugLog("Returning %d host-scoped stacks for %s", len(filtered), scopeName)
+					writeJSON(w, http.StatusOK, map[string]any{
+						"stacks": filtered,
+						"scope_kind": "host",
+						"scope_name": scopeName,
+					})
+					return
+				}
+				
+				// If it's a group, collect group-scoped stacks from all member hosts
+				stackMap := make(map[string]services.EnhancedIacStackOut)
+				
+				// Check if cached data is requested
+				useCached := r.URL.Query().Get("cached") == "true"
+				
+				// If not using cached, trigger IaC scan to get fresh file data
+				if !useCached {
+					_, _, scanErr := services.ScanIacLocal(r.Context())
+					if scanErr != nil {
+						common.WarnLog("Failed to scan IaC files: %v", scanErr)
+						// Continue with cached data if scan fails
+					}
+				}
+				
+				for _, hostName := range targetGroup.Hosts {
+					items, err := services.ListEnhancedIacStacksForHost(r.Context(), hostName)
+					if err != nil {
+						common.DebugLog("Failed to get stacks for host %s in group %s: %v", hostName, scopeName, err)
+						continue
+					}
+					
+					// Filter to only group-scoped stacks for this group
+					for _, stack := range items {
+						if stack.ScopeKind == "group" && stack.ScopeName == scopeName {
+							// Use stack name as key to deduplicate across hosts
+							if existing, found := stackMap[stack.Name]; found {
+								// Merge rendered services from multiple hosts
+								existing.RenderedServices = append(existing.RenderedServices, stack.RenderedServices...)
+								stackMap[stack.Name] = existing
+							} else {
+								stackMap[stack.Name] = stack
+							}
+						}
+					}
+				}
+				
+				// Convert map to slice
+				result := make([]services.EnhancedIacStackOut, 0, len(stackMap))
+				for _, stack := range stackMap {
+					result = append(result, stack)
+				}
+				
+				common.DebugLog("Returning %d group-scoped stacks for %s", len(result), scopeName)
+				writeJSON(w, http.StatusOK, map[string]any{
+					"stacks": result,
+					"scope_kind": "group",
+					"scope_name": scopeName,
+					"member_hosts": targetGroup.Hosts,
+				})
 			})
 			
-			// Create stack for this host
+			// Create stack for this scope (host or group)
 			r.Post("/stacks", func(w http.ResponseWriter, r *http.Request) {
-				hostname := chi.URLParam(r, "hostname")
+				scopeName := chi.URLParam(r, "scopename")
 				
 				var body struct {
 					StackName  string `json:"stack_name"`
@@ -68,9 +166,37 @@ func SetupIacRoutes(router chi.Router) {
 					return
 				}
 				
-				// Create the stack with host scope
+				// Determine scope kind
+				invMgr := services.GetInventoryManager()
+				hosts, _ := invMgr.GetHosts()
+				
+				scopeKind := ""
+				for _, h := range hosts {
+					if h.Name == scopeName {
+						scopeKind = "host"
+						break
+					}
+				}
+				
+				// If not found in hosts, check groups
+				if scopeKind == "" {
+					groups, _ := invMgr.GetGroups()
+					for _, g := range groups {
+						if g.Name == scopeName {
+							scopeKind = "group"
+							break
+						}
+					}
+				}
+				
+				if scopeKind == "" {
+					http.Error(w, "Scope not found", http.StatusNotFound)
+					return
+				}
+				
+				// Create the stack with appropriate scope
 				ctx := r.Context()
-				id, err := services.CreateIacStack(ctx, "host", hostname, body.StackName, body.IacEnabled)
+				id, err := services.CreateIacStack(ctx, scopeKind, scopeName, body.StackName, body.IacEnabled)
 				if err != nil {
 					http.Error(w, err.Error(), http.StatusBadRequest)
 					return
@@ -83,10 +209,10 @@ func SetupIacRoutes(router chi.Router) {
 			r.Route("/stacks/{stackname}", func(r chi.Router) {
 				// Get stack details
 				r.Get("/", func(w http.ResponseWriter, r *http.Request) {
-					hostname := chi.URLParam(r, "hostname")
+					scopeName := chi.URLParam(r, "scopename")
 					stackname := chi.URLParam(r, "stackname")
 					
-					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), scopeName, stackname)
 					if err != nil {
 						http.Error(w, "Stack not found", http.StatusNotFound)
 						return
@@ -119,10 +245,10 @@ func SetupIacRoutes(router chi.Router) {
 				
 				// Update stack settings
 				r.Patch("/", func(w http.ResponseWriter, r *http.Request) {
-					hostname := chi.URLParam(r, "hostname")
+					scopeName := chi.URLParam(r, "scopename")
 					stackname := chi.URLParam(r, "stackname")
 					
-					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), scopeName, stackname)
 					if err != nil {
 						http.Error(w, "Stack not found", http.StatusNotFound)
 						return
@@ -174,10 +300,10 @@ func SetupIacRoutes(router chi.Router) {
 				
 				// Delete stack
 				r.Delete("/", func(w http.ResponseWriter, r *http.Request) {
-					hostname := chi.URLParam(r, "hostname")
+					scopeName := chi.URLParam(r, "scopename")
 					stackname := chi.URLParam(r, "stackname")
 					
-					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), scopeName, stackname)
 					if err != nil {
 						http.Error(w, "Stack not found", http.StatusNotFound)
 						return
@@ -194,11 +320,11 @@ func SetupIacRoutes(router chi.Router) {
 				
 				// Get stack files
 				r.Get("/files", func(w http.ResponseWriter, r *http.Request) {
-					hostname := chi.URLParam(r, "hostname")
+					scopeName := chi.URLParam(r, "scopename")
 					stackname := chi.URLParam(r, "stackname")
 					
 					// Find the stack ID from host and stack name
-					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), scopeName, stackname)
 					if err != nil {
 						http.Error(w, "Stack not found", http.StatusNotFound)
 						return
@@ -214,7 +340,7 @@ func SetupIacRoutes(router chi.Router) {
 				
 				// Get file content
 				r.Get("/file", func(w http.ResponseWriter, r *http.Request) {
-					hostname := chi.URLParam(r, "hostname")
+					scopeName := chi.URLParam(r, "scopename")
 					stackname := chi.URLParam(r, "stackname")
 					rel := strings.TrimSpace(r.URL.Query().Get("path"))
 					if rel == "" {
@@ -222,7 +348,7 @@ func SetupIacRoutes(router chi.Router) {
 						return
 					}
 					
-					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), scopeName, stackname)
 					if err != nil {
 						http.Error(w, "Stack not found", http.StatusNotFound)
 						return
@@ -336,14 +462,39 @@ func SetupIacRoutes(router chi.Router) {
 				
 				// Save/update file - use existing logic with resolved stack ID
 				r.Post("/file", func(w http.ResponseWriter, r *http.Request) {
-					hostname := chi.URLParam(r, "hostname")
+					scopeName := chi.URLParam(r, "scopename")
 					stackname := chi.URLParam(r, "stackname")
 					
 					// Get or create stack ID
-					id, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					id, err := services.GetStackIDByHostAndName(r.Context(), scopeName, stackname)
 					if err != nil {
 						// Stack doesn't exist, create it
-						id, err = services.CreateIacStack(r.Context(), "host", hostname, stackname, false)
+						// Determine scope kind
+						invMgr := services.GetInventoryManager()
+						hosts, _ := invMgr.GetHosts()
+						scopeKind := "host"
+						isHost := false
+						
+						for _, h := range hosts {
+							if h.Name == scopeName {
+								scopeKind = "host"
+								isHost = true
+								break
+							}
+						}
+						
+						if !isHost {
+							// Check groups
+							groups, _ := invMgr.GetGroups()
+							for _, g := range groups {
+								if g.Name == scopeName {
+									scopeKind = "group"
+									break
+								}
+							}
+						}
+						
+						id, err = services.CreateIacStack(r.Context(), scopeKind, scopeName, stackname, false)
 						if err != nil {
 							http.Error(w, err.Error(), http.StatusBadRequest)
 							return
@@ -500,7 +651,7 @@ func SetupIacRoutes(router chi.Router) {
 				
 				// Delete file
 				r.Delete("/file", func(w http.ResponseWriter, r *http.Request) {
-					hostname := chi.URLParam(r, "hostname")
+					scopeName := chi.URLParam(r, "scopename")
 					stackname := chi.URLParam(r, "stackname")
 					rel := strings.TrimSpace(r.URL.Query().Get("path"))
 					if rel == "" {
@@ -508,7 +659,7 @@ func SetupIacRoutes(router chi.Router) {
 						return
 					}
 					
-					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), scopeName, stackname)
 					if err != nil {
 						http.Error(w, "Stack not found", http.StatusNotFound)
 						return
@@ -530,10 +681,10 @@ func SetupIacRoutes(router chi.Router) {
 				
 				// Deploy endpoint (non-streaming)
 				r.Post("/deploy", func(w http.ResponseWriter, r *http.Request) {
-					hostname := chi.URLParam(r, "hostname")
+					scopeName := chi.URLParam(r, "scopename")
 					stackname := chi.URLParam(r, "stackname")
 					
-					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), scopeName, stackname)
 					if err != nil {
 						http.Error(w, "Stack not found", http.StatusNotFound)
 						return
@@ -573,10 +724,10 @@ func SetupIacRoutes(router chi.Router) {
 				
 				// Deploy check endpoint
 				r.Post("/deploy-check", func(w http.ResponseWriter, r *http.Request) {
-					hostname := chi.URLParam(r, "hostname")
+					scopeName := chi.URLParam(r, "scopename")
 					stackname := chi.URLParam(r, "stackname")
 					
-					_, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					_, err := services.GetStackIDByHostAndName(r.Context(), scopeName, stackname)
 					if err != nil {
 						http.Error(w, "Stack not found", http.StatusNotFound)
 						return
@@ -592,10 +743,10 @@ func SetupIacRoutes(router chi.Router) {
 				
 				// Streaming deploy endpoint
 				r.Get("/deploy-stream", func(w http.ResponseWriter, r *http.Request) {
-					hostname := chi.URLParam(r, "hostname")
+					scopeName := chi.URLParam(r, "scopename")
 					stackname := chi.URLParam(r, "stackname")
 					
-					stackID, err := services.GetStackIDByHostAndName(r.Context(), hostname, stackname)
+					stackID, err := services.GetStackIDByHostAndName(r.Context(), scopeName, stackname)
 					if err != nil {
 						http.Error(w, "Stack not found", http.StatusNotFound)
 						return
@@ -682,7 +833,7 @@ func SetupIacRoutes(router chi.Router) {
 			}
 
 			root := strings.TrimSpace(common.Env(services.IacDefaultRootEnv, services.IacDefaultRoot))
-			dirname := strings.TrimSpace(common.Env(services.IacDirNameEnv, services.IacDefaultDirName))
+			dirname := strings.TrimSpace(common.Env(services.DockerDirEnv, services.DefaultDockerDir))
 			rel := filepath.ToSlash(filepath.Join(dirname, body.ScopeName, body.StackName))
 			full, err := services.JoinUnder(root, rel)
 			if err != nil {

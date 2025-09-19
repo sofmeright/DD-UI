@@ -13,4 +13,5 @@ func SetupAllRoutes(router chi.Router) {
 	SetupDevopsRoutes(router)
 	SetupSshRoutes(router)
 	SetupCleanupRoutes(router)
+	SetupGroupRoutes(router)
 }

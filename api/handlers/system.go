@@ -70,32 +70,144 @@ func (v *ViewBoostTracker) RemoveView(hostName string) {
 
 // setupSystemRoutes configures all system management endpoints
 func SetupSystemRoutes(router chi.Router) {
-	// Host listing and management
+	// Debug endpoint for migration status
+	router.Get("/debug/migrations", func(w http.ResponseWriter, r *http.Request) {
+		ctx := r.Context()
+		
+		// Check migration version
+		var currentVersion int
+		err := common.DB.QueryRow(ctx, "SELECT COALESCE(MAX(version), 0) FROM schema_migrations").Scan(&currentVersion)
+		if err != nil {
+			http.Error(w, "Failed to get migration version: " + err.Error(), http.StatusInternalServerError)
+			return
+		}
+		
+		// Check if groups table exists
+		var groupsExists bool
+		err = common.DB.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT FROM information_schema.tables 
+				WHERE table_schema = 'public' 
+				AND table_name = 'groups'
+			)
+		`).Scan(&groupsExists)
+		if err != nil {
+			http.Error(w, "Failed to check groups table: " + err.Error(), http.StatusInternalServerError)
+			return
+		}
+		
+		// Check if host_groups table exists
+		var hostGroupsExists bool
+		err = common.DB.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT FROM information_schema.tables 
+				WHERE table_schema = 'public' 
+				AND table_name = 'host_groups'
+			)
+		`).Scan(&hostGroupsExists)
+		if err != nil {
+			http.Error(w, "Failed to check host_groups table: " + err.Error(), http.StatusInternalServerError)
+			return
+		}
+		
+		// Get list of applied migrations
+		rows, err := common.DB.Query(ctx, "SELECT version, applied_at FROM schema_migrations ORDER BY version")
+		if err != nil {
+			http.Error(w, "Failed to list migrations: " + err.Error(), http.StatusInternalServerError)
+			return
+		}
+		defer rows.Close()
+		
+		type Migration struct {
+			Version   int       `json:"version"`
+			AppliedAt time.Time `json:"applied_at"`
+		}
+		
+		var migrations []Migration
+		for rows.Next() {
+			var m Migration
+			if err := rows.Scan(&m.Version, &m.AppliedAt); err != nil {
+				continue
+			}
+			migrations = append(migrations, m)
+		}
+		
+		result := map[string]interface{}{
+			"current_version": currentVersion,
+			"groups_table_exists": groupsExists,
+			"host_groups_table_exists": hostGroupsExists,
+			"applied_migrations": migrations,
+		}
+		
+		writeJSON(w, http.StatusOK, result)
+	})
+
+	// Host listing and management - uses inventory manager as source of truth
 	router.Get("/hosts", func(w http.ResponseWriter, r *http.Request) {
-		items, err := database.ListHosts(r.Context())
+		// Get hosts from inventory manager
+		invMgr := services.GetInventoryManager()
+		hosts, err := invMgr.GetHosts()
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
 
+		// Query parameters
 		owner := strings.TrimSpace(r.URL.Query().Get("owner"))
+		tenant := strings.TrimSpace(r.URL.Query().Get("tenant"))
 		q := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("q")))
 		limit := clamp(parseIntDefault(r.URL.Query().Get("limit"), 200), 1, 1000)
 		offset := parseIntDefault(r.URL.Query().Get("offset"), 0)
 
-		filtered := make([]database.HostRow, 0, len(items))
-		for _, h := range items {
+		// Convert and filter hosts
+		filtered := make([]map[string]interface{}, 0, len(hosts))
+		for _, h := range hosts {
+			// Apply filters
 			if owner != "" && !strings.EqualFold(h.Owner, owner) {
 				continue
 			}
+			if tenant != "" && !strings.EqualFold(h.Tenant, tenant) {
+				continue
+			}
 			if q != "" {
-				if !strings.Contains(strings.ToLower(h.Name), q) &&
-					!strings.Contains(strings.ToLower(h.Addr), q) {
+				// Search in name, address, alt_name, description, and tags
+				matched := false
+				if strings.Contains(strings.ToLower(h.Name), q) ||
+					strings.Contains(strings.ToLower(h.Addr), q) ||
+					strings.Contains(strings.ToLower(h.AltName), q) ||
+					strings.Contains(strings.ToLower(h.Description), q) {
+					matched = true
+				}
+				// Search in tags
+				for _, tag := range h.Tags {
+					if strings.Contains(strings.ToLower(tag), q) {
+						matched = true
+						break
+					}
+				}
+				if !matched {
 					continue
 				}
 			}
-			filtered = append(filtered, h)
+			
+			// Convert to API format
+			filtered = append(filtered, map[string]interface{}{
+				"name":          h.Name,
+				"addr":          h.Addr,
+				"vars":          h.Vars,
+				"groups":        h.Groups,
+				"tags":          h.Tags,
+				"description":   h.Description,
+				"alt_name":      h.AltName,
+				"tenant":        h.Tenant,
+				"allowed_users": h.AllowedUsers,
+				"owner":         h.Owner,
+				"env":           h.Env,
+				"labels":        map[string]string{}, // For compatibility
+			})
 		}
+		
+		// Apply pagination
 		lo := offset
 		if lo > len(filtered) {
 			lo = len(filtered)
@@ -148,10 +260,32 @@ func SetupSystemRoutes(router chi.Router) {
 			common.ErrorLog("iac: sync scan failed: %v", err)
 		}
 
-		hostRows, err := database.ListHosts(r.Context())
+		// Get hosts from inventory
+		invMgr := services.GetInventoryManager()
+		invHosts, err := invMgr.GetHosts()
 		if err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
+			http.Error(w, "Failed to get hosts from inventory: "+err.Error(), http.StatusInternalServerError)
 			return
+		}
+		
+		// Convert inventory hosts to database format for compatibility
+		// TODO: Eventually update services to use inventory hosts directly
+		hostRows := make([]database.HostRow, 0, len(invHosts))
+		for _, h := range invHosts {
+			varsMap := make(map[string]string)
+			for k, v := range h.Vars {
+				if s, ok := v.(string); ok {
+					varsMap[k] = s
+				}
+			}
+			hostRows = append(hostRows, database.HostRow{
+				Name:   h.Name,
+				Addr:   h.Addr,
+				Vars:   varsMap,
+				Groups: h.Groups,
+				Owner:  h.Owner,
+				Labels: map[string]string{},
+			})
 		}
 
 		perHostTO := parseDurationDefault(r.URL.Query().Get("timeout"), 30*time.Second)

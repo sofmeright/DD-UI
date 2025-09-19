@@ -20,9 +20,9 @@ import (
 
 var (
 	IacDefaultRootEnv = "DD_UI_IAC_ROOT"
-	IacDirNameEnv     = "DD_UI_IAC_DIRNAME"
+	DockerDirEnv      = "DD_UI_DOCKER_DIR"
 	IacDefaultRoot    = "/data"          // mount your repo at /data
-	IacDefaultDirName = "docker-compose" // per your layout
+	DefaultDockerDir  = "docker-compose" // per your layout
 )
 
 type composeDoc struct {
@@ -44,7 +44,7 @@ type composeSvc struct {
 // Entry point called by API
 func ScanIacLocal(ctx context.Context) (int, int, error) {
 	root := strings.TrimSpace(common.Env(IacDefaultRootEnv, IacDefaultRoot))
-	dirname := strings.TrimSpace(common.Env(IacDirNameEnv, IacDefaultDirName))
+	dirname := strings.TrimSpace(common.Env(DockerDirEnv, DefaultDockerDir))
 	base := filepath.Join(root, dirname)
 
 	common.InfoLog("iac: scan start root=%q base=%q", root, base)

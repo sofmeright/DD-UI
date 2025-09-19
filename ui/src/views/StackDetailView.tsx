@@ -435,7 +435,7 @@ export default function StackDetailView({
 
   async function refreshFiles() {
     // Use new hierarchical endpoint instead of ID-based
-    const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}/files`, { credentials: "include" });
+    const r = await fetch(`/api/iac/scopes/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}/files`, { credentials: "include" });
     if (r.status === 401) { handle401(); return; }
     if (!r.ok) return;
     const j = await r.json();
@@ -586,7 +586,7 @@ export default function StackDetailView({
   async function ensureStack() {
     // With hierarchical endpoints, we don't need to track stack ID anymore
     // The stack is identified by host.name + stackName combination
-    const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks`, {
+    const r = await fetch(`/api/iac/scopes/${encodeURIComponent(host.name)}/stacks`, {
       method: "POST",
       credentials: "include", 
       headers: { "Content-Type": "application/json" },
@@ -599,7 +599,7 @@ export default function StackDetailView({
 
   async function deleteStack() {
     if (!confirm(`Delete IaC stack "${stackName}"? This only deletes IaC metadata/files, not runtime containers.`)) return;
-    const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}`, { method: "DELETE", credentials: "include" });
+    const r = await fetch(`/api/iac/scopes/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}`, { method: "DELETE", credentials: "include" });
     if (!r.ok) { alert(`Failed to delete: ${r.status} ${r.statusText}`); return; }
     setFiles([]);
     setEditPath(null);
@@ -665,7 +665,7 @@ export default function StackDetailView({
       setDeployResult({ success: true, message: "⏳ Starting deployment..." });
       
       // Build the deployment URL with force parameter if needed
-      let deployUrl = `/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}/deploy-stream`;
+      let deployUrl = `/api/iac/scopes/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}/deploy-stream`;
       if (forceDeployment) {
         deployUrl += "?force=true";
       }
@@ -976,7 +976,7 @@ export default function StackDetailView({
                               size="icon"
                               variant="ghost"
                               onClick={async () => {
-                                const r = await fetch(`/api/iac/hosts/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}/file?path=${encodeURIComponent(f.rel_path)}`, { method: "DELETE", credentials: "include" });
+                                const r = await fetch(`/api/iac/scopes/${encodeURIComponent(host.name)}/stacks/${encodeURIComponent(stackName)}/file?path=${encodeURIComponent(f.rel_path)}`, { method: "DELETE", credentials: "include" });
                                 if (r.status === 401) { handle401(); return; }
                                 if (r.ok) refreshFiles();
                               }}

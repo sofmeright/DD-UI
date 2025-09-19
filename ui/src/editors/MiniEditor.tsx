@@ -96,7 +96,7 @@ export default function MiniEditor({
       const params = new URLSearchParams({ path });
       if (opts?.decrypt) params.set("decrypt", "1");
 
-      const r = await fetch(`/api/iac/hosts/${encodeURIComponent(hostName)}/stacks/${encodeURIComponent(stackName)}/file?${params.toString()}`, {
+      const r = await fetch(`/api/iac/scopes/${encodeURIComponent(hostName)}/stacks/${encodeURIComponent(stackName)}/file?${params.toString()}`, {
         credentials: "include",
         headers: opts?.decrypt ? { "X-Confirm-Reveal": "yes" } : undefined,
       });
@@ -156,7 +156,7 @@ export default function MiniEditor({
       if (!sopsOnSave && isSopsPersisted && !decryptedView) {
         try {
           const params = new URLSearchParams({ path, decrypt: "1" });
-          const rDec = await fetch(`/api/iac/hosts/${encodeURIComponent(hostName)}/stacks/${encodeURIComponent(stackName)}/file?${params.toString()}`, {
+          const rDec = await fetch(`/api/iac/scopes/${encodeURIComponent(hostName)}/stacks/${encodeURIComponent(stackName)}/file?${params.toString()}`, {
             credentials: "include",
             headers: { "X-Confirm-Reveal": "yes" },
           });
@@ -169,7 +169,7 @@ export default function MiniEditor({
         }
       }
 
-      const resp = await fetch(`/api/iac/hosts/${encodeURIComponent(hostName)}/stacks/${encodeURIComponent(stackName)}/file`, {
+      const resp = await fetch(`/api/iac/scopes/${encodeURIComponent(hostName)}/stacks/${encodeURIComponent(stackName)}/file`, {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },

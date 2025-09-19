@@ -311,9 +311,8 @@ export default function GitSyncView() {
           errorLog('Failed to fetch status after save:', error);
         });
         
-        setIsEditing(false);
         setIsSaving(false);
-        debugLog('Edit mode disabled after successful save');
+        debugLog('Configuration saved successfully');
       } else {
         const errorText = await response.text();
         throw new Error(`Failed to save configuration: ${errorText}`);

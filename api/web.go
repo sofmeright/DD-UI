@@ -169,6 +169,9 @@ func makeRouter() http.Handler {
 			
 			// Git sync routes (organized in handlers/git_routes.go)
 			handlers.SetupGitSyncRoutes(priv)
+			
+			// Groups management routes (organized in handlers/groups.go)
+			handlers.SetupGroupRoutes(priv)
 		})
 	})
 

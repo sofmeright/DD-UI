@@ -4,15 +4,15 @@
 ## What is DD-UI?
 - Designated Driver UI is a Docker Managment Engine that puts DevOps and Encryption first.
 - DD-UI seeks to ease the adoption of Infrastructure as Code and make it less intimidating for users to encrypt their secrets and sensitive docker values.
-  - DD-UI discovers your hosts via an ansible inventory file and stores and processes a standardized compose/.env/script folder layout.
-    - This means the state of your deployments is decoupled from the application and can be edited in any editor of your choice and DD-UI will automatically redeploy the app when IaC files change.
-  - DD-UI also allows you to decrypt/encrypt any IaC related file and deploy from it automatically if it exists with the decryption key.
+  - DD-UI manages all configuration of hosts/groups, and docker "stacks" as Inventory as Control (IaC) files. They are standardized format and CI/CD compatible. In essense DD-UI is a Docker focused CI/CD pipeline with a UI.
+    - The state of your deployments is decoupled from the application and can be manipulated in the editor of your choice. DD-UI will redeploy containers when IaC files change.
+  - DD-UI also allows you to decrypt/encrypt any IaC related files, you can deploy containers from encrypted docker-compose.yaml if you want.
     - This is good for those who like to stream while working on their servers or want to upload their compose and env to a repo as by default they are shown censored and they can be uploaded encrypted and dd-ui can actually deploy them if they are ever cloned and placed in its watch folder.
-      - There are plans for DD-UI to connect directly to a git repository.
+      - GitRepository syncing is currently unstable but will be fixed soon, but will allow backup/restore of stack configuration with ease.
 - DD-UI seeks to bring the rewards of the DevOps mindset to those who may not have afforded them otherwise.
 - DD-UI implements much of the features of other Docker GUIs and includes some industry tools like xterm 🔥 and monaco (editor used in vscode 🎉) to ensure a rich experience for the user.
-- DD-UI is free forever, for non-commercial and home use. You can inquire for a commercial license. If you find us interesting feel free to give us a pull @ prplanit/dd-ui on the Docker Hub. 
-- We currently have a functional solution for the localhost. We plan to support an infinite number of hosts and much of the features were planned ahead it just takes times.
+- DD-UI is free forever, for non-commercial and home use. You can inquire for a commercial license. If you find us interesting feel free to give us a pull @ prplanit/dd-ui on the Docker Hub.
+
 #### Thank you for your support!
 
 <img src="example/screenshots/DD-UI-Decrypted-Deployed.png" width="400" /><img src="example/screenshots/DD-UI-Host-Stack_Detail-Collapsed.png" width="400" />
@@ -39,10 +39,11 @@
 
 ## What DD-UI does today
 - Docker Management: Start/Stop/Pause/Resume/Kill containers.
-- View live logs of any container.
+- View live logs of any container (Dedicated Logging View, with advanced filters).
 - Initiate a terminal session in a container. Uses xterm for a really rich experience in the shell.
 - Edit docker compose, .env, and scripts. Application implements monaco editor (editor used in vscode) for a no compromise experience compared to other Docker management tools.
-- **Inventory**: list hosts; drill into a host to see stacks/containers.
+- **Inventory**: list hosts.
+- **Stacks/Containers**: See all of your running docker containers in one view of all your combined systems.
 - **Sync**: one click triggers:
   - **IaC scan** (local repo), and
   - **Runtime scan** per host (Docker).
@@ -54,11 +55,11 @@
 - **SOPS CLI integration**: server executes `sops` for encryption/decryption; no plaintext secrets are stored.
 - Health-aware state pills (running/healthy/exited etc.).
 - Stack Files page: view (and optionally edit) compose/env/scripts vs runtime context; gated decryption for SOPS.
+- Docker Cleanup Page: Do the equivalent of a docker prune or clear your build cache from the comfort of the UI.
 
 ### Planned / Known Issues
 
 - Bug when a file is open outside DD-UI it can create an empty temp file next to the file after saving.
-- I think the stacks view could be a little more responsive, (running,healthy,stopped) dont refresh immediately but it does work.
 - Maybe an enhanced approach for caching tags of orphaned / stranded images, the current approach for some images that are built at runtime it can be weird seeing it as just ?? in the menu. I want visibility for that.
 - Perhaps a local admin user.
 - A settings menu.

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"dd-ui/common"
@@ -269,38 +270,52 @@ func createGroup(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// updateGroup updates an existing group
+// updateGroup updates an existing group in the inventory
 func updateGroup(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	groupID, _ := strconv.ParseInt(chi.URLParam(r, "groupId"), 10, 64)
+	groupName := chi.URLParam(r, "groupName")
 	
 	var req struct {
-		Name        string            `json:"name"`
-		Description string            `json:"description"`
-		Tags        []string          `json:"tags"`
-		ParentID    *int64            `json:"parent_id"`
-		Vars        map[string]string `json:"vars"`
-		Owner       string            `json:"owner"`
+		Name         string              `json:"name"`
+		Description  string              `json:"description"`
+		Tags         []string            `json:"tags"`
+		AltName      string              `json:"alt_name"`
+		Tenant       string              `json:"tenant"`
+		AllowedUsers []string            `json:"allowed_users"`
+		Owner        string              `json:"owner"`
+		Env          map[string]string   `json:"env"`
+		Vars         map[string]any      `json:"vars"`
 	}
 	
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		http.Error(w, "Invalid request", http.StatusBadRequest)
+		http.Error(w, "Invalid request: "+err.Error(), http.StatusBadRequest)
 		return
 	}
 	
-	varsJSON, _ := json.Marshal(req.Vars)
+	// Build metadata for DD-UI fields
+	metadata := services.GroupMetadata{
+		Tags:         req.Tags,
+		Description:  req.Description,
+		AltName:      req.AltName,
+		Tenant:       req.Tenant,
+		AllowedUsers: req.AllowedUsers,
+		Owner:        req.Owner,
+		Env:          req.Env,
+	}
 	
-	_, err := common.DB.Exec(ctx, `
-		UPDATE groups 
-		SET name = $2, description = $3, tags = $4, parent_id = $5, vars = $6, owner = $7
-		WHERE id = $1
-	`, groupID, req.Name, req.Description, req.Tags, req.ParentID, varsJSON, req.Owner)
-	
-	if err != nil {
+	// Update group in inventory
+	invMgr := services.GetInventoryManager()
+	if err := invMgr.UpdateGroupMetadata(groupName, metadata); err != nil {
 		errorLog("Failed to update group: %v", err)
-		http.Error(w, "Failed to update group", http.StatusInternalServerError)
+		if strings.Contains(err.Error(), "not found") {
+			http.Error(w, err.Error(), http.StatusNotFound)
+		} else {
+			http.Error(w, "Failed to update group: "+err.Error(), http.StatusInternalServerError)
+		}
 		return
 	}
+	
+	// TODO: Handle vars update separately if needed
+	// Currently UpdateGroupMetadata only updates DD-UI metadata fields
 	
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(map[string]string{

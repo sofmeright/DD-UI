@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 	"strings"
@@ -223,6 +224,128 @@ func SetupSystemRoutes(router chi.Router) {
 			"total":  len(filtered),
 			"limit":  limit,
 			"offset": offset,
+		})
+	})
+
+	// Host CRUD operations via IaC (inventory file management)
+	router.Post("/iac/hosts", func(w http.ResponseWriter, r *http.Request) {
+		var req struct {
+			Name         string            `json:"name"`
+			Addr         string            `json:"addr"` // ansible_host
+			Description  string            `json:"description"`
+			AltName      string            `json:"alt_name"`
+			Tenant       string            `json:"tenant"`
+			Owner        string            `json:"owner"`
+			Tags         []string          `json:"tags"`
+			AllowedUsers []string          `json:"allowed_users"`
+			Env          map[string]string `json:"env"`
+		}
+		
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		
+		// Validate required fields
+		if req.Name == "" || req.Addr == "" {
+			http.Error(w, "Host name and addr (IP/FQDN) are required", http.StatusBadRequest)
+			return
+		}
+		
+		// Build metadata
+		metadata := services.HostMetadata{
+			Tags:         req.Tags,
+			Description:  req.Description,
+			AltName:      req.AltName,
+			Tenant:       req.Tenant,
+			AllowedUsers: req.AllowedUsers,
+			Owner:        req.Owner,
+			Env:          req.Env,
+		}
+		
+		// Create host
+		invMgr := services.GetInventoryManager()
+		if err := invMgr.CreateHost(req.Name, req.Addr, metadata); err != nil {
+			if strings.Contains(err.Error(), "already exists") {
+				http.Error(w, err.Error(), http.StatusConflict)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+		
+		// Return success
+		writeJSON(w, http.StatusCreated, map[string]any{
+			"message": fmt.Sprintf("Host %s created successfully", req.Name),
+			"name":    req.Name,
+		})
+	})
+	
+	router.Put("/iac/hosts/{name}", func(w http.ResponseWriter, r *http.Request) {
+		hostName := chi.URLParam(r, "name")
+		
+		var req struct {
+			Addr         string            `json:"addr"` // ansible_host
+			Description  string            `json:"description"`
+			AltName      string            `json:"alt_name"`
+			Tenant       string            `json:"tenant"`
+			Owner        string            `json:"owner"`
+			Tags         []string          `json:"tags"`
+			AllowedUsers []string          `json:"allowed_users"`
+			Env          map[string]string `json:"env"`
+		}
+		
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			http.Error(w, "Invalid request body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		
+		// Build metadata
+		metadata := services.HostMetadata{
+			Tags:         req.Tags,
+			Description:  req.Description,
+			AltName:      req.AltName,
+			Tenant:       req.Tenant,
+			AllowedUsers: req.AllowedUsers,
+			Owner:        req.Owner,
+			Env:          req.Env,
+		}
+		
+		// Update host
+		invMgr := services.GetInventoryManager()
+		if err := invMgr.UpdateHost(hostName, req.Addr, metadata); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				http.Error(w, err.Error(), http.StatusNotFound)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+		
+		// Return success
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message": fmt.Sprintf("Host %s updated successfully", hostName),
+			"name":    hostName,
+		})
+	})
+	
+	router.Delete("/iac/hosts/{name}", func(w http.ResponseWriter, r *http.Request) {
+		hostName := chi.URLParam(r, "name")
+		
+		// Delete host
+		invMgr := services.GetInventoryManager()
+		if err := invMgr.DeleteHost(hostName); err != nil {
+			if strings.Contains(err.Error(), "not found") {
+				http.Error(w, err.Error(), http.StatusNotFound)
+			} else {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+			}
+			return
+		}
+		
+		// Return success
+		writeJSON(w, http.StatusOK, map[string]any{
+			"message": fmt.Sprintf("Host %s deleted successfully", hostName),
 		})
 	})
 

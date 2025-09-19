@@ -74,7 +74,7 @@ export default function AddHostDialog({ open, onClose, onHostAdded, hostToEdit, 
 
     setSaving(true);
     try {
-      const url = isEditMode ? `/api/hosts/${encodeURIComponent(hostToEdit.name)}` : '/api/hosts';
+      const url = isEditMode ? `/api/iac/hosts/${encodeURIComponent(hostToEdit.name)}` : '/api/iac/hosts';
       const method = isEditMode ? 'PUT' : 'POST';
       
       const response = await fetch(url, {
@@ -168,7 +168,7 @@ export default function AddHostDialog({ open, onClose, onHostAdded, hostToEdit, 
     setShowDeleteConfirm(false);
     setDeleting(true);
     try {
-      const response = await fetch(`/api/hosts/${encodeURIComponent(hostToEdit.name)}`, {
+      const response = await fetch(`/api/iac/hosts/${encodeURIComponent(hostToEdit.name)}`, {
         method: 'DELETE',
         credentials: 'include',
       });

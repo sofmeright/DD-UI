@@ -122,25 +122,27 @@ export default function App() {
     return () => { cancel = true; };
   }, []);
 
+  // Refresh hosts function that can be called from child components
+  const refreshHosts = async () => {
+    setLoading(true); setErr(null);
+    try {
+      const r = await fetch("/api/hosts", { credentials: "include" });
+      if (r.status === 401) { window.location.replace("/auth/login"); return; }
+      if (!r.ok) throw new Error(`HTTP ${r.status}`);
+      const data = await r.json();
+      const items = Array.isArray(data.items) ? data.items : [];
+      const mapped: Host[] = items.map((h: any) => ({ name: h.name, address: h.addr ?? h.address ?? "", groups: h.groups ?? [] }));
+      setHosts(mapped);
+    } catch (e: any) {
+      setErr(e?.message || "Failed to load hosts");
+    } finally {
+      setLoading(false);
+    }
+  };
+
   useEffect(() => {
     if (!authed) return;
-    let cancel = false;
-    (async () => {
-      setLoading(true); setErr(null);
-      try {
-        const r = await fetch("/api/hosts", { credentials: "include" });
-        if (r.status === 401) { window.location.replace("/auth/login"); return; }
-        if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const data = await r.json();
-        const items = Array.isArray(data.items) ? data.items : [];
-        const mapped: Host[] = items.map((h: any) => ({ name: h.name, address: h.addr ?? h.address ?? "", groups: h.groups ?? [] }));
-        setHosts(mapped);
-      } catch (e: any) {
-        setErr(e?.message || "Failed to load hosts");
-      } finally {
-        setLoading(false);
-      }
-    })();
+    refreshHosts();
   }, [authed]);
 
   // Periodic session validation (every 30 seconds)
@@ -366,6 +368,7 @@ export default function App() {
                 metrics={metrics}
                 hosts={hosts}
                 filteredHosts={filteredHosts}
+                refreshHosts={refreshHosts}
                 loading={loading}
                 err={err}
                 scanning={scanning}

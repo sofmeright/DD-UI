@@ -554,6 +554,229 @@ func (im *InventoryManager) CreateGroup(name string, parent string, metadata Gro
 	return im.saveInternal()
 }
 
+// CreateHost adds a new host to the inventory (in all.hosts)
+func (im *InventoryManager) CreateHost(name, ansibleHost string, metadata HostMetadata) error {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+
+	// Validate host name - no spaces or special characters
+	if name == "" || strings.Contains(name, " ") {
+		return fmt.Errorf("invalid host name: must not be empty or contain spaces")
+	}
+
+	// Normalize description to prevent YAML issues
+	if metadata.Description != "" {
+		metadata.Description = strings.ReplaceAll(metadata.Description, "\r\n", "\n")
+		metadata.Description = strings.ReplaceAll(metadata.Description, "\r", "\n")
+	}
+
+	// Parse existing inventory
+	var inv map[string]any
+	if len(im.data) == 0 {
+		common.InfoLog("InventoryManager: Initializing new inventory file for host creation")
+		inv = map[string]any{
+			"all": map[string]any{
+				"hosts": map[string]any{},
+			},
+		}
+	} else {
+		if err := yaml.Unmarshal(im.data, &inv); err != nil {
+			return fmt.Errorf("failed to parse inventory: %w", err)
+		}
+	}
+
+	// Ensure all group exists
+	all, ok := inv["all"].(map[string]any)
+	if !ok {
+		all = map[string]any{
+			"hosts": map[string]any{},
+		}
+		inv["all"] = all
+	}
+
+	// Ensure hosts section exists
+	hosts, ok := all["hosts"].(map[string]any)
+	if !ok {
+		hosts = map[string]any{}
+		all["hosts"] = hosts
+	}
+
+	// Check if host already exists
+	if _, exists := hosts[name]; exists {
+		return fmt.Errorf("host %s already exists", name)
+	}
+
+	// Create new host entry
+	newHost := map[string]any{
+		"ansible_host": ansibleHost,
+	}
+
+	// Add DD-UI metadata fields
+	if len(metadata.Tags) > 0 {
+		newHost["dd_ui_tags"] = metadata.Tags
+	}
+	if metadata.Description != "" {
+		newHost["dd_ui_description"] = metadata.Description
+	}
+	if metadata.AltName != "" {
+		newHost["dd_ui_alt_name"] = metadata.AltName
+	}
+	if metadata.Tenant != "" {
+		newHost["dd_ui_tenant"] = metadata.Tenant
+	}
+	if len(metadata.AllowedUsers) > 0 {
+		newHost["dd_ui_allowed_users"] = metadata.AllowedUsers
+	}
+	if metadata.Owner != "" {
+		newHost["dd_ui_owner"] = metadata.Owner
+	} else if def := common.Env("DD_UI_DEFAULT_OWNER", ""); def != "" {
+		newHost["dd_ui_owner"] = def
+	}
+	if len(metadata.Env) > 0 {
+		newHost["dd_ui_env"] = metadata.Env
+	}
+
+	// Add host to inventory
+	hosts[name] = newHost
+
+	// Marshal back to YAML
+	data, err := yaml.Marshal(inv)
+	if err != nil {
+		return fmt.Errorf("failed to marshal inventory: %w", err)
+	}
+
+	im.data = data
+	common.InfoLog("InventoryManager: Created host %s with IP %s", name, ansibleHost)
+	return im.saveInternal()
+}
+
+// UpdateHost updates an existing host in the inventory
+func (im *InventoryManager) UpdateHost(name, ansibleHost string, metadata HostMetadata) error {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+
+	// Normalize description to prevent YAML issues
+	if metadata.Description != "" {
+		metadata.Description = strings.ReplaceAll(metadata.Description, "\r\n", "\n")
+		metadata.Description = strings.ReplaceAll(metadata.Description, "\r", "\n")
+	}
+
+	var inv map[string]any
+	if err := yaml.Unmarshal(im.data, &inv); err != nil {
+		return fmt.Errorf("failed to parse inventory: %w", err)
+	}
+
+	// Find the host in all.hosts
+	all, ok := inv["all"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("inventory missing 'all' group")
+	}
+
+	hosts, ok := all["hosts"].(map[string]any)
+	if !ok {
+		return fmt.Errorf("'all' group missing hosts section")
+	}
+
+	host, ok := hosts[name].(map[string]any)
+	if !ok {
+		return fmt.Errorf("host %s not found", name)
+	}
+
+	// Update ansible_host if provided
+	if ansibleHost != "" {
+		host["ansible_host"] = ansibleHost
+	}
+
+	// Update DD-UI metadata fields
+	// Clear existing DD-UI fields first to handle removals
+	keysToRemove := []string{}
+	for k := range host {
+		if strings.HasPrefix(k, "dd_ui_") {
+			keysToRemove = append(keysToRemove, k)
+		}
+	}
+	for _, k := range keysToRemove {
+		delete(host, k)
+	}
+
+	// Add updated metadata
+	if len(metadata.Tags) > 0 {
+		host["dd_ui_tags"] = metadata.Tags
+	}
+	if metadata.Description != "" {
+		host["dd_ui_description"] = metadata.Description
+	}
+	if metadata.AltName != "" {
+		host["dd_ui_alt_name"] = metadata.AltName
+	}
+	if metadata.Tenant != "" {
+		host["dd_ui_tenant"] = metadata.Tenant
+	}
+	if len(metadata.AllowedUsers) > 0 {
+		host["dd_ui_allowed_users"] = metadata.AllowedUsers
+	}
+	if metadata.Owner != "" {
+		host["dd_ui_owner"] = metadata.Owner
+	}
+	if len(metadata.Env) > 0 {
+		host["dd_ui_env"] = metadata.Env
+	}
+
+	// Marshal back to YAML
+	data, err := yaml.Marshal(inv)
+	if err != nil {
+		return fmt.Errorf("failed to marshal inventory: %w", err)
+	}
+
+	im.data = data
+	common.InfoLog("InventoryManager: Updated host %s", name)
+	return im.saveInternal()
+}
+
+// DeleteHost removes a host from the inventory completely
+func (im *InventoryManager) DeleteHost(name string) error {
+	im.mu.Lock()
+	defer im.mu.Unlock()
+
+	var inv map[string]any
+	if err := yaml.Unmarshal(im.data, &inv); err != nil {
+		return fmt.Errorf("failed to parse inventory: %w", err)
+	}
+
+	// Remove from all.hosts
+	if all, ok := inv["all"].(map[string]any); ok {
+		if hosts, ok := all["hosts"].(map[string]any); ok {
+			if _, exists := hosts[name]; !exists {
+				return fmt.Errorf("host %s not found", name)
+			}
+			delete(hosts, name)
+		}
+	}
+
+	// Remove from all groups
+	for groupName, group := range inv {
+		if groupName == "all" {
+			continue // Already handled above
+		}
+		
+		if g, ok := group.(map[string]any); ok {
+			if hosts, ok := g["hosts"].(map[string]any); ok {
+				delete(hosts, name)
+			}
+		}
+	}
+
+	// Marshal back to YAML
+	data, err := yaml.Marshal(inv)
+	if err != nil {
+		return fmt.Errorf("failed to marshal inventory: %w", err)
+	}
+
+	im.data = data
+	common.InfoLog("InventoryManager: Deleted host %s", name)
+	return im.saveInternal()
+}
+
 // DeleteGroup removes a group from inventory
 func (im *InventoryManager) DeleteGroup(name string) error {
 	im.mu.Lock()

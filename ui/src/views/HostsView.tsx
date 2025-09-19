@@ -11,7 +11,7 @@ import { Host } from "@/types";
 import { handle401 } from "@/utils/auth";
 
 export default function HostsView({
-  metrics, hosts, filteredHosts, loading, err, scanning, onScanAll, onFilter, onOpenHost, refreshMetricsForHosts,
+  metrics, hosts, filteredHosts, loading, err, scanning, onScanAll, onFilter, onOpenHost, refreshMetricsForHosts, refreshHosts,
 }: {
   metrics: { hosts: number; stacks: number; containers: number; drift: number; errors: number };
   hosts: Host[];
@@ -23,6 +23,7 @@ export default function HostsView({
   onFilter: (v: string) => void;
   onOpenHost: (name: string) => void;
   refreshMetricsForHosts: (names: string[]) => Promise<void>;
+  refreshHosts?: () => Promise<void>;
 }) {
   const [query, setQuery] = useState("");
   const [showAddHostDialog, setShowAddHostDialog] = useState(false);
@@ -165,11 +166,15 @@ export default function HostsView({
           setShowAddHostDialog(false);
           setHostToEdit(null);
         }}
-        onHostAdded={() => {
+        onHostAdded={async () => {
           setShowAddHostDialog(false);
           setHostToEdit(null);
           // Trigger a refresh of the hosts list
-          window.location.reload();
+          if (refreshHosts) {
+            await refreshHosts();
+          } else {
+            window.location.reload(); // Fallback if refreshHosts not provided
+          }
         }}
         hostToEdit={hostToEdit}
         isEditMode={!!hostToEdit}

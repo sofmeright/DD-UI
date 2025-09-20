@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"dd-ui/common"
+	"dd-ui/database"
 	"dd-ui/services"
 
 	"github.com/go-chi/chi/v5"
@@ -646,6 +647,21 @@ func SetupIacRoutes(router chi.Router) {
 						common.InfoLog("Failed to update database for file %s: %v", body.Path, err)
 					}
 					
+					// Trigger git push if configured
+					gitSync := services.GetGitSync()
+					config, _ := database.GetGitSyncConfig(r.Context())
+					if config != nil && config.SyncEnabled && (config.SyncMode == "push" || config.SyncMode == "sync") {
+						go func() {
+							ctx := context.Background()
+							message := fmt.Sprintf("Updated %s/%s", stackname, body.Path)
+							if err := gitSync.Push(ctx, message, "system"); err != nil {
+								common.ErrorLog("Failed to push changes after file save: %v", err)
+							} else {
+								common.InfoLog("Pushed changes after updating %s/%s", stackname, body.Path)
+							}
+						}()
+					}
+					
 					writeJSON(w, http.StatusOK, map[string]any{"status": "saved", "size": sz, "sha256": sum, "sops": body.Sops})
 				})
 				
@@ -674,6 +690,21 @@ func SetupIacRoutes(router chi.Router) {
 					if err == nil {
 						fullPath := filepath.Join(root, rel)
 						os.Remove(fullPath)
+					}
+					
+					// Trigger git push if configured
+					gitSync := services.GetGitSync()
+					config, _ := database.GetGitSyncConfig(r.Context())
+					if config != nil && config.SyncEnabled && (config.SyncMode == "push" || config.SyncMode == "sync") {
+						go func() {
+							ctx := context.Background()
+							message := fmt.Sprintf("Deleted %s/%s", stackname, rel)
+							if err := gitSync.Push(ctx, message, "system"); err != nil {
+								common.ErrorLog("Failed to push changes after file delete: %v", err)
+							} else {
+								common.InfoLog("Pushed changes after deleting %s/%s", stackname, rel)
+							}
+						}()
 					}
 					
 					writeJSON(w, http.StatusOK, map[string]any{"deleted": true})

@@ -186,7 +186,8 @@ export default function HostStacksView({
         onHostChange(selectedHost);
       }
     } else {
-      // Don't remove from localStorage when selecting "All" - let user's last specific host persist
+      // Clear localStorage when "All Hosts" is selected
+      localStorage.removeItem('dd_ui_selected_host');
     }
   }, [selectedHost, host.name, onHostChange]);
   
@@ -194,14 +195,13 @@ export default function HostStacksView({
   useEffect(() => {
     const checkStorage = () => {
       const savedHost = localStorage.getItem('dd_ui_selected_host');
+      // Only sync if we have a valid saved host and we're not in group mode
       if (savedHost && hosts.some(h => h.name === savedHost)) {
-        // Only sync if we're not actively using the host selector for "All Hosts"
-        // and we're not in group mode
-        if (savedHost !== selectedHost && activeSelector !== 'group' && selectedHost !== '') {
-          // Don't override if user explicitly selected "All Hosts" (empty string)
+        if (savedHost !== selectedHost && activeSelector !== 'group') {
           setSelectedHost(savedHost);
         }
       }
+      // Don't do anything if there's no saved host - let user control it
     };
     
     // Check on mount and when returning to this view
@@ -922,52 +922,142 @@ export default function HostStacksView({
           uniqueHosts.add(host.name);
         }
         
-        debugLog('[DD-UI] Polling for container updates from hosts:', Array.from(uniqueHosts));
+        debugLog('[DD-UI] Polling for container and IaC updates from hosts:', Array.from(uniqueHosts));
         
-        // Fetch containers from all actual hosts with host tracking
+        // Fetch containers AND IaC data from all actual hosts
         const containersByHost = new Map<string, ApiContainer[]>();
+        const iacByHost = new Map<string, IacStack[]>();
+        
         for (const hostName of uniqueHosts) {
           try {
-            const response = await fetch(`/api/containers/hosts/${encodeURIComponent(hostName)}`, { 
-              credentials: "include" 
-            });
+            // Fetch both containers and IaC data in parallel for each host
+            const [containerResponse, iacResponse] = await Promise.all([
+              fetch(`/api/containers/hosts/${encodeURIComponent(hostName)}`, { 
+                credentials: "include" 
+              }),
+              fetch(`/api/iac/scopes/${encodeURIComponent(hostName)}`, { 
+                credentials: "include" 
+              })
+            ]);
             
-            if (response.status === 401) {
+            if (containerResponse.status === 401 || iacResponse.status === 401) {
               handle401();
               return;
             }
             
-            if (response.ok) {
-              const contJson = await response.json();
+            // Process container data
+            if (containerResponse.ok) {
+              const contJson = await containerResponse.json();
               const runtime: ApiContainer[] = (contJson.containers || []) as ApiContainer[];
               containersByHost.set(hostName, runtime);
+            }
+            
+            // Process IaC data for all IaC fields
+            if (iacResponse.ok) {
+              const iacJson = await iacResponse.json();
+              const iacStacks: IacStack[] = (iacJson.stacks || []) as IacStack[];
+              iacByHost.set(hostName, iacStacks);
+              debugLog(`[DD-UI] Fetched ${iacStacks.length} IaC stacks for host ${hostName}`);
             }
           } catch (err) {
             debugLog(`[DD-UI] Failed to poll host ${hostName}:`, err);
           }
         }
         
-        // Update container states in existing stacks
+        // Update container states AND all IaC fields in existing stacks
         setStacks(prevStacks => 
-          prevStacks.map(stack => ({ ...stack,
-            rows: stack.rows.map(row => {
-              // CRITICAL: Must check both container name AND actualHost to avoid updating wrong containers
-              const rowHost = (row as any).actualHost;
-              if (rowHost && containersByHost.has(rowHost)) {
-                const hostContainers = containersByHost.get(rowHost) || [];
-                const updatedContainer = hostContainers.find(c => c.name === row.name);
-                if (updatedContainer) {
-                  return { ...row,
-                    state: updatedContainer.state || row.state,
-                    status: updatedContainer.status || row.status,
-                  };
-                }
+          prevStacks.map(stack => {
+            // Get updated IaC data
+            const stackHost = stack.actualHost || host.name;
+            const hostIacData = iacByHost.get(stackHost);
+            const updatedIac = hostIacData?.find(iac => iac.name === stack.name);
+            
+            // Get all containers for this stack from the fetched data
+            const hostContainers = containersByHost.get(stackHost) || [];
+            const stackContainers = hostContainers.filter(c => {
+              const containerStack = (c.compose_project || c.stack || "(none)").trim() || "(none)";
+              return containerStack === stack.name;
+            });
+            
+            // Track existing container names for efficiency
+            const existingRowNames = new Set(stack.rows.map(r => r.name));
+            const currentContainerNames = new Set(stackContainers.map(c => c.name));
+            
+            // Build updated rows: update existing, add new, remove deleted
+            const updatedRows = [
+              // Update existing containers that still exist
+              ...stack.rows
+                .filter(row => currentContainerNames.has(row.name))
+                .map(row => {
+                  const updatedContainer = stackContainers.find(c => c.name === row.name);
+                  if (updatedContainer) {
+                    return { ...row,
+                      state: updatedContainer.state || row.state,
+                      status: updatedContainer.status || row.status,
+                    };
+                  }
+                  return row;
+                }),
+              // Add new containers that weren't in the rows before
+              ...stackContainers
+                .filter(c => !existingRowNames.has(c.name))
+                .map(c => {
+                  const portsLines = formatPortsLines((c as any).ports);
+                  const portsText = portsLines.join("\n");
+                  return {
+                    name: c.name,
+                    state: c.state,
+                    status: c.status,
+                    stack: stack.name,
+                    imageRun: c.image,
+                    imageIac: undefined,
+                    created: formatDT(c.created_ts),
+                    modified: formatDT(c.updated_at),
+                    ip: c.ip_addr,
+                    portsText,
+                    ports: (c as any).ports,
+                    owner: c.owner || "—",
+                    actualHost: stackHost,
+                  } as MergedRow;
+                })
+            ];
+            
+            // Log if containers were added or removed
+            if (updatedRows.length !== stack.rows.length) {
+              const added = updatedRows.length - stack.rows.length;
+              if (added > 0) {
+                debugLog(`[DD-UI] Added ${added} new container(s) to stack ${stack.name}`);
+              } else {
+                debugLog(`[DD-UI] Removed ${-added} container(s) from stack ${stack.name}`);
               }
-              return row;
-            })
-          }))
+            }
+            
+            // If we found updated IaC data, update all IaC-related fields
+            const updatedStack = {
+              ...stack,
+              // Update all IaC-related fields from fresh data
+              drift: updatedIac?.drift_detected ? 'drift' : (updatedIac ? 'in_sync' : stack.drift),
+              driftReason: updatedIac?.drift_reason || stack.driftReason,
+              deployKind: updatedIac?.deploy_kind || stack.deployKind || 'compose',
+              pullPolicy: updatedIac ? updatedIac.pull_policy : stack.pullPolicy,
+              sops: updatedIac ? updatedIac.sops_status === 'all' : stack.sops,
+              autoDevOps: updatedIac?.auto_devops ?? stack.autoDevOps,
+              iacEnabled: updatedIac?.iac_enabled ?? stack.iacEnabled,
+              hasContent: updatedIac?.has_content ?? stack.hasContent,
+              // Keep hasIac true if it was true (don't lose IaC status)
+              hasIac: updatedIac ? true : stack.hasIac,
+              // Use the updated rows with new/removed containers handled
+              rows: updatedRows
+            };
+            
+            if (updatedIac) {
+              debugLog(`[DD-UI] Updated IaC fields for stack ${stack.name}: drift=${updatedStack.drift}, sops=${updatedStack.sops}, pullPolicy=${updatedStack.pullPolicy}, autoDevOps=${updatedStack.autoDevOps}`);
+            }
+            
+            return updatedStack;
+          })
         );
-        debugLog('[DD-UI] Container states updated from polling');
+        debugLog('[DD-UI] Container states and IaC fields updated from polling');
       } catch (error) {
         debugLog('[DD-UI] Polling error:', error);
       }
@@ -1159,9 +1249,12 @@ export default function HostStacksView({
               }}
             >
               <option value="">All Hosts</option>
-              {hosts.map(h => (
-                <option key={h.name} value={h.name}>{h.name}</option>
-              ))}
+              {hosts
+                .slice() // Create a copy to avoid mutating the original array
+                .sort((a, b) => a.name.localeCompare(b.name)) // Sort alphabetically
+                .map(h => (
+                  <option key={h.name} value={h.name}>{h.name}</option>
+                ))}
             </select>
           </div>
           <div className="flex items-center gap-2 pl-6">
@@ -1533,8 +1626,8 @@ export default function HostStacksView({
               <CardTitle className="text-xl text-white flex items-center gap-3">
                 <button className="hover:underline" onClick={() => {
                   // Navigate to the stack's actual host if different from current
-                  if (s.scopeName && s.scopeName !== host.name) {
-                    onHostChange(s.scopeName);
+                  if (s.actualHost && s.actualHost !== host.name) {
+                    onHostChange(s.actualHost);
                     setTimeout(() => onOpenStack(s.name), 100);
                   } else {
                     onOpenStack(s.name);
@@ -1611,7 +1704,7 @@ export default function HostStacksView({
             <div className="flex items-center">
               <DevOpsToggle
                 level="stack"
-                hostName={s.scopeName || host}
+                hostName={s.actualHost || s.scopeName || host}
                 stackName={s.name}
                 compact={false}
               />
@@ -1691,8 +1784,8 @@ export default function HostStacksView({
                                 <>
                                   <ActionBtn title="Inspect" icon={Search} onClick={() => {
                                     // Navigate to the stack's actual host if different from current
-                                    if (s.scopeName && s.scopeName !== host.name) {
-                                      onHostChange(s.scopeName);
+                                    if (s.actualHost && s.actualHost !== host.name) {
+                                      onHostChange(s.actualHost);
                                       setTimeout(() => onOpenStack(s.name), 100);
                                     } else {
                                       onOpenStack(s.name);
@@ -1800,8 +1893,8 @@ export default function HostStacksView({
                                   />
                                   <ActionBtn title="Inspect" icon={Search} onClick={() => {
                                     // Navigate to the stack's actual host if different from current
-                                    if (s.scopeName && s.scopeName !== host.name) {
-                                      onHostChange(s.scopeName);
+                                    if (s.actualHost && s.actualHost !== host.name) {
+                                      onHostChange(s.actualHost);
                                       setTimeout(() => onOpenStack(s.name), 100);
                                     } else {
                                       onOpenStack(s.name);

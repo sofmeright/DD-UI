@@ -1,15 +1,11 @@
 // ui/src/views/CleanupView.tsx
 import { useState, useEffect } from "react";
-import { handle401 } from "@/utils/auth";
 import { useParams, useNavigate } from "react-router-dom";
 import { Card, CardContent } from "@/components/ui/card";
-import { handle401 } from "@/utils/auth";
 import { Button } from "@/components/ui/button";
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
-import { handle401 } from "@/utils/auth";
 import { Switch } from "@/components/ui/switch";
 import { Badge } from "@/components/ui/badge";
-import { handle401 } from "@/utils/auth";
+import HostPicker from "@/components/HostPicker";
 import { 
   Trash2, 
   HardDrive, 
@@ -521,18 +517,11 @@ export default function CleanupView({
                   <span className="text-sm text-slate-300">All Hosts</span>
                 </div>
                 {!allHosts && (
-                  <Select value={selectedHost} onValueChange={handleHostChange}>
-                    <SelectTrigger className="w-48 bg-slate-900 border-slate-700">
-                      <SelectValue placeholder="Select host..." />
-                    </SelectTrigger>
-                    <SelectContent className="bg-slate-900 border-slate-700">
-                      {hosts.map((host) => (
-                        <SelectItem key={host.name} value={host.name}>
-                          {host.name}
-                        </SelectItem>
-                      ))}
-                    </SelectContent>
-                  </Select>
+                  <HostPicker 
+                    hosts={hosts} 
+                    activeHost={selectedHost} 
+                    setActiveHost={handleHostChange} 
+                  />
                 )}
               </div>
             </div>

@@ -103,9 +103,9 @@ func (g *GitSyncService) Start(ctx context.Context) error {
 		return fmt.Errorf("initializing repository: %w", err)
 	}
 
-	// Start auto-pull if enabled
-	if g.config.AutoPull && g.config.PullIntervalMins > 0 {
-		g.startAutoPull(ctx)
+	// Start sync timer if not in "off" mode
+	if g.config.SyncMode != "off" && g.config.SyncMode != "" && g.config.PullIntervalMins > 0 {
+		g.startSyncTimer(ctx)
 	}
 
 	common.InfoLog("Start: Git sync successfully started for %s", g.config.RepoURL)
@@ -831,19 +831,84 @@ func (g *GitSyncService) atomicPush(ctx context.Context, force bool) error {
 
 	// Step 1: Pull latest from remote to ensure we have current state
 	common.InfoLog("AtomicPush: Pulling latest from remote first")
-	pullCmd := exec.CommandContext(ctx, "git", "pull", "origin", g.config.Branch)
+	pullCmd := exec.CommandContext(ctx, "git", "pull", "origin", g.config.Branch, "--no-edit")
 	pullCmd.Dir = g.workPath
 	pullCmd.Env = gitEnv
 	if pullOutput, err := pullCmd.CombinedOutput(); err != nil {
-		// If pull fails due to conflicts, we'll overwrite with our local state
-		if !strings.Contains(string(pullOutput), "CONFLICT") {
-			common.WarnLog("Pull failed (non-conflict): %v\n%s", err, pullOutput)
-		} else {
-			common.InfoLog("Pull had conflicts, will overwrite with local state")
-			// Reset to clean state
+		outputStr := string(pullOutput)
+		// Check for different types of failures
+		if strings.Contains(outputStr, "CONFLICT") || strings.Contains(outputStr, "Automatic merge failed") {
+			common.InfoLog("Pull had conflicts, will preserve history and overwrite with local state")
+			
+			// Check for local commits before resetting
+			cherryCmd := exec.CommandContext(ctx, "git", "cherry", fmt.Sprintf("origin/%s", g.config.Branch), "HEAD")
+			cherryCmd.Dir = g.workPath
+			cherryOutput, _ := cherryCmd.Output()
+			
+			if len(cherryOutput) > 0 {
+				localCommits := strings.Count(string(cherryOutput), "\n")
+				if localCommits > 0 {
+					// Create a backup branch to preserve the local commits
+					backupBranch := fmt.Sprintf("backup-conflict-%s-%d", time.Now().Format("20060102-150405"), time.Now().Unix())
+					backupCmd := exec.CommandContext(ctx, "git", "branch", backupBranch)
+					backupCmd.Dir = g.workPath
+					if _, err := backupCmd.CombinedOutput(); err == nil {
+						common.InfoLog("AtomicPush: Preserved %d conflicted commit(s) in branch '%s'", localCommits, backupBranch)
+					}
+				}
+			}
+			
+			// Reset to clean state and pull again
 			resetCmd := exec.CommandContext(ctx, "git", "reset", "--hard", "HEAD")
 			resetCmd.Dir = g.workPath
 			resetCmd.CombinedOutput()
+			
+			// Force pull to get remote state first
+			fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin", g.config.Branch)
+			fetchCmd.Dir = g.workPath
+			fetchCmd.Env = gitEnv
+			fetchCmd.CombinedOutput()
+			
+			resetCmd = exec.CommandContext(ctx, "git", "reset", "--hard", fmt.Sprintf("origin/%s", g.config.Branch))
+			resetCmd.Dir = g.workPath
+			resetCmd.CombinedOutput()
+		} else if strings.Contains(outputStr, "no tracking information") || strings.Contains(outputStr, "diverged") {
+			// Branch has diverged or no tracking - preserve local commits before reset
+			common.WarnLog("Branch has diverged from remote, preserving local commits")
+			
+			// First fetch the remote branch
+			fetchCmd := exec.CommandContext(ctx, "git", "fetch", "origin", g.config.Branch)
+			fetchCmd.Dir = g.workPath
+			fetchCmd.Env = gitEnv
+			fetchCmd.CombinedOutput()
+			
+			// Check for local-only commits using git cherry
+			cherryCmd := exec.CommandContext(ctx, "git", "cherry", fmt.Sprintf("origin/%s", g.config.Branch), "HEAD")
+			cherryCmd.Dir = g.workPath
+			cherryOutput, _ := cherryCmd.Output()
+			
+			// If we have local commits that aren't on remote, preserve them
+			if len(cherryOutput) > 0 {
+				localCommits := strings.Count(string(cherryOutput), "\n")
+				if localCommits > 0 {
+					// Create a backup branch to preserve the local commits
+					backupBranch := fmt.Sprintf("backup-%s-%d", time.Now().Format("20060102-150405"), time.Now().Unix())
+					backupCmd := exec.CommandContext(ctx, "git", "branch", backupBranch)
+					backupCmd.Dir = g.workPath
+					if _, err := backupCmd.CombinedOutput(); err == nil {
+						common.InfoLog("AtomicPush: Preserved %d local commit(s) in branch '%s'", localCommits, backupBranch)
+						common.InfoLog("AtomicPush: To recover: git checkout %s", backupBranch)
+					}
+				}
+			}
+			
+			// Now safe to reset to remote state
+			resetCmd := exec.CommandContext(ctx, "git", "reset", "--hard", fmt.Sprintf("origin/%s", g.config.Branch))
+			resetCmd.Dir = g.workPath
+			resetCmd.CombinedOutput()
+		} else {
+			common.WarnLog("Pull failed: %v\n%s", err, outputStr)
+			// Try to continue anyway - the push might still work
 		}
 	}
 
@@ -914,8 +979,23 @@ func (g *GitSyncService) atomicPush(ctx context.Context, force bool) error {
 
 // Push is the public interface for pushing changes  
 func (g *GitSyncService) Push(ctx context.Context, message string, initiatedBy string) error {
+	// Reload config to ensure we have latest settings
+	config, err := database.GetGitSyncConfig(ctx)
+	if err != nil {
+		return fmt.Errorf("loading git config: %w", err)
+	}
+	
+	g.mu.Lock()
+	g.config = config
+	g.mu.Unlock()
+	
+	// Check if sync is enabled
+	if config == nil || !config.SyncEnabled || config.RepoURL == "" {
+		return fmt.Errorf("git sync is not configured or enabled")
+	}
+	
 	// Use force setting from config
-	force := g.config != nil && g.config.ForceOnConflict
+	force := config.ForceOnConflict
 	return g.atomicPush(ctx, force)
 }
 
@@ -1246,35 +1326,49 @@ func (g *GitSyncService) clearGitWorkingDirectory() error {
 
 // copyFromDataToGit copies inventory and docker-compose from /data to git working directory using rsync
 func (g *GitSyncService) copyFromDataToGit() error {
-	// Use rsync for inventory if it exists
-	srcInventory := filepath.Join(g.syncPath, "inventory")
-	if _, err := os.Stat(srcInventory); err == nil {
-		common.InfoLog("CopyFromDataToGit: Syncing inventory file with rsync")
-		dstInventory := filepath.Join(g.workPath, "inventory")
-		
-		// rsync -avz --delete for exact mirror
-		rsyncCmd := exec.Command("rsync", "-avz", srcInventory, dstInventory)
-		if _, err := rsyncCmd.CombinedOutput(); err != nil {
-			// Fallback to cp if rsync not available
-			common.WarnLog("rsync failed, falling back to cp: %v", err)
-			cpCmd := exec.Command("cp", "-f", srcInventory, dstInventory)
-			if cpOutput, err := cpCmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("failed to copy inventory: %w\n%s", err, cpOutput)
+	// Sync the directory containing the inventory file
+	inventoryFile := common.Env("DD_UI_INVENTORY_FILE", "ansible/inventory.yaml")
+	if inventoryFile != "" {
+		// Get the directory containing the inventory file
+		inventoryDir := filepath.Dir(inventoryFile)
+		if inventoryDir != "." && inventoryDir != "" {
+			srcInventoryDir := filepath.Join(g.syncPath, inventoryDir)
+			dstInventoryDir := filepath.Join(g.workPath, inventoryDir)
+			
+			if _, err := os.Stat(srcInventoryDir); err == nil {
+				common.InfoLog("CopyFromDataToGit: Syncing %s directory with rsync", inventoryDir)
+				
+				// Ensure destination exists
+				os.MkdirAll(dstInventoryDir, 0755)
+				
+				// rsync -avz --delete for exact mirror (trailing slash important!)
+				rsyncCmd := exec.Command("rsync", "-avz", "--delete", srcInventoryDir+"/", dstInventoryDir+"/")
+				if _, err := rsyncCmd.CombinedOutput(); err != nil {
+					// Fallback to cp if rsync not available
+					common.WarnLog("rsync failed for %s, falling back to cp: %v", inventoryDir, err)
+					
+					// Remove destination first for clean copy
+					os.RemoveAll(dstInventoryDir)
+					cpCmd := exec.Command("cp", "-r", srcInventoryDir, dstInventoryDir)
+					if cpOutput, err := cpCmd.CombinedOutput(); err != nil {
+						return fmt.Errorf("failed to copy %s: %w\n%s", inventoryDir, err, cpOutput)
+					}
+				}
+				common.InfoLog("CopyFromDataToGit: %s directory synced to %s", inventoryDir, dstInventoryDir)
+			} else {
+				// Remove from git if it doesn't exist locally
+				if _, err := os.Stat(dstInventoryDir); err == nil {
+					common.InfoLog("CopyFromDataToGit: Removing %s from git (not in %s)", inventoryDir, g.syncPath)
+					os.RemoveAll(dstInventoryDir)
+				}
 			}
-		}
-		common.InfoLog("CopyFromDataToGit: Inventory synced to %s", dstInventory)
-	} else {
-		// Remove inventory from git if it doesn't exist locally
-		dstInventory := filepath.Join(g.workPath, "inventory")
-		if _, err := os.Stat(dstInventory); err == nil {
-			common.InfoLog("CopyFromDataToGit: Removing inventory from git (not in /data)")
-			os.Remove(dstInventory)
 		}
 	}
 	
-	// Use rsync for docker-compose directory
-	srcDockerCompose := filepath.Join(g.syncPath, "docker-compose")
-	dstDockerCompose := filepath.Join(g.workPath, "docker-compose")
+	// Use rsync for docker directory (using environment variable)
+	dockerDir := common.Env("DD_UI_DOCKER_DIR", "docker-compose")
+	srcDockerCompose := filepath.Join(g.syncPath, dockerDir)
+	dstDockerCompose := filepath.Join(g.workPath, dockerDir)
 	
 	if _, err := os.Stat(srcDockerCompose); err == nil {
 		common.InfoLog("CopyFromDataToGit: Syncing docker-compose directory with rsync")
@@ -1309,35 +1403,49 @@ func (g *GitSyncService) copyFromDataToGit() error {
 
 // copyFromGitToData copies inventory and docker-compose from git working directory to /data using rsync
 func (g *GitSyncService) copyFromGitToData() error {
-	// Use rsync for inventory if it exists in git
-	srcInventory := filepath.Join(g.workPath, "inventory")
-	dstInventory := filepath.Join(g.syncPath, "inventory")
-	
-	if _, err := os.Stat(srcInventory); err == nil {
-		common.InfoLog("CopyFromGitToData: Syncing inventory file from git")
-		
-		// rsync -avz for exact copy
-		rsyncCmd := exec.Command("rsync", "-avz", srcInventory, dstInventory)
-		if _, err := rsyncCmd.CombinedOutput(); err != nil {
-			// Fallback to cp if rsync not available
-			common.WarnLog("rsync failed, falling back to cp: %v", err)
-			cpCmd := exec.Command("cp", "-f", srcInventory, dstInventory)
-			if cpOutput, err := cpCmd.CombinedOutput(); err != nil {
-				return fmt.Errorf("failed to copy inventory: %w\n%s", err, cpOutput)
+	// Sync the directory containing the inventory file
+	inventoryFile := common.Env("DD_UI_INVENTORY_FILE", "ansible/inventory.yaml")
+	if inventoryFile != "" {
+		// Get the directory containing the inventory file
+		inventoryDir := filepath.Dir(inventoryFile)
+		if inventoryDir != "." && inventoryDir != "" {
+			srcInventoryDir := filepath.Join(g.workPath, inventoryDir)
+			dstInventoryDir := filepath.Join(g.syncPath, inventoryDir)
+			
+			if _, err := os.Stat(srcInventoryDir); err == nil {
+				common.InfoLog("CopyFromGitToData: Syncing %s directory from git", inventoryDir)
+				
+				// Ensure destination exists
+				os.MkdirAll(dstInventoryDir, 0755)
+				
+				// rsync -avz --delete for exact mirror (trailing slash important!)
+				rsyncCmd := exec.Command("rsync", "-avz", "--delete", srcInventoryDir+"/", dstInventoryDir+"/")
+				if _, err := rsyncCmd.CombinedOutput(); err != nil {
+					// Fallback to cp if rsync not available
+					common.WarnLog("rsync failed for %s, falling back to cp: %v", inventoryDir, err)
+					
+					// Remove destination first for clean copy
+					os.RemoveAll(dstInventoryDir)
+					cpCmd := exec.Command("cp", "-r", srcInventoryDir, dstInventoryDir)
+					if cpOutput, err := cpCmd.CombinedOutput(); err != nil {
+						return fmt.Errorf("failed to copy %s: %w\n%s", inventoryDir, err, cpOutput)
+					}
+				}
+				common.InfoLog("CopyFromGitToData: %s directory synced to %s", inventoryDir, dstInventoryDir)
+			} else {
+				// Remove locally if it doesn't exist in git
+				if _, err := os.Stat(dstInventoryDir); err == nil {
+					common.InfoLog("CopyFromGitToData: Removing local %s (not in git)", inventoryDir)
+					os.RemoveAll(dstInventoryDir)
+				}
 			}
-		}
-		common.InfoLog("CopyFromGitToData: Inventory synced to %s", dstInventory)
-	} else {
-		// Remove inventory from /data if it doesn't exist in git
-		if _, err := os.Stat(dstInventory); err == nil {
-			common.InfoLog("CopyFromGitToData: Removing inventory from /data (not in git)")
-			os.Remove(dstInventory)
 		}
 	}
 	
-	// Use rsync for docker-compose directory
-	srcDockerCompose := filepath.Join(g.workPath, "docker-compose")
-	dstDockerCompose := filepath.Join(g.syncPath, "docker-compose")
+	// Use rsync for docker directory if it exists in git (using environment variable)
+	dockerDir := common.Env("DD_UI_DOCKER_DIR", "docker-compose")
+	srcDockerCompose := filepath.Join(g.workPath, dockerDir)
+	dstDockerCompose := filepath.Join(g.syncPath, dockerDir)
 	
 	if _, err := os.Stat(srcDockerCompose); err == nil {
 		common.InfoLog("CopyFromGitToData: Syncing docker-compose directory from git")
@@ -1460,8 +1568,8 @@ func (g *GitSyncService) Sync(ctx context.Context, initiatedBy string) error {
 	}
 }
 
-// startAutoPull starts the automatic pull timer
-func (g *GitSyncService) startAutoPull(ctx context.Context) {
+// startSyncTimer starts the automatic sync timer based on SyncMode
+func (g *GitSyncService) startSyncTimer(ctx context.Context) {
 	interval := time.Duration(g.config.PullIntervalMins) * time.Minute
 	g.syncTicker = time.NewTicker(interval)
 
@@ -1469,8 +1577,21 @@ func (g *GitSyncService) startAutoPull(ctx context.Context) {
 		for {
 			select {
 			case <-g.syncTicker.C:
-				if err := g.Pull(ctx, "system"); err != nil {
-					common.ErrorLog("Auto-pull failed: %v", err)
+				switch g.config.SyncMode {
+				case "pull":
+					if err := g.Pull(ctx, "system"); err != nil {
+						common.ErrorLog("Auto-pull failed: %v", err)
+					}
+				case "push":
+					if err := g.Push(ctx, "Auto-push from timer", "system"); err != nil {
+						common.ErrorLog("Auto-push failed: %v", err)
+					}
+				case "sync":
+					if err := g.Sync(ctx, "system"); err != nil {
+						common.ErrorLog("Auto-sync failed: %v", err)
+					}
+				default:
+					// "off" or unknown mode - do nothing
 				}
 			case <-g.stopChan:
 				return
@@ -1478,7 +1599,7 @@ func (g *GitSyncService) startAutoPull(ctx context.Context) {
 		}
 	}()
 
-	common.InfoLog("Auto-pull enabled with %d minute interval", g.config.PullIntervalMins)
+	common.InfoLog("Sync timer enabled with %d minute interval in %s mode", g.config.PullIntervalMins, g.config.SyncMode)
 }
 
 // Helper functions

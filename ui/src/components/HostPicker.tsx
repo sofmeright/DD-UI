@@ -15,11 +15,14 @@ export default function HostPicker({
           value={activeHost}
           onChange={(e) => setActiveHost(e.target.value)}
         >
-          {hosts.map(h => (
-            <option key={h.name} value={h.name} className="bg-slate-900 text-slate-200">
-              {h.name}
-            </option>
-          ))}
+          {hosts
+            .slice() // Create a copy to avoid mutating the original array
+            .sort((a, b) => a.name.localeCompare(b.name)) // Sort alphabetically
+            .map(h => (
+              <option key={h.name} value={h.name} className="bg-slate-900 text-slate-200">
+                {h.name}
+              </option>
+            ))}
         </select>
         {currentHost?.address && (
           <div className="text-slate-300 text-sm font-mono">{currentHost.address}</div>

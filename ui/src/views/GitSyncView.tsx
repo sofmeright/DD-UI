@@ -236,7 +236,9 @@ export default function GitSyncView() {
     try {
       // Store credentials separately to preserve them
       const currentToken = editedConfig.auth_token;
-      const currentKey = editedConfig.ssh_key;
+      // If SSH key field is empty but we have a configured key, use placeholder
+      const currentKey = editedConfig.ssh_key || 
+        (config.has_ssh_key && !editedConfig.ssh_key ? '***UNCHANGED***' : '');
       
       debugLog('Saving config with credentials:', {
         hasToken: !!currentToken,
@@ -267,7 +269,9 @@ export default function GitSyncView() {
         pull_interval_mins: editedConfig.pull_interval_mins || 5,
         push_on_change: true, // Always enabled by default
         // sync_path is now derived from DD_UI_IAC_ROOT on backend
-        // Only include auth fields if they have values (not the boolean flags) ...(currentToken && typeof currentToken === 'string' && { auth_token: currentToken }), ...(currentKey && typeof currentKey === 'string' && { ssh_key: currentKey }),
+        // Only include auth fields if they have values (not the boolean flags)
+        ...(currentToken && typeof currentToken === 'string' && { auth_token: currentToken }),
+        ...(currentKey && typeof currentKey === 'string' && { ssh_key: currentKey }),
       };
       
       debugLog('Config being sent to server:', {  ...configToSave, 
@@ -746,7 +750,7 @@ export default function GitSyncView() {
           </div>
         </div>
 
-        <div className="space-y-4">
+        <form onSubmit={(e) => { e.preventDefault(); handleSaveConfig(); }} className="space-y-4">
           <div className="grid grid-cols-2 gap-4">
             <div>
               <label className="block text-sm font-medium text-slate-300 mb-1">
@@ -756,6 +760,7 @@ export default function GitSyncView() {
                 type="text"
                 value={editedConfig.commit_author_name || ''}
                 onChange={(e) => setEditedConfig({ ...editedConfig, commit_author_name: e.target.value })}
+                autoComplete="name"
                 className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-slate-200"
               />
             </div>
@@ -768,6 +773,7 @@ export default function GitSyncView() {
                 type="email"
                 value={editedConfig.commit_author_email || ''}
                 onChange={(e) => setEditedConfig({ ...editedConfig, commit_author_email: e.target.value })}
+                autoComplete="email"
                 className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-slate-200"
               />
             </div>
@@ -787,6 +793,7 @@ export default function GitSyncView() {
                   setEditedConfig(prev => ({ ...prev, repo_url: newValue }));
                 }}
                 placeholder="https://github.com/username/repo.git"
+                autoComplete="url"
                 className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-slate-200"
               />
             </div>
@@ -799,6 +806,7 @@ export default function GitSyncView() {
                 value={editedConfig.branch || ''}
                 onChange={(e) => setEditedConfig({ ...editedConfig, branch: e.target.value })}
                 placeholder="main"
+                autoComplete="off"
                 className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-slate-200"
               />
             </div>
@@ -813,6 +821,7 @@ export default function GitSyncView() {
               value={(typeof editedConfig.auth_token === 'string' ? editedConfig.auth_token : '') || ''}
               onChange={(e) => setEditedConfig({ ...editedConfig, auth_token: e.target.value })}
               placeholder={config.has_token ? '••••••• (configured)' : 'Enter personal access token'}
+              autoComplete="off"
               className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded text-slate-200"
             />
             <p className="text-xs text-slate-500 mt-1">
@@ -903,6 +912,7 @@ export default function GitSyncView() {
 
           <div className="flex items-center justify-between pt-4">
             <button
+              type="button"
               onClick={handleTestConnection}
               disabled={isTestingConnection || !editedConfig.repo_url}
               className="px-4 py-2 bg-slate-700 hover:bg-slate-600 text-slate-200 rounded"
@@ -911,7 +921,7 @@ export default function GitSyncView() {
             </button>
             
             <button
-              onClick={handleSaveConfig}
+              type="submit"
               disabled={isSaving}
               className="px-4 py-2 bg-green-600 hover:bg-green-700 text-white rounded"
             >
@@ -929,7 +939,7 @@ export default function GitSyncView() {
               {testResult.message}
             </div>
           )}
-        </div>
+        </form>
       </div>
     </div>
   );

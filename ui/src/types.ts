@@ -65,6 +65,11 @@ export type IacStack = {
     rel_path: string;
     compose?: string;
     services: IacService[] | null | undefined;
+    // Fields for drift detection and enhanced features
+    drift_detected?: boolean;
+    drift_reason?: string;
+    auto_devops?: boolean;
+    has_content?: boolean;
 };
 
 
@@ -130,12 +135,15 @@ export type MergedRow = {
     ports?: any; // Raw ports data for PortLinks component
     owner?: string;
     drift?: boolean;
+    actualHost?: string;  // The actual host where this container runs
+    hostName?: string;    // Alternative host field for compatibility
 };
 
 
 export type MergedStack = {
     name: string;
     drift: "in_sync" | "drift" | "unknown";
+    driftReason?: string;    // Reason for drift detection
     iacEnabled: boolean;
     autoDevOps?: boolean;  // Separate property for Auto DevOps toggle (effective_auto_devops from API)
     pullPolicy?: string;
@@ -144,6 +152,7 @@ export type MergedStack = {
     rows: MergedRow[];
     hasIac: boolean;
     hasContent?: boolean;
+    iacId?: number;          // IaC record ID for operations
     scopeKind?: string;  // 'host' or 'group'
     scopeName?: string;  // The host or group name
     actualHost?: string;  // The actual physical host where containers are running (for Docker API calls)
